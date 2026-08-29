@@ -8,6 +8,18 @@ from integrations import plex as plex_api
 from integrations.imports import helpers
 
 ERROR_TITLE = "\n\n\n Couldn't import the following media: \n\n"
+IMPORT_COUNT_METRIC_KEYS = frozenset(
+    {
+        "created",
+        "updated",
+        "skipped",
+        "skipped_missing_ids",
+        "skipped_existing",
+        "skipped_unknown_type",
+        "skipped_other_user",
+        "music_unique_tracks",
+    },
+)
 GOODREADS_IMPORT_TASK_NAME = "Import from Goodreads"
 LEGACY_GOODREADS_IMPORT_TASK_NAMES = (
     "Import from GoodReads",
@@ -40,6 +52,31 @@ def _coerce_uploaded_file(file):
         return BytesIO(file)
     msg = f"Unsupported uploaded file payload type: {type(file)!r}"
     raise TypeError(msg)
+
+
+def import_run_counts(imported_counts):
+    """Return ``(created_count, updated_count)`` for an ``ImportRun`` row."""
+    created = imported_counts.get("created")
+    updated = imported_counts.get("updated")
+    if created is not None or updated is not None:
+        return created or 0, updated or 0
+    media_total = sum(
+        count
+        for key, count in imported_counts.items()
+        if key not in IMPORT_COUNT_METRIC_KEYS and isinstance(count, int)
+    )
+    return media_total, 0
+
+
+def has_imported_media(imported_counts):
+    """Return whether an importer run changed any media rows."""
+    created, updated = import_run_counts(imported_counts)
+    if (
+        imported_counts.get("created") is not None
+        or imported_counts.get("updated") is not None
+    ):
+        return created + updated > 0
+    return any(imported_counts.values())
 
 
 def format_media_type_display(count, media_type):
@@ -106,6 +143,7 @@ def format_import_message(imported_counts, warning_messages=None):
     metric_mappings = [
         ("created", "created"),
         ("updated", "updated"),
+        ("skipped", "skipped (unchanged)"),
         ("skipped_missing_ids", "skipped (missing IDs)"),
         ("skipped_existing", "skipped (existing)"),
         ("skipped_unknown_type", "skipped (unknown type)"),

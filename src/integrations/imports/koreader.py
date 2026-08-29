@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from collections import defaultdict
 from datetime import UTC, datetime
 from difflib import SequenceMatcher
+from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +34,7 @@ TITLE_MATCH_THRESHOLD = 0.72
 BOOK_METADATA_PROVIDER_ORDER = (
     Sources.HARDCOVER.value,
     Sources.OPENLIBRARY.value,
+    Sources.GOOGLEBOOKS.value,
 )
 DOCUMENT_HASH_RE = re.compile(r"^[a-f0-9]{32}$")
 MILLIS_TIMESTAMP_THRESHOLD = 1_000_000_000_000
@@ -206,7 +207,13 @@ class KoreaderImporter:
 
     def import_data(self):
         """Import linked documents and optionally discover new ones."""
-        imported_counts = defaultdict(int)
+        self.account.refresh_from_db()
+        imported_counts: dict[str, int] = {
+            "created": 0,
+            "updated": 0,
+            "skipped": 0,
+            MediaTypes.BOOK.value: 0,
+        }
         self._library_items = self._build_library_index()
         links_by_hash = {
             link.document_hash: link
@@ -270,14 +277,21 @@ class KoreaderImporter:
                 )
                 continue
 
-            media = self._upsert_book(entry, document_hash, percentage)
-            if media:
-                imported_counts[MediaTypes.BOOK.value] += 1
-                if document_hash not in links_by_hash:
-                    links_by_hash[document_hash] = KoreaderDocumentLink.objects.get(
-                        user=self.user,
-                        document_hash=document_hash,
-                    )
+            result = self._upsert_book(entry, document_hash, percentage)
+            if result is None:
+                imported_counts["skipped"] += 1
+                continue
+            _media, created = result
+            imported_counts[MediaTypes.BOOK.value] += 1
+            if created:
+                imported_counts["created"] += 1
+            else:
+                imported_counts["updated"] += 1
+            if document_hash not in links_by_hash:
+                links_by_hash[document_hash] = KoreaderDocumentLink.objects.get(
+                    user=self.user,
+                    document_hash=document_hash,
+                )
 
         self.account.last_sync_at = timezone.now()
         self.account.connection_broken = False
@@ -403,7 +417,7 @@ class KoreaderImporter:
         progress_time = self._extract_timestamp(entry)
         existing = (
             app.models.Book.objects.filter(user=self.user, item=item)
-            .only("start_date", "end_date")
+            .only("progress", "status", "start_date", "end_date")
             .first()
         )
         existing_start = existing.start_date if existing else None
@@ -416,7 +430,15 @@ class KoreaderImporter:
             status = Status.IN_PROGRESS.value
             end_date = None
 
-        media, _ = app.models.Book.objects.update_or_create(
+        if existing and self._book_progress_unchanged(
+            existing,
+            progress_value,
+            status,
+            end_date,
+        ):
+            return None
+
+        media, _created = app.models.Book.objects.update_or_create(
             user=self.user,
             item=item,
             defaults={
@@ -426,7 +448,14 @@ class KoreaderImporter:
                 "end_date": end_date,
             },
         )
-        return media
+        return media, existing is None
+
+    def _book_progress_unchanged(self, existing, progress_value, status, end_date):
+        return (
+            existing.progress == progress_value
+            and existing.status == status
+            and existing.end_date == end_date
+        )
 
     def _resolve_item(self, title: str, authors: list[str]):
         existing_item = self._find_existing_library_item(title, authors)
@@ -453,11 +482,14 @@ class KoreaderImporter:
 
     def _fetch_page_count(self, item):
         try:
-            metadata = services.get_media_metadata(
-                item.media_type,
-                item.media_id,
-                item.source,
-            )
+            with services.interactive_request_scope():
+                metadata = services.get_media_metadata(
+                    item.media_type,
+                    item.media_id,
+                    item.source,
+                )
+        except services.ProviderAPIError:
+            return None
         except Exception:
             return None
         pages = metadata.get("max_progress") or (metadata.get("details") or {}).get(
@@ -536,35 +568,48 @@ class KoreaderImporter:
         queries.append(title)
 
         best_tier, best_result = 0, None
+        last_error = None
+        any_success = False
         seen = set()
         for provider_source in BOOK_METADATA_PROVIDER_ORDER:
+            provider_failed = False
             for query in queries:
                 normalized_query = query.strip()
                 if not normalized_query or (provider_source, normalized_query) in seen:
                     continue
                 seen.add((provider_source, normalized_query))
-                tier, result = self._match_provider_query(
-                    provider_source,
-                    normalized_query,
-                    title,
-                    authors,
-                )
+                try:
+                    with services.interactive_request_scope():
+                        tier, result = self._match_provider_query(
+                            provider_source,
+                            normalized_query,
+                            title,
+                            authors,
+                        )
+                except services.ProviderAPIError as error:
+                    last_error = error
+                    provider_failed = True
+                    break
+                any_success = True
                 if tier > best_tier:
                     best_tier, best_result = tier, result
                     if best_tier == 3:  # noqa: PLR2004
                         return best_result
+            if provider_failed:
+                continue
+            if best_tier >= 2:  # noqa: PLR2004
+                break
+
+        if best_result is None and not any_success and last_error is not None:
+            logger.warning(
+                "KOReader metadata search failed for %r: %s",
+                title,
+                exception_summary(last_error),
+            )
         return best_result
 
     def _match_provider_query(self, provider_source, query, title, authors):
-        try:
-            response = services.search(MediaTypes.BOOK.value, query, 1, provider_source)
-        except Exception as error:
-            logger.debug(
-                "KOReader metadata search failed provider=%s error=%s",
-                provider_source,
-                exception_summary(error),
-            )
-            return 0, None
+        response = services.search(MediaTypes.BOOK.value, query, 1, provider_source)
 
         results = response.get("results", []) if isinstance(response, dict) else []
         best_tier, best_result = 0, None
@@ -578,6 +623,15 @@ class KoreaderImporter:
                     str(media_id),
                     provider_source,
                 )
+            except services.ProviderAPIError as error:
+                if error.status_code == HTTPStatus.TOO_MANY_REQUESTS:
+                    raise
+                logger.debug(
+                    "KOReader metadata fetch failed provider=%s error=%s",
+                    provider_source,
+                    exception_summary(error),
+                )
+                continue
             except Exception as error:
                 logger.debug(
                     "KOReader metadata fetch failed provider=%s error=%s",

@@ -52,6 +52,8 @@ from integrations.tasks._import_helpers import (
     _coerce_uploaded_file,
     format_import_message,
     format_watchlist_sync_message,
+    has_imported_media,
+    import_run_counts,
 )
 from integrations.tasks._plex_collection import update_collection_metadata_from_plex
 
@@ -100,9 +102,12 @@ def import_media(
         )
         raise
 
+    created_count, updated_count = import_run_counts(imported_counts)
     ImportRun.objects.filter(id=import_run.id).update(
         status=ImportRun.Status.COMPLETED,
-        created_count=sum(imported_counts.values()),
+        created_count=created_count,
+        updated_count=updated_count,
+        skipped_count=imported_counts.get("skipped", 0),
         finished_at=timezone.now(),
     )
 
@@ -111,7 +116,7 @@ def import_media(
     # landed. Recurring importers poll on a 2-hour schedule and usually import
     # nothing; firing an unscoped global reload each time was re-walking the whole
     # library (and holding the single celery-queue worker) for no reason.
-    if any(imported_counts.values()):
+    if has_imported_media(imported_counts):
         events.tasks.reload_calendar.delay()
     else:
         logger.info(

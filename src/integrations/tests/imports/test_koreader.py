@@ -6,6 +6,7 @@ from django.contrib.auth import get_user_model
 from django.test import Client, TestCase
 
 from app.models import Book, Item, MediaTypes, Sources, Status
+from app.providers import services
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError
 from integrations.imports.koreader import (
@@ -13,12 +14,16 @@ from integrations.imports.koreader import (
     KoreaderClient,
     KoreaderImporter,
 )
+from integrations.imports.koreader import (
+    importer as koreader_importer,
+)
 from integrations.koreader_links import (
     get_document_hash_for_item,
     normalize_document_hash,
     save_document_link,
 )
-from integrations.models import KoreaderAccount, KoreaderDocumentLink
+from integrations.models import ImportRun, KoreaderAccount, KoreaderDocumentLink
+from integrations.tasks._media_imports import import_media
 
 DOCUMENT_HASH = "0b229176d4e8db7f6d2b5a4952368d7a"
 
@@ -117,10 +122,102 @@ class KoreaderImporterTests(TestCase):
         counts, warnings = KoreaderImporter(self.user).import_data()
 
         self.assertEqual(counts.get(MediaTypes.BOOK.value), 1)
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(counts["created"], 0)
         self.assertEqual(warnings, "")
         media = Book.objects.get(user=self.user, item=self.item)
         self.assertEqual(media.status, Status.IN_PROGRESS.value)
         self.assertEqual(media.progress, 200)
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_resync_with_unchanged_progress_counts_as_skipped(
+        self,
+        mock_progress,
+        mock_probe,
+    ):
+        mock_probe.return_value = False
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 0.5,
+            "timestamp": 1_700_000_000,
+        }
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=200,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts.get(MediaTypes.BOOK.value), 0)
+        self.assertEqual(counts["created"], 0)
+        self.assertEqual(counts["updated"], 0)
+        self.assertEqual(counts["skipped"], 1)
+        self.assertEqual(warnings, "")
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_resyncing_linked_book_counts_as_update(self, mock_progress, mock_probe):
+        mock_probe.return_value = False
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 0.75,
+            "timestamp": 1_700_000_100,
+        }
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=100,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts.get(MediaTypes.BOOK.value), 1)
+        self.assertEqual(counts["created"], 0)
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(warnings, "")
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_import_run_records_created_and_updated_counts(self, mock_progress, mock_probe):
+        mock_probe.return_value = False
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=100,
+        )
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 0.75,
+            "timestamp": 1_700_000_100,
+        }
+
+        import_media(koreader_importer, None, self.user.id, "new")
+
+        run = ImportRun.objects.get(user=self.user, source="koreader")
+        self.assertEqual(run.status, ImportRun.Status.COMPLETED)
+        self.assertEqual(run.created_count, 0)
+        self.assertEqual(run.updated_count, 1)
+        self.assertEqual(run.skipped_count, 0)
 
     @patch("integrations.imports.koreader.KoreaderClient.list_documents")
     @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
@@ -142,7 +239,9 @@ class KoreaderImporterTests(TestCase):
 
         counts, warnings = KoreaderImporter(self.user).import_data()
 
-        self.assertEqual(counts, {})
+        self.assertEqual(counts.get(MediaTypes.BOOK.value), 0)
+        self.assertEqual(counts.get("created"), 0)
+        self.assertEqual(counts.get("updated"), 0)
         self.assertIn("link it on the book track modal", warnings)
         mock_progress.assert_not_called()
 
@@ -173,6 +272,8 @@ class KoreaderImporterTests(TestCase):
         counts, warnings = KoreaderImporter(self.user).import_data()
 
         self.assertEqual(counts.get(MediaTypes.BOOK.value), 1)
+        self.assertEqual(counts["created"], 0)
+        self.assertEqual(counts["updated"], 1)
         self.assertEqual(warnings, "")
         self.assertTrue(
             KoreaderDocumentLink.objects.filter(
@@ -184,6 +285,80 @@ class KoreaderImporterTests(TestCase):
         media = Book.objects.get(user=self.user, item=self.item)
         self.assertEqual(media.status, Status.COMPLETED.value)
         self.assertEqual(media.progress, 400)
+
+    @patch("integrations.imports.koreader.services.get_media_metadata")
+    @patch("integrations.imports.koreader.services.search")
+    @patch("integrations.imports.koreader.KoreaderClient.list_documents")
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    def test_provider_rate_limit_falls_back_to_open_library(
+        self,
+        mock_probe,
+        mock_list,
+        mock_search,
+        mock_metadata,
+    ):
+        account = KoreaderAccount.objects.get(user=self.user)
+        account.create_missing = True
+        account.save(update_fields=["create_missing"])
+        Book.objects.filter(user=self.user).delete()
+        self.item.delete()
+
+        new_hash = "a" * 32
+        mock_probe.return_value = True
+        mock_list.return_value = [
+            {
+                "document": new_hash,
+                "percentage": 0.5,
+                "title": "The Left Hand of Darkness",
+                "authors": "Ursula K. Le Guin",
+                "timestamp": 1_700_000_000,
+            },
+        ]
+
+        def search(_media_type, query, _page, source):
+            if source == Sources.HARDCOVER.value:
+                raise services.ProviderAPIError(
+                    Sources.HARDCOVER.value,
+                    Exception("rate limited"),
+                )
+            if source == Sources.OPENLIBRARY.value:
+                return {
+                    "results": [
+                        {
+                            "media_id": "OL123W",
+                            "title": "The Left Hand of Darkness",
+                        },
+                    ],
+                }
+            return {"results": []}
+
+        mock_search.side_effect = search
+        mock_metadata.return_value = {
+            "title": "The Left Hand of Darkness",
+            "image": "https://example.com/cover.jpg",
+            "details": {"authors": [{"name": "Ursula K. Le Guin"}]},
+            "max_progress": 300,
+        }
+
+        importer = KoreaderImporter(self.user)
+        importer.enable_provider_enrichment = True
+        counts, warnings = importer.import_data()
+
+        self.assertEqual(counts.get(MediaTypes.BOOK.value), 1)
+        self.assertEqual(counts["created"], 1)
+        self.assertEqual(counts["updated"], 0)
+        self.assertEqual(warnings, "")
+        item = Item.objects.get(
+            media_id="OL123W",
+            source=Sources.OPENLIBRARY.value,
+        )
+        self.assertTrue(
+            KoreaderDocumentLink.objects.filter(
+                user=self.user,
+                document_hash=new_hash,
+                item=item,
+            ).exists(),
+        )
 
     @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
     @patch("integrations.imports.koreader.KoreaderClient.get_progress")
@@ -223,7 +398,9 @@ class KoreaderImporterTests(TestCase):
 
         counts, warnings = KoreaderImporter(self.user).import_data()
 
-        self.assertEqual(counts, {})
+        self.assertEqual(counts.get(MediaTypes.BOOK.value), 0)
+        self.assertEqual(counts.get("created"), 0)
+        self.assertEqual(counts.get("updated"), 0)
         self.assertEqual(warnings, "")
         mock_progress.assert_not_called()
 
