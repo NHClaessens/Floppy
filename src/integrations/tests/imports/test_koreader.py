@@ -204,6 +204,66 @@ class KoreaderImporterTests(TestCase):
         self.assertIn("bad creds", account.last_error_message)
 
 
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_skips_finished_linked_books_when_enabled(self, mock_progress, mock_probe):
+        mock_probe.return_value = False
+        KoreaderAccount.objects.filter(user=self.user).update(skip_finished_books=True)
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.COMPLETED.value,
+            progress=400,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts, {})
+        self.assertEqual(warnings, "")
+        mock_progress.assert_not_called()
+
+    @patch("integrations.views.tasks.import_koreader.delay")
+    @patch("integrations.views._validate_koreader_connection")
+    def test_settings_updates_account_options(self, mock_validate, mock_delay):
+        user = get_user_model().objects.create_user(
+            username="koreader-settings",
+            password="pass",
+        )
+        client = Client()
+        client.force_login(user)
+        KoreaderAccount.objects.create(
+            user=user,
+            server_url="https://kosync.example.com",
+            username="reader",
+            auth_key=helpers.encrypt("abc"),
+            verify_ssl=True,
+            create_missing=False,
+            skip_finished_books=True,
+        )
+
+        response = client.post(
+            "/import/koreader/settings",
+            {
+                "server_url": "https://kosync2.example.com",
+                "username": "reader2",
+                "verify_ssl": "on",
+                "create_missing": "on",
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        account = KoreaderAccount.objects.get(user=user)
+        self.assertEqual(account.server_url, "https://kosync2.example.com")
+        self.assertEqual(account.username, "reader2")
+        self.assertTrue(account.create_missing)
+        self.assertFalse(account.skip_finished_books)
+        self.assertTrue(account.verify_ssl)
+
+
 class KoreaderViewTests(TestCase):
     """Validate KOReader connect/disconnect views."""
 

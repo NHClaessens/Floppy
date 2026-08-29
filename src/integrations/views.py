@@ -2010,14 +2010,28 @@ def import_storyteller(request):
 KOREADER_IMPORT_TASK_NAME = "Import from KOReader"
 
 
+def _koreader_options_from_post(post):
+    """Read KOReader account toggles from a form POST."""
+    return {
+        "verify_ssl": post.get("verify_ssl") == "on",
+        "create_missing": post.get("create_missing") == "on",
+        "skip_finished_books": post.get("skip_finished_books") == "on",
+    }
+
+
+def _validate_koreader_connection(server_url, username, auth_key, verify_ssl):
+    """Verify credentials against the sync server or raise."""
+    client = KoreaderClient(server_url, username, auth_key, verify_ssl=verify_ssl)
+    client.auth()
+
+
 @require_POST
 def koreader_connect(request):
     """Connect a KOReader sync server account."""
     server_url = request.POST.get("server_url", "").strip().rstrip("/")
     username = request.POST.get("username", "").strip()
     password = request.POST.get("password", "")
-    verify_ssl = request.POST.get("verify_ssl") == "on"
-    create_missing = request.POST.get("create_missing") == "on"
+    options = _koreader_options_from_post(request.POST)
     mode = request.POST.get("mode", "new")
     frequency = request.POST.get("frequency", "once")
     import_time = request.POST.get("time", "00:00")
@@ -2027,9 +2041,13 @@ def koreader_connect(request):
         return redirect("import_data")
 
     auth_key = KoreaderClient.password_to_auth_key(password)
-    client = KoreaderClient(server_url, username, auth_key, verify_ssl=verify_ssl)
     try:
-        client.auth()
+        _validate_koreader_connection(
+            server_url,
+            username,
+            auth_key,
+            options["verify_ssl"],
+        )
     except KoreaderAuthError as exc:
         messages.error(request, str(exc))
         return redirect("import_data")
@@ -2046,8 +2064,7 @@ def koreader_connect(request):
             "server_url": server_url,
             "username": username,
             "auth_key": helpers.encrypt(auth_key),
-            "verify_ssl": verify_ssl,
-            "create_missing": create_missing,
+            **options,
             "connection_broken": False,
             "last_error_message": "",
         },
@@ -2068,6 +2085,74 @@ def koreader_connect(request):
         )
         tasks.import_koreader.delay(user_id=request.user.id, mode=mode)
         messages.success(request, "Connected to KOReader. Import scheduled.")
+    return redirect("import_data")
+
+
+@require_POST
+def koreader_settings(request):
+    """Update KOReader connection and sync options."""
+    account = getattr(request.user, "koreader_account", None)
+    if not account:
+        messages.error(request, "Connect KOReader before changing settings.")
+        return redirect("import_data")
+
+    server_url = request.POST.get("server_url", "").strip().rstrip("/")
+    username = request.POST.get("username", "").strip()
+    password = request.POST.get("password", "")
+    options = _koreader_options_from_post(request.POST)
+
+    if not server_url or not username:
+        messages.error(request, "Server URL and username are required.")
+        return redirect("import_data")
+
+    if password:
+        auth_key = KoreaderClient.password_to_auth_key(password)
+    else:
+        try:
+            auth_key = helpers.decrypt_or_raise(account.auth_key)
+        except helpers.MediaImportError as exc:
+            messages.error(request, str(exc))
+            return redirect("import_data")
+
+    try:
+        _validate_koreader_connection(
+            server_url,
+            username,
+            auth_key,
+            options["verify_ssl"],
+        )
+    except KoreaderAuthError as exc:
+        messages.error(request, str(exc))
+        return redirect("import_data")
+    except KoreaderClientError as exc:
+        messages.error(request, f"Could not reach KOReader sync server: {exc}")
+        return redirect("import_data")
+    except requests.RequestException as exc:
+        messages.error(request, f"Could not reach KOReader sync server: {exc}")
+        return redirect("import_data")
+
+    account.server_url = server_url
+    account.username = username
+    account.auth_key = helpers.encrypt(auth_key)
+    account.verify_ssl = options["verify_ssl"]
+    account.create_missing = options["create_missing"]
+    account.skip_finished_books = options["skip_finished_books"]
+    account.connection_broken = False
+    account.last_error_message = ""
+    account.save(
+        update_fields=[
+            "server_url",
+            "username",
+            "auth_key",
+            "verify_ssl",
+            "create_missing",
+            "skip_finished_books",
+            "connection_broken",
+            "last_error_message",
+            "updated_at",
+        ],
+    )
+    messages.success(request, "KOReader settings saved.")
     return redirect("import_data")
 
 

@@ -218,8 +218,10 @@ class KoreaderImporter:
         documents: list[dict[str, Any]] = []
         seen_hashes: set[str] = set()
 
-        for document_hash in links_by_hash:
+        for document_hash, link in links_by_hash.items():
             seen_hashes.add(document_hash)
+            if self._should_skip_finished_link(link):
+                continue
             try:
                 progress = self.client.get_progress(document_hash)
             except KoreaderAuthError as error:
@@ -301,6 +303,15 @@ class KoreaderImporter:
                 "updated_at",
             ],
         )
+
+    def _should_skip_finished_link(self, link: KoreaderDocumentLink) -> bool:
+        if not self.account.skip_finished_books:
+            return False
+        return app.models.Book.objects.filter(
+            user=self.user,
+            item=link.item,
+            status=Status.COMPLETED.value,
+        ).exists()
 
     def _has_match_metadata(self, entry: dict[str, Any]) -> bool:
         title, authors = self._extract_title_authors(entry)

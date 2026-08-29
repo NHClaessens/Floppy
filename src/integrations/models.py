@@ -885,6 +885,10 @@ class KoreaderAccount(models.Model):
         default=False,
         help_text="Create Floppy book entries when KOReader documents match providers",
     )
+    skip_finished_books = models.BooleanField(
+        default=True,
+        help_text="Skip progress fetches for books already marked completed in Floppy",
+    )
     finished_threshold = models.FloatField(
         default=0.95,
         help_text="Reading progress fraction (0-1) at which a book is marked read",

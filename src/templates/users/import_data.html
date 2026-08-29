@@ -1336,6 +1336,49 @@
               </div>
             {% endif %}
             <div class="space-y-3">
+              <form method="post" action="{% url 'koreader_settings' %}" class="space-y-3 border border-gray-600 rounded-md p-3">
+                {% csrf_token %}
+                <p class="text-sm font-medium text-[var(--color-text-secondary)]">Settings</p>
+                <div>
+                  <label class="block text-sm text-[var(--color-text-muted)] mb-2">Server URL</label>
+                  <input type="url" name="server_url" required
+                         value="{{ koreader_account.server_url }}"
+                         class="w-full py-2 px-3 bg-[var(--color-surface)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:border-indigo-500 focus:outline-none focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                </div>
+                <div>
+                  <label class="block text-sm text-[var(--color-text-muted)] mb-2">Username</label>
+                  <input type="text" name="username" required autocomplete="username"
+                         value="{{ koreader_account.username }}"
+                         class="w-full py-2 px-3 bg-[var(--color-surface)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:border-indigo-500 focus:outline-none focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                </div>
+                <div>
+                  <label class="block text-sm text-[var(--color-text-muted)] mb-2">Password</label>
+                  <input type="password" name="password" autocomplete="current-password"
+                         placeholder="Leave blank to keep current password"
+                         class="w-full py-2 px-3 bg-[var(--color-surface)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:border-indigo-500 focus:outline-none focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                </div>
+                <label class="flex items-center text-sm text-[var(--color-text-secondary)]">
+                  <input type="checkbox" name="verify_ssl"
+                         {% if koreader_account.verify_ssl %}checked{% endif %}
+                         class="mr-2 rounded bg-[var(--color-surface)] border-gray-600 text-indigo-600 focus:outline-none focus:ring-indigo-500 focus:ring-offset-0">
+                  Verify TLS certificate
+                </label>
+                <label class="flex items-center text-sm text-[var(--color-text-secondary)]">
+                  <input type="checkbox" name="create_missing"
+                         {% if koreader_account.create_missing %}checked{% endif %}
+                         class="mr-2 rounded bg-[var(--color-surface)] border-gray-600 text-indigo-600 focus:outline-none focus:ring-indigo-500 focus:ring-offset-0">
+                  Add matched books that are not already in my library
+                </label>
+                <label class="flex items-center text-sm text-[var(--color-text-secondary)]">
+                  <input type="checkbox" name="skip_finished_books"
+                         {% if koreader_account.skip_finished_books %}checked{% endif %}
+                         class="mr-2 rounded bg-[var(--color-surface)] border-gray-600 text-indigo-600 focus:outline-none focus:ring-indigo-500 focus:ring-offset-0">
+                  Skip books already marked completed (fewer server requests)
+                </label>
+                <button type="submit" class="w-full px-4 py-2 text-sm rounded-md transition-colors cursor-pointer bg-[var(--color-surface-strong)] text-[var(--color-text)] border border-gray-600 hover:bg-[var(--color-surface-hover)]">
+                  Save settings
+                </button>
+              </form>
               <form method="post" action="{% url 'import_koreader' %}">
                 {% csrf_token %}
                 <input type="hidden" name="frequency" x-model="importFrequency">
@@ -1389,6 +1432,11 @@
                 <input type="checkbox" name="create_missing"
                        class="mr-2 rounded bg-[var(--color-surface)] border-gray-600 text-indigo-600 focus:outline-none focus:ring-indigo-500 focus:ring-offset-0">
                 Add matched books that are not already in my library
+              </label>
+              <label class="flex items-center text-sm text-[var(--color-text-secondary)]">
+                <input type="checkbox" name="skip_finished_books" checked
+                       class="mr-2 rounded bg-[var(--color-surface)] border-gray-600 text-indigo-600 focus:outline-none focus:ring-indigo-500 focus:ring-offset-0">
+                Skip books already marked completed (fewer server requests)
               </label>
               <button type="submit"
                       class="w-full px-4 py-2 text-sm rounded-md transition-colors cursor-pointer bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"

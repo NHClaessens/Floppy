@@ -120,6 +120,11 @@ urlpatterns = [
         views.koreader_disconnect,
         name="koreader_disconnect",
     ),
+    path(
+        "import/koreader/settings",
+        views.koreader_settings,
+        name="koreader_settings",
+    ),
     path("import/koreader", views.import_koreader, name="import_koreader"),
     path("import/stremio/connect", views.stremio_connect, name="stremio_connect"),
     path(
