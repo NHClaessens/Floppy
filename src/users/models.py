@@ -1739,6 +1739,7 @@ class User(AbstractUser):
                 "Import from Storyteller",
                 "Import from Storyteller (Recurring)",
             ],
+            "koreader": ["Import from KOReader"],
             "pocketcasts": [
                 "Import from Pocket Casts",
                 "Import from Pocket Casts (Recurring)",

@@ -832,6 +832,20 @@ def _render_standard_track_modal(
         "collection_tab_available": False,
         "collection_context": None,
     }
+    koreader_account = getattr(request.user, "koreader_account", None)
+    context["show_koreader_document_field"] = bool(
+        media_type == MediaTypes.BOOK.value
+        and koreader_account
+        and koreader_account.is_connected,
+    )
+    context["koreader_document_id"] = ""
+    if context["show_koreader_document_field"] and metadata_item:
+        from integrations.koreader_links import get_document_hash_for_item
+
+        context["koreader_document_id"] = get_document_hash_for_item(
+            request.user,
+            metadata_item,
+        )
     if media_type == MediaTypes.EPISODE.value and episode_number is not None:
         context["collection_tab_available"] = True
         context["collection_context"] = build_collection_modal_context(

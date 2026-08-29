@@ -537,6 +537,15 @@ def import_storyteller_recurring(user_id):
     return import_media(storyteller.importer, None, user_id, "new")
 
 
+@shared_task(name="Import from KOReader")
+def import_koreader(user_id, mode="new", username=None):
+    """Celery task for importing book reading progress from KOReader."""
+    del username
+    from integrations.imports import koreader
+
+    return import_media(koreader.importer, None, user_id, mode)
+
+
 def _run_stremio_import(user_id, mode, *, on_cache_error):
     """Serialize imports for one Stremio account."""
     lock_key = f"stremio_import_lock_{user_id}"

@@ -265,6 +265,29 @@ def media_save(request):
                     media.start_rewatch()
         else:
             media = form.save()
+        if media_type == MediaTypes.BOOK.value and "koreader_document_id" in request.POST:
+            from django.db import IntegrityError
+
+            from integrations.koreader_links import (
+                normalize_document_hash,
+                save_document_link,
+            )
+
+            raw_hash = request.POST.get("koreader_document_id", "")
+            normalized = normalize_document_hash(raw_hash)
+            if raw_hash.strip() and normalized is None:
+                messages.error(
+                    request,
+                    "KOReader document ID must be a 32-character hexadecimal hash.",
+                )
+            else:
+                try:
+                    save_document_link(request.user, media.item, normalized or "")
+                except IntegrityError:
+                    messages.error(
+                        request,
+                        "That KOReader document ID is already linked to another book.",
+                    )
         BasicMedia.objects.annotate_max_progress([media], media_type)
         image_url = form.cleaned_data.get("image_url")
         if image_url and media.item.image != image_url:

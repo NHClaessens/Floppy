@@ -52,6 +52,7 @@ from integrations.tasks._media_imports import (
     import_imdb,
     import_jellyfin_playback_reporting,
     import_kitsu,
+    import_koreader,
     import_mal,
     import_mdblist,
     import_media,

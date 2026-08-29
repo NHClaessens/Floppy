@@ -862,6 +862,96 @@ class StorytellerAccount(models.Model):
         return bool(self.server_url and self.auth_token) and not self.connection_broken
 
 
+class KoreaderAccount(models.Model):
+    """Store KOReader sync server connection settings and sync state for a user."""
+
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="koreader_account",
+    )
+    server_url = models.URLField(help_text="KOReader sync server URL")
+    username = models.CharField(max_length=150)
+    auth_key = models.TextField(
+        blank=True,
+        default="",
+        help_text="Encrypted MD5 hash of the KOReader sync password",
+    )
+    verify_ssl = models.BooleanField(
+        default=True,
+        help_text="Verify TLS certificates when connecting to the sync server",
+    )
+    create_missing = models.BooleanField(
+        default=False,
+        help_text="Create Floppy book entries when KOReader documents match providers",
+    )
+    finished_threshold = models.FloatField(
+        default=0.95,
+        help_text="Reading progress fraction (0-1) at which a book is marked read",
+    )
+    supports_document_list = models.BooleanField(null=True, blank=True)
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    connection_broken = models.BooleanField(default=False)
+    last_error_message = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        """Model options."""
+
+        verbose_name = "KOReader account"
+        verbose_name_plural = "KOReader accounts"
+
+    def __str__(self):
+        """Readable representation."""
+        return f"KoreaderAccount({self.user.username})"
+
+    @property
+    def is_connected(self):
+        """Return True when the account appears connected."""
+        return (
+            bool(self.server_url and self.username and self.auth_key)
+            and not self.connection_broken
+        )
+
+
+class KoreaderDocumentLink(models.Model):
+    """Map a KOReader document hash to a Floppy book item for a user."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="koreader_document_links",
+    )
+    document_hash = models.CharField(max_length=32, db_index=True)
+    item = models.ForeignKey(
+        "app.Item",
+        on_delete=models.CASCADE,
+        related_name="koreader_document_links",
+    )
+    linked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        """Model options."""
+
+        verbose_name = "KOReader document link"
+        verbose_name_plural = "KOReader document links"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "document_hash"],
+                name="integrations_koreaderdocumentlink_unique_user_hash",
+            ),
+            models.UniqueConstraint(
+                fields=["user", "item"],
+                name="integrations_koreaderdocumentlink_unique_user_item",
+            ),
+        ]
+
+    def __str__(self):
+        """Readable representation."""
+        return f"KoreaderDocumentLink({self.user.username}, {self.document_hash[:8]}…)"
+
+
 class StremioAccount(models.Model):
     """Store Stremio API credentials and sync state for a user."""
 

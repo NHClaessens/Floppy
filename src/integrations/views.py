@@ -58,6 +58,11 @@ from integrations.imports.audiobookshelf import (
     AudiobookshelfAuthError,
     AudiobookshelfClient,
 )
+from integrations.imports.koreader import (
+    KoreaderAuthError,
+    KoreaderClient,
+    KoreaderClientError,
+)
 from integrations.imports.radarr import RadarrClient
 from integrations.imports.sonarr import SonarrClient
 from integrations.imports.storyteller import (
@@ -84,6 +89,8 @@ from integrations.models import (
     GPodderAccount,
     JellyfinAccount,
     KoitoAccount,
+    KoreaderAccount,
+    KoreaderDocumentLink,
     LastFMAccount,
     MDBListAccount,
     PlexAccount,
@@ -1997,6 +2004,113 @@ def import_storyteller(request):
     tasks.import_storyteller.delay(user_id=request.user.id, mode="new")
     _ensure_storyteller_schedule(request.user)
     messages.info(request, "Storyteller import queued.")
+    return redirect("import_data")
+
+
+KOREADER_IMPORT_TASK_NAME = "Import from KOReader"
+
+
+@require_POST
+def koreader_connect(request):
+    """Connect a KOReader sync server account."""
+    server_url = request.POST.get("server_url", "").strip().rstrip("/")
+    username = request.POST.get("username", "").strip()
+    password = request.POST.get("password", "")
+    verify_ssl = request.POST.get("verify_ssl") == "on"
+    create_missing = request.POST.get("create_missing") == "on"
+    mode = request.POST.get("mode", "new")
+    frequency = request.POST.get("frequency", "once")
+    import_time = request.POST.get("time", "00:00")
+
+    if not server_url or not username or not password:
+        messages.error(request, "Server URL, username, and password are required.")
+        return redirect("import_data")
+
+    auth_key = KoreaderClient.password_to_auth_key(password)
+    client = KoreaderClient(server_url, username, auth_key, verify_ssl=verify_ssl)
+    try:
+        client.auth()
+    except KoreaderAuthError as exc:
+        messages.error(request, str(exc))
+        return redirect("import_data")
+    except KoreaderClientError as exc:
+        messages.error(request, f"Could not reach KOReader sync server: {exc}")
+        return redirect("import_data")
+    except requests.RequestException as exc:
+        messages.error(request, f"Could not reach KOReader sync server: {exc}")
+        return redirect("import_data")
+
+    KoreaderAccount.objects.update_or_create(
+        user=request.user,
+        defaults={
+            "server_url": server_url,
+            "username": username,
+            "auth_key": helpers.encrypt(auth_key),
+            "verify_ssl": verify_ssl,
+            "create_missing": create_missing,
+            "connection_broken": False,
+            "last_error_message": "",
+        },
+    )
+
+    if frequency == "once":
+        tasks.import_koreader.delay(user_id=request.user.id, mode=mode)
+        messages.success(request, "Connected to KOReader. Import queued.")
+    else:
+        helpers.create_import_schedule(
+            username=username,
+            request=request,
+            mode=mode,
+            frequency=frequency,
+            import_time=import_time,
+            source="KOReader",
+            extra_kwargs={"user_id": request.user.id},
+        )
+        tasks.import_koreader.delay(user_id=request.user.id, mode=mode)
+        messages.success(request, "Connected to KOReader. Import scheduled.")
+    return redirect("import_data")
+
+
+@require_POST
+def koreader_disconnect(request):
+    """Disconnect the KOReader integration."""
+    from django_celery_beat.models import PeriodicTask
+
+    PeriodicTask.objects.filter(
+        task=KOREADER_IMPORT_TASK_NAME,
+        kwargs__contains=f'"user_id": {request.user.id}',
+    ).delete()
+    KoreaderDocumentLink.objects.filter(user=request.user).delete()
+    KoreaderAccount.objects.filter(user=request.user).delete()
+    messages.info(request, "Disconnected KOReader.")
+    return redirect("import_data")
+
+
+@require_POST
+def import_koreader(request):
+    """Queue a KOReader import or update its schedule."""
+    account = getattr(request.user, "koreader_account", None)
+    if not account:
+        messages.error(request, "Connect KOReader before importing.")
+        return redirect("import_data")
+
+    mode = request.POST["mode"]
+    frequency = request.POST["frequency"]
+    import_time = request.POST["time"]
+
+    if frequency == "once":
+        tasks.import_koreader.delay(user_id=request.user.id, mode=mode)
+        messages.info(request, "KOReader import queued.")
+    else:
+        helpers.create_import_schedule(
+            username=account.username,
+            request=request,
+            mode=mode,
+            frequency=frequency,
+            import_time=import_time,
+            source="KOReader",
+            extra_kwargs={"user_id": request.user.id},
+        )
     return redirect("import_data")
 
 

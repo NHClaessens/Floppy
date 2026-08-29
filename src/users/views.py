@@ -1381,6 +1381,12 @@ def import_data(request):
     # Get Storyteller account and any in-progress device login
     storyteller_account = getattr(user, "storyteller_account", None)
     storyteller_pending = request.session.get("storyteller_pending_auth")
+    koreader_account = getattr(user, "koreader_account", None)
+    koreader_link_count = 0
+    if koreader_account:
+        from integrations.models import KoreaderDocumentLink
+
+        koreader_link_count = KoreaderDocumentLink.objects.filter(user=user).count()
 
     # Get Pocket Casts account
     pocketcasts_account = getattr(user, "pocketcasts_account", None)
@@ -1468,6 +1474,8 @@ def import_data(request):
         "audiobookshelf_poll_interval": audiobookshelf_poll_interval,
         "storyteller_account": storyteller_account,
         "storyteller_pending": storyteller_pending,
+        "koreader_account": koreader_account,
+        "koreader_link_count": koreader_link_count,
         "pocketcasts_account": pocketcasts_account,
         "gpodder_account": gpodder_account,
         "lastfm_account": lastfm_account,

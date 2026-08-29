@@ -136,6 +136,26 @@
             {% endfor %}
           {% if general_fields|length > 1 %}</div>{% endif %}
 
+          {% if show_koreader_document_field %}
+            <div class="mb-4 sm:mb-5">
+              <label class="block text-xs sm:text-sm font-medium mb-1 text-[var(--color-text-secondary)]"
+                     for="koreader_document_id">KOReader document ID</label>
+              <input type="text"
+                     id="koreader_document_id"
+                     name="koreader_document_id"
+                     value="{{ koreader_document_id }}"
+                     maxlength="32"
+                     autocapitalize="off"
+                     autocorrect="off"
+                     spellcheck="false"
+                     placeholder="32-character document hash"
+                     class="w-full p-2 bg-[var(--color-surface-strong)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)] font-mono">
+              <p class="mt-1 text-xs text-[var(--color-text-muted)]">
+                Find this in KOReader under sync settings or document info. Required on official sync servers without metadata.
+              </p>
+            </div>
+          {% endif %}
+
           {% if form.notes %}
             <div class="mb-4 sm:mb-5" x-data="{ notesOpen: false }">
               <label class="sm:hidden block text-xs font-medium mb-1 text-[var(--color-text-secondary)]">Notes</label>

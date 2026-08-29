@@ -93,6 +93,10 @@ SOURCES_CONFIG = {
         "name": "Storyteller",
         "logo": static("img/storyteller-logo.svg"),
     },
+    "koreader": {
+        "name": "KOReader",
+        "logo": static("img/koreader-logo.svg"),
+    },
     "stremio": {
         "name": "Stremio",
         "logo": static("img/stremio-logo.svg"),
