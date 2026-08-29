@@ -1763,18 +1763,12 @@ def media_details(
         music_album = getattr(current_instance, "album", None)
 
     notes_entry = None
+    notes_entries = []
     if render_secondary_only and not public_view and user_medias:
-        if (
-            current_instance
-            and current_instance.notes
-            and current_instance.notes.strip()
-        ):
-            notes_entry = current_instance
-        else:
-            for entry in user_medias:
-                if entry.notes and entry.notes.strip():
-                    notes_entry = entry
-                    break
+        notes_entries = [
+            entry for entry in user_medias if entry.notes and entry.notes.strip()
+        ]
+        notes_entry = notes_entries[0] if notes_entries else None
     elif render_secondary_only and public_notes_view and list_owner:
         public_user_medias = list(
             BasicMedia.objects.filter_media_prefetch(
@@ -1784,14 +1778,10 @@ def media_details(
                 source,
             ),
         )
-        notes_entry = next(
-            (
-                entry
-                for entry in public_user_medias
-                if entry.notes and entry.notes.strip()
-            ),
-            None,
-        )
+        notes_entries = [
+            entry for entry in public_user_medias if entry.notes and entry.notes.strip()
+        ]
+        notes_entry = notes_entries[0] if notes_entries else None
 
     if (
         render_secondary_only
@@ -2058,6 +2048,7 @@ def media_details(
         "game_lengths_pending": game_lengths_refresh_pending
         and not (game_lengths and game_lengths.get("available")),
         "notes_entry": notes_entry,
+        "notes_entries": notes_entries,
         "collection_entry": collection_entry,
         "collection_entries": collection_entries,
         "collection_stats": collection_stats,

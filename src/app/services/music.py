@@ -1591,6 +1591,70 @@ def populate_album_tracks(album: Album) -> int:
         return 0
 
 
+def sync_album_release_tracks(album: Album, release_id: str) -> int:
+    """Replace an album's tracklist with a specific MusicBrainz release's tracks.
+
+    Unlike populate_album_tracks(), this always re-fetches and rebuilds the
+    tracklist for the given release_id, regardless of tracks_populated - it's
+    the path for a user explicitly picking a pressing, not the lazy first-sync
+    path. Sets album.musicbrainz_release_id to release_id so the choice sticks.
+
+    Returns the number of tracks synced.
+    """
+    from django.core.cache import cache as django_cache
+
+    from app.providers import musicbrainz
+
+    django_cache.delete(f"musicbrainz_release_{release_id}")
+    release_data = musicbrainz.get_release(release_id)
+    sync_album_artist_credits(album, release_data)
+
+    new_image = release_data.get("image", "")
+    if new_image and new_image != settings.IMG_NONE:
+        album.image = new_image
+
+    direct_genres = _album_direct_genres(album, release_data)
+    album.genres = direct_genres
+    album.implied_genres = _album_implied_genres(direct_genres)
+
+    tracks_data = release_data.get("tracks", [])
+    Track.objects.filter(album=album).delete()
+    for track_data in tracks_data:
+        Track.objects.update_or_create(
+            album=album,
+            disc_number=track_data.get("disc_number", 1),
+            track_number=track_data.get("track_number"),
+            defaults={
+                "title": track_data.get("title", "Unknown Track"),
+                "musicbrainz_recording_id": track_data.get("recording_id"),
+                "duration_ms": track_data.get("duration_ms"),
+                "genres": _dedupe_display_values(
+                    track_data.get("genres", []) or direct_genres,
+                ),
+            },
+        )
+
+    album.musicbrainz_release_id = release_id
+    album.tracks_populated = True
+    album.save(
+        update_fields=[
+            "musicbrainz_release_id",
+            "tracks_populated",
+            "image",
+            "genres",
+            "implied_genres",
+        ],
+    )
+    _sync_album_music_item_genres(album)
+    logger.info(
+        "Synced %d tracks for album %s from release %s",
+        len(tracks_data),
+        album.title,
+        release_id,
+    )
+    return len(tracks_data)
+
+
 def prefetch_album_covers(artist: Artist, limit: int | None = 20) -> int:
     """Prefetch cover art for albums missing images.
 

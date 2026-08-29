@@ -113,9 +113,31 @@ class MusicReleaseViewTests(TestCase):
         self.assertNotContains(response, "Search editions...")
         mock_get_release.assert_called_once_with("release-1")
 
+    @patch("app.providers.musicbrainz.get_release_group_genres", return_value=[])
+    @patch("app.providers.musicbrainz.get_release")
     @patch("app.music_album_views.musicbrainz.get_release_group_releases")
-    def test_set_music_release_persists_preference(self, mock_releases):
+    def test_set_music_release_persists_preference(
+        self,
+        mock_releases,
+        mock_get_release,
+        mock_genres,
+    ):
         mock_releases.return_value = [self._release("release-1", "Original Pressing")]
+        mock_get_release.return_value = self._release(
+            "release-1",
+            "Original Pressing",
+            release_group_id="release-group",
+            tracks=[
+                {
+                    "disc_number": 1,
+                    "track_number": track_number,
+                    "title": f"Track {track_number}",
+                    "recording_id": f"rec-{track_number}",
+                    "duration_ms": 1000,
+                }
+                for track_number in range(1, 10)
+            ],
+        )
 
         response = self.client.post(
             reverse("set_music_release", kwargs={"album_id": self.album.id}),
@@ -129,6 +151,34 @@ class MusicReleaseViewTests(TestCase):
             album=self.album,
         )
         self.assertEqual(preference.release_id, "release-1")
+
+        self.album.refresh_from_db()
+        self.assertEqual(self.album.musicbrainz_release_id, "release-1")
+        self.assertEqual(Track.objects.filter(album=self.album).count(), 9)
+
+    @patch("app.providers.musicbrainz.get_release", side_effect=RuntimeError("offline"))
+    @patch("app.music_album_views.musicbrainz.get_release_group_releases")
+    def test_set_music_release_keeps_preference_when_sync_fails(
+        self,
+        mock_releases,
+        mock_get_release,
+    ):
+        mock_releases.return_value = [self._release("release-1", "Original Pressing")]
+
+        response = self.client.post(
+            reverse("set_music_release", kwargs={"album_id": self.album.id}),
+            {"release_id": "release-1", "return_url": "/music"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        preference = MusicReleasePreference.objects.get(
+            user=self.user,
+            album=self.album,
+        )
+        self.assertEqual(preference.release_id, "release-1")
+
+        self.album.refresh_from_db()
+        self.assertEqual(self.album.musicbrainz_release_id, "representative-release")
 
     @patch("app.music_album_views.musicbrainz.get_release_group_releases")
     def test_set_music_release_rejects_release_from_another_group(self, mock_releases):
@@ -147,11 +197,19 @@ class MusicReleaseViewTests(TestCase):
             ).exists(),
         )
 
+    @patch("app.providers.musicbrainz.get_release_group_genres", return_value=[])
+    @patch("app.providers.musicbrainz.get_release")
     @patch("app.music_album_views.musicbrainz.get_release_group_releases")
     def test_set_music_release_rejects_protocol_relative_return_url(
-        self, mock_releases
+        self, mock_releases, mock_get_release, mock_genres
     ):
         mock_releases.return_value = [self._release("release-1", "Original Pressing")]
+        mock_get_release.return_value = self._release(
+            "release-1",
+            "Original Pressing",
+            release_group_id="release-group",
+            tracks=[],
+        )
 
         response = self.client.post(
             reverse("set_music_release", kwargs={"album_id": self.album.id}),

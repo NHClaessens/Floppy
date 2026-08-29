@@ -490,6 +490,33 @@ html.light .theme-toggle-icon-moon {
   gap: 0.125rem;
 }
 
+.date-picker-month-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.125rem;
+}
+
+.date-picker-year-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.125rem;
+}
+
+.date-picker-month-cell {
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+}
+
+.date-picker-year-input {
+  -moz-appearance: textfield;
+}
+
+.date-picker-year-input::-webkit-outer-spin-button,
+.date-picker-year-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
 .date-picker-day-cell {
   min-width: 2.25rem;
   min-height: 2.25rem;

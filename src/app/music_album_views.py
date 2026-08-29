@@ -32,7 +32,7 @@ from app.music_views import (
 )
 from app.providers import musicbrainz
 from app.services import bulk_music_tracking
-from app.services.music import ensure_album_has_release_id
+from app.services.music import ensure_album_has_release_id, sync_album_release_tracks
 from app.track_modal_views import _track_modal_release_date_shortcut
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,25 @@ def set_music_release(request, album_id):
                 album=album,
                 defaults={"release_id": release_id},
             )
-            messages.success(request, "Release updated.")
+            try:
+                track_count = sync_album_release_tracks(album, release_id)
+            except Exception as exc:  # pragma: no cover - defensive provider boundary
+                logger.warning(
+                    "Failed to sync release %s for album %s: %s",
+                    release_id,
+                    album.id,
+                    exc,
+                )
+                messages.warning(
+                    request,
+                    "Saved your release choice, but couldn't refresh the "
+                    "tracklist from MusicBrainz.",
+                )
+            else:
+                messages.success(
+                    request,
+                    f"Release updated - synced {track_count} tracks.",
+                )
 
     return _music_release_redirect(request, album, return_url)
 

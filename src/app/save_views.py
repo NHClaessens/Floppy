@@ -392,6 +392,20 @@ def media_save(request):
                                 media_url(tv.item),
                             ),
                         )
+                if media_type in (
+                    MediaTypes.MOVIE.value,
+                    MediaTypes.TV.value,
+                    MediaTypes.SEASON.value,
+                    MediaTypes.ANIME.value,
+                ):
+                    response.write(
+                        _render_notes_section_oob(
+                            request,
+                            request.user,
+                            media.item,
+                            media,
+                        ),
+                    )
             except Exception:
                 logger.exception(
                     "Post-save enrichment failed for %s save "
@@ -695,6 +709,36 @@ def _render_season_progress_oob(related_season):
             f"Progress: {progress}</span>"
         )
     return spans
+
+
+def _render_notes_section_oob(request, user, item, instance):
+    """Render the detail notes section as an OOB swap after a watch save.
+
+    The notes section lists one block per watch (see detail_notes_section),
+    so a note edited in the track modal must be pushed back into the page
+    without a full reload.
+    """
+    return render_to_string(
+        "app/components/detail_notes_section.html",
+        {
+            "notes_entries": [
+                entry
+                for entry in instance.__class__.objects.filter(
+                    user=user, item=item
+                )
+                if entry.notes and entry.notes.strip()
+            ],
+            "media": item,
+            "user": user,
+            "public_notes_view": False,
+            "public_view": False,
+            "detail_return_url": "",
+            "detail_notes_modal_url": "",
+            "detail_notes_target_id": "",
+            "notes_section_oob": True,
+        },
+        request=request,
+    )
 
 
 def _render_track_action_oob(request, instance, return_url):

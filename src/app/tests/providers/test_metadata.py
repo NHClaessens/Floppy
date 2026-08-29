@@ -2661,10 +2661,16 @@ class Metadata(TestCase):
 
 
 class CastOrderRegressionTests(TestCase):
-    """Regression tests for issue #92 — first cast member (order=0) being dropped."""
+    """Regression tests for cast ordering (issue #92) and TMDB aggregate role shapes."""
 
-    def test_get_cast_credits_ignores_malformed_aggregate_roles(self):
-        """A malformed aggregate role must not break TV metadata processing."""
+    def test_get_cast_credits_selects_top_role_across_wrapped_and_plain(self):
+        """List-wrapped aggregate roles are a valid TMDB shape, not malformed.
+
+        get_cast_credits flattens single-element list-wrapped role dicts and
+        plain dicts into one list, then picks the highest-episode_count role
+        across both shapes. The list-wrapped role here wins because it has the
+        higher episode_count.
+        """
         credits_data = {
             "cast": [
                 {
@@ -2683,8 +2689,106 @@ class CastOrderRegressionTests(TestCase):
 
         result = tmdb.get_cast_credits(credits_data, is_aggregate=True)
 
-        self.assertEqual(result[0]["role"], "Valid Role")
-        self.assertEqual(result[0]["episode_count"], 3)
+        self.assertEqual(result[0]["role"], "Nested Role")
+        self.assertEqual(result[0]["episode_count"], 13)
+
+    def test_all_list_wrapped_roles_not_empty(self):
+        """A cast whose roles are all single-wrapped lists must still resolve a role.
+
+        Matches the real TMDB shape for shows like The Good Doctor where every
+        aggregate role element is a single-element list wrapping a dict.
+        """
+        credits_data = {
+            "cast": [
+                {
+                    "id": 1,
+                    "name": "Actor",
+                    "roles": [
+                        [{"character": "Wrapped Role", "episode_count": 4}],
+                        [{"character": "Another Role", "episode_count": 2}],
+                    ],
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "profile_path": None,
+                },
+            ],
+        }
+
+        result = tmdb.get_cast_credits(credits_data, is_aggregate=True)
+
+        self.assertEqual(result[0]["role"], "Wrapped Role")
+        self.assertEqual(result[0]["episode_count"], 6)
+
+    def test_get_cast_credits_flat_dict_roles_unchanged(self):
+        """The canonical flat-dict aggregate shape must be unaffected by flattening.
+
+        Regression guard: the list-wrapping normalization must not change the
+        output for the documented TMDB shape where every role element is a
+        plain dict. Top role by episode_count and summed episode_count must
+        match the pre-flattening behavior.
+        """
+        credits_data = {
+            "cast": [
+                {
+                    "id": 1,
+                    "name": "Actor",
+                    "roles": [
+                        {"character": "Main Role", "episode_count": 8},
+                        {"character": "Recurring Role", "episode_count": 3},
+                    ],
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "profile_path": None,
+                },
+            ],
+        }
+
+        result = tmdb.get_cast_credits(credits_data, is_aggregate=True)
+
+        self.assertEqual(result[0]["role"], "Main Role")
+        self.assertEqual(result[0]["episode_count"], 11)
+
+    def test_get_cast_credits_roles_missing_or_empty(self):
+        """A cast member with no roles must not crash and must fall back cleanly.
+
+        Covers roles absent, roles=None, and roles=[] — the aggregate branch
+        must produce a cast entry with the outer character and no episode count
+        rather than raising.
+        """
+        for roles in (None, []):
+            credits_data = {
+                "cast": [
+                    {
+                        "id": 1,
+                        "name": "Actor",
+                        "character": "Fallback Role",
+                        "roles": roles,
+                        "known_for_department": "Acting",
+                        "gender": 2,
+                        "profile_path": None,
+                    },
+                ],
+            }
+            result = tmdb.get_cast_credits(credits_data, is_aggregate=True)
+            self.assertEqual(result[0]["role"], "Fallback Role")
+            self.assertIsNone(result[0]["episode_count"])
+
+        # roles key absent entirely — must behave the same as None/[].
+        credits_data = {
+            "cast": [
+                {
+                    "id": 1,
+                    "name": "Actor",
+                    "character": "Fallback Role",
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "profile_path": None,
+                },
+            ],
+        }
+        result = tmdb.get_cast_credits(credits_data, is_aggregate=True)
+        self.assertEqual(result[0]["role"], "Fallback Role")
+        self.assertIsNone(result[0]["episode_count"])
 
     def test_get_cast_credits_order_zero_is_first(self):
         """Cast member with order=0 must sort before members with higher orders."""
@@ -2780,6 +2884,63 @@ class CastOrderRegressionTests(TestCase):
         self.assertEqual(result[0]["name"], "123")
         self.assertEqual(result[0]["known_for_department"], "789")
         self.assertEqual(result[0]["role"], "101")
+
+    def test_get_cast_credits_aggregate_roles_wrapped_in_list(self):
+        """Roles may ship as a list of lists when a credit repeats per episode.
+
+        Real TMDB aggregate_credits for the-good-doctor (71712) returns each
+        role element as a single-element list of a dict, e.g.
+        {"roles": [{"credit_id": "...", "character": "Dr. Shaun Murphy",
+                    "episode_count": 126}]}. get_cast_credits must not crash
+        on the list element and must still pick the top role by episode_count.
+        """
+        credits_data = {
+            "cast": [
+                {
+                    "id": 1,
+                    "name": "Lead",
+                    "character": "Dr. Main",
+                    "order": 0,
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "profile_path": None,
+                    "roles": [
+                        [
+                            {
+                                "credit_id": "x1",
+                                "character": "Dr. Main",
+                                "episode_count": 126,
+                            }
+                        ]
+                    ],
+                },
+                {
+                    "id": 2,
+                    "name": "Supporting",
+                    "character": "Side Role",
+                    "order": 1,
+                    "known_for_department": "Acting",
+                    "gender": 2,
+                    "profile_path": None,
+                    "roles": [
+                        [
+                            {
+                                "credit_id": "x2",
+                                "character": "Side Role",
+                                "episode_count": 12,
+                            }
+                        ]
+                    ],
+                },
+            ]
+        }
+        result = tmdb.get_cast_credits(credits_data, is_aggregate=True)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["name"], "Lead")
+        self.assertEqual(result[0]["episode_count"], 126)
+        self.assertEqual(result[0]["role"], "Dr. Main")
+        self.assertEqual(result[1]["name"], "Supporting")
+        self.assertEqual(result[1]["episode_count"], 12)
 
 
 class OpenLibraryPublishDateTests(TestCase):

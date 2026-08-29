@@ -215,8 +215,8 @@ def build_limiter_session():
 
     An in-process bucket is a worse rate limiter (each process gets its own
     budget, so the aggregate can overshoot) but a much better failure mode than
-    no outbound requests at all. The per-host adapters mounted below are already
-    in-memory, so this is the existing pattern rather than a new one.
+    no outbound requests at all. The per-host adapters mounted below share this
+    same Redis-backed pattern via _build_host_limiter_adapter().
     """
     try:
         return LimiterSession(
@@ -232,6 +232,41 @@ def build_limiter_session():
             error,
         )
         return LimiterSession(per_second=_GLOBAL_PER_SECOND)
+
+
+def _build_host_limiter_adapter(**limits):
+    """Return a per-host LimiterAdapter backed by a bucket shared across processes.
+
+    Mirrors build_limiter_session()'s RedisBucket fallback pattern, but for the
+    per-host adapters mounted below. Without this, each adapter defaults to an
+    in-memory bucket private to one process, so every gunicorn worker and
+    Celery process gets its own separate budget for the same host - the real
+    aggregate request rate becomes (process count) x the configured limit,
+    easily enough to trip a provider's actual server-side rate limit even
+    though the configured per-host limit looks conservative (#1025).
+
+    Unlike bucket_key, this bucket name is not partitioned by process role:
+    the limit represents an external provider's real ceiling, not an internal
+    fairness split, so web, interactive, and background processes must all
+    draw from the same counter for a given host.
+    """
+    try:
+        return LimiterAdapter(
+            bucket_class=RedisBucket,
+            bucket_kwargs={
+                "redis_pool": _host_limiter_redis_pool,
+                "bucket_name": _host_limiter_bucket_name,
+            },
+            **limits,
+        )
+    except Exception as error:
+        logger.warning(
+            "Redis rate-limit bucket unavailable (%s); falling back to a "
+            "per-process limiter for this host. Its provider budget is only "
+            "enforced per-process until Redis recovers and Floppy restarts.",
+            error,
+        )
+        return LimiterAdapter(**limits)
 
 
 def get_process_role():
@@ -269,8 +304,9 @@ bucket_key = f"{settings.REDIS_PREFIX}_api" if settings.REDIS_PREFIX else "api"
 
 # Background workers draw from their own, smaller bucket so bulk backfills and
 # imports can never exhaust the shared per-second budget that web requests and
-# the interactive worker rely on. Per-host adapters below are in-memory (one
-# per process), so provider-specific ceilings are unaffected by this split.
+# the interactive worker rely on. Per-host adapters below draw from one shared,
+# role-agnostic bucket instead, so provider-specific ceilings are unaffected by
+# this split.
 if PROCESS_ROLE == "background":
     bucket_key = f"{bucket_key}_background"
     _GLOBAL_PER_SECOND = 3
@@ -284,44 +320,60 @@ else:
 
 session = build_limiter_session()
 
+# Shared across every per-host adapter below: one Redis pool and one bucket
+# namespace, so nine hosts don't each open their own connection pool.
+try:
+    _host_limiter_redis_pool = get_redis_pool()
+except Exception as _host_pool_error:
+    logger.warning(
+        "Redis rate-limit pool unavailable (%s); per-host provider budgets "
+        "will fall back to a per-process limiter until Redis recovers and "
+        "Floppy restarts.",
+        _host_pool_error,
+    )
+    _host_limiter_redis_pool = None
+_host_limiter_bucket_name = (
+    f"{settings.REDIS_PREFIX}_api_hosts" if settings.REDIS_PREFIX else "api_hosts"
+)
+
 session.mount("http://", HTTPAdapter(max_retries=3))
 session.mount("https://", HTTPAdapter(max_retries=3))
 
 session.mount(
     "https://api.myanimelist.net/v2",
-    LimiterAdapter(per_minute=30),
+    _build_host_limiter_adapter(per_minute=30),
 )
 session.mount(
     "https://graphql.anilist.co",
-    LimiterAdapter(per_minute=85),
+    _build_host_limiter_adapter(per_minute=85),
 )
 session.mount(
     "https://api.igdb.com/v4",
-    LimiterAdapter(per_second=3),
+    _build_host_limiter_adapter(per_second=3),
 )
 session.mount(
     "https://api4.thetvdb.com",
-    LimiterAdapter(per_second=2),
+    _build_host_limiter_adapter(per_second=2),
 )
 session.mount(
     "https://comicvine.gamespot.com/api",
-    LimiterAdapter(per_hour=190),
+    _build_host_limiter_adapter(per_hour=190),
 )
 session.mount(
     "https://openlibrary.org",
-    LimiterAdapter(per_minute=20),
+    _build_host_limiter_adapter(per_minute=20),
 )
 session.mount(
     "https://api.hardcover.app/v1/graphql",
-    LimiterAdapter(per_minute=50),
+    _build_host_limiter_adapter(per_minute=50),
 )
 session.mount(
     "https://boardgamegeek.com/xmlapi2",
-    LimiterAdapter(per_second=2),
+    _build_host_limiter_adapter(per_second=2),
 )
 session.mount(
     "https://xbl.io/api",
-    LimiterAdapter(per_hour=120),
+    _build_host_limiter_adapter(per_hour=120),
 )
 
 

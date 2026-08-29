@@ -823,12 +823,18 @@ def episode_details(
         current_season_instance = None
         episodes_in_db = []
     else:
+        season_library_media_type = (
+            MediaTypes.ANIME.value
+            if parent_media_type == MediaTypes.ANIME.value
+            else None
+        )
         user_seasons = BasicMedia.objects.filter_media_prefetch(
             request.user,
             media_id,
             MediaTypes.SEASON.value,
             source,
             season_number=season_number,
+            library_media_type=season_library_media_type,
         )
         current_season_instance = user_seasons[0] if user_seasons else None
         episodes_in_db = (
@@ -927,17 +933,16 @@ def episode_details(
     )
 
     # Surface the note from the most recent watch that has one, the same way
-    # the movie/season pages do (issue #377).
+    # the movie/season pages do (issue #377). Keep all notes-holding watches
+    # so the notes section can list every watch (see notes_entries).
     notes_entry = None
+    notes_entries = []
     if not public_view:
-        notes_entry = next(
-            (
-                watch
-                for watch in (episode_data or {}).get("history", [])
-                if watch.notes and watch.notes.strip()
-            ),
-            None,
-        )
+        history = (episode_data or {}).get("history", [])
+        notes_entries = [
+            watch for watch in history if watch.notes and watch.notes.strip()
+        ]
+        notes_entry = notes_entries[0] if notes_entries else None
     elif public_notes_view and list_owner:
         public_user_medias = list(
             BasicMedia.objects.filter_media_prefetch(
@@ -952,19 +957,18 @@ def episode_details(
                 ),
             ),
         )
-        notes_entry = next(
-            (
-                entry
-                for entry in public_user_medias
-                if entry.notes and entry.notes.strip()
-            ),
-            None,
-        )
+        notes_entries = [
+            entry
+            for entry in public_user_medias
+            if entry.notes and entry.notes.strip()
+        ]
+        notes_entry = notes_entries[0] if notes_entries else None
 
     context = {
         "user": request.user,
         "episode": episode_data,
         "notes_entry": notes_entry,
+        "notes_entries": notes_entries,
         "episode_notes_modal_target_id": (
             f"episode-notes-modal-{source}-{media_id}-{season_number}-{episode_number}"
         ),

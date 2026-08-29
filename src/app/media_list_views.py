@@ -268,6 +268,25 @@ def _hydrate_media_list_page(user, media_type, order_slice):
         if item is None:
             continue
         entries.append(MediaListEntry(item=item, media=None))
+
+    # Grouped anime (TV items in the anime bucket) are surfaced in the anime
+    # list via the warm-cache hydration path too. _mark_grouped_anime_route is
+    # applied at cache-build time, but hydration rebuilds media objects from
+    # their pks and would otherwise lose the route_media_type annotation, so
+    # grouped-anime rows must be re-marked here to keep their links on the
+    # anime route (e.g. /details/tmdb/anime/...) instead of the TV route.
+    if media_type == MediaTypes.ANIME.value:
+        _mark_grouped_anime_route(
+            [
+                entry.media
+                for entry in entries
+                if entry.media is not None
+                and getattr(entry.media, "item", None) is not None
+                and entry.media.item.library_media_type
+                == MediaTypes.ANIME.value
+            ],
+        )
+
     return entries
 
 

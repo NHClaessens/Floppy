@@ -10,16 +10,19 @@ if (!window.__floppyDateTimePickerBound) {
     suggestionLabel: config.suggestionLabel || "",
     suggestionDate: config.suggestionDate || "",
     suggestionRuntimeMinutes: config.suggestionRuntimeMinutes || "",
+    copyFrom: config.copyFrom || "",
 
     value: config.initialValue || "",
     open: false,
     isMobile: false,
     popoverStyle: "",
+    pickerView: "days", // "days" | "months" | "years"
     viewYear: 0,
     viewMonth: 0,
     focusYear: 0,
     focusMonth: 0,
     focusDay: 1,
+    yearInput: "",
     hour24: 0,
     minute: 0,
     second: 0,
@@ -344,6 +347,63 @@ if (!window.__floppyDateTimePickerBound) {
       }
     },
 
+    showMonthsView() {
+      this.pickerView = "months";
+    },
+
+    showYearsView() {
+      this.yearInput = String(this.viewYear);
+      this.pickerView = "years";
+    },
+
+    showDaysView() {
+      this.pickerView = "days";
+    },
+
+    gotoMonth(monthIndex) {
+      this.viewMonth = monthIndex;
+      this.pickerView = "days";
+    },
+
+    gotoPrevYear() {
+      this.viewYear -= 1;
+      this.yearInput = String(this.viewYear);
+    },
+
+    gotoNextYear() {
+      this.viewYear += 1;
+      this.yearInput = String(this.viewYear);
+    },
+
+    onYearInput(event) {
+      const digits = event.target.value.replace(/\D/g, "").slice(0, 4);
+      this.yearInput = digits;
+      if (digits.length === 4) {
+        this.viewYear = Number(digits);
+      }
+    },
+
+    applyYearInput() {
+      const year = Number(this.yearInput);
+      if (Number.isInteger(year) && year >= 1000 && year <= 9999) {
+        this.viewYear = year;
+      } else {
+        this.yearInput = String(this.viewYear);
+      }
+      this.pickerView = "months";
+    },
+
+    monthShortLabel(monthIndex) {
+      return new Date(this.viewYear, monthIndex, 1).toLocaleDateString(undefined, {
+        month: "short",
+      });
+    },
+
+    yearRange() {
+      const start = Math.floor(this.viewYear / 20) * 20;
+      return Array.from({ length: 20 }, (_, i) => start + i);
+    },
+
     selectDay(cell) {
       if (!cell) {
         return;
@@ -468,6 +528,67 @@ if (!window.__floppyDateTimePickerBound) {
       this.backfillStartDateIfNeeded();
     },
 
+    copyFromOther() {
+      if (!this.copyFrom) {
+        return;
+      }
+      const form = this.$refs.hiddenInput.closest("form");
+      if (!form) {
+        return;
+      }
+      const sourceInput = form.querySelector(`[name="${this.copyFrom}"]`);
+      if (!sourceInput || !sourceInput.value) {
+        return;
+      }
+      const sourceParts = this.partsFor(sourceInput.value);
+      if (!sourceParts) {
+        return;
+      }
+      // The form's progress-based start-date auto-fill recomputes start_date
+      // from end_date on every end_date change. A copy is an explicit user
+      // intent, so suppress that auto-fill for this commit regardless of which
+      // field we are writing, otherwise the copied value gets overwritten.
+      if (form && window.Alpine) {
+        try {
+          Alpine.$data(form).manualStartDate = true;
+        } catch {
+          // Ignore Alpine lookup failures.
+        }
+      }
+      this.commit(
+        this.formatValueFromParts(
+          sourceParts.y,
+          sourceParts.m,
+          sourceParts.d,
+          sourceParts.h,
+          sourceParts.min,
+          sourceParts.s,
+        ),
+      );
+      this.backfillStartDateIfNeeded();
+    },
+
+    partsFor(value) {
+      if (!value) {
+        return null;
+      }
+      const [datePart, timePart] = value.trim().split(/[T ]/, 2);
+      const [y, m, d] = datePart.split("-").map(Number);
+      if ([y, m, d].some(Number.isNaN)) {
+        return null;
+      }
+      let h = 0;
+      let min = 0;
+      let s = 0;
+      if (timePart) {
+        const segments = timePart.split(":").map(Number);
+        h = segments[0] || 0;
+        min = segments[1] || 0;
+        s = segments[2] || 0;
+      }
+      return { y, m, d, h, min, s };
+    },
+
     backfillStartDateIfNeeded() {
       const runtimeMinutes = Number.parseInt(this.suggestionRuntimeMinutes, 10);
       if (
@@ -483,6 +604,15 @@ if (!window.__floppyDateTimePickerBound) {
       const startInput = form?.querySelector('[name="start_date"]');
       if (!startInput || startInput === this.$refs.hiddenInput) {
         return;
+      }
+      if (form && window.Alpine) {
+        try {
+          if (Alpine.$data(form).manualStartDate) {
+            return;
+          }
+        } catch {
+          // Ignore Alpine lookup failures.
+        }
       }
 
       const parts = this.parts();
@@ -564,6 +694,7 @@ if (!window.__floppyDateTimePickerBound) {
 
     openPicker() {
       this.open = true;
+      this.pickerView = "days";
       this.positionPopover();
       this.$nextTick(() => {
         this.positionPopover();
