@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from datetime import UTC
 from html import escape
 
@@ -13,6 +14,24 @@ from app.templatetags import app_tags
 from events.models import INACTIVE_TRACKING_STATUSES, Event
 
 logger = logging.getLogger(__name__)
+
+BATCH_COLLAPSE_THRESHOLD = 3
+
+
+@dataclass
+class BatchEvent:
+    """A run of >= BATCH_COLLAPSE_THRESHOLD episode events for one item."""
+
+    first_event: Event
+    min_ep: int
+    max_ep: int
+    is_finale: bool
+
+    @property
+    def range_label(self):
+        """Return the human-readable episode range for this batch."""
+        prefix = "All Episodes" if self.min_ep == 1 else "Episodes"
+        return f"{prefix} {self.min_ep}-{self.max_ep}"
 
 
 def send_releases():
@@ -524,6 +543,39 @@ def group_releases_by_type(releases):
     return releases_by_type
 
 
+def collapse_batch_events(media_events):
+    """Group events by item, collapsing runs of >= BATCH_COLLAPSE_THRESHOLD.
+
+    Args:
+        media_events: List of Event objects for a single media type
+
+    Returns:
+        List of Event and BatchEvent objects, in first-seen order
+    """
+    by_item = {}
+    for event in media_events:
+        by_item.setdefault(event.item_id, []).append(event)
+
+    units = []
+    for group in by_item.values():
+        if len(group) < BATCH_COLLAPSE_THRESHOLD:
+            units.extend(group)
+            continue
+
+        group.sort(key=lambda e: e.content_number or 0)
+        episode_numbers = [e.content_number for e in group if e.content_number is not None]
+        units.append(
+            BatchEvent(
+                first_event=group[0],
+                min_ep=min(episode_numbers),
+                max_ep=max(episode_numbers),
+                is_finale=any(getattr(e, "_is_season_finale", False) for e in group),
+            ),
+        )
+
+    return units
+
+
 def format_notification(releases):
     """Format notification text for releases.
 
@@ -553,15 +605,23 @@ def format_notification(releases):
         else:
             notification_body.append(f"{icon}  {media_type.upper()}")
 
-        for event in media_events:
-            line = f"  • {event}"
-            if not event.is_sentinel_time:
+        for unit in collapse_batch_events(media_events):
+            if isinstance(unit, BatchEvent):
+                first_event = unit.first_event
+                line = f"  • {first_event.item} ({unit.range_label})"
+                is_finale = unit.is_finale
+            else:
+                line = f"  • {unit}"
+                first_event = unit
+                is_finale = unit._is_season_finale
+
+            if not first_event.is_sentinel_time:
                 # Convert to local timezone and format
-                local_dt = timezone.localtime(event.datetime)
+                local_dt = timezone.localtime(first_event.datetime)
                 time_str = local_dt.strftime("%H:%M")
                 line += f" ({time_str})"
 
-            if event._is_season_finale:
+            if is_finale:
                 line += " * Season Finale"
             notification_body.append(line)
 
@@ -591,14 +651,23 @@ def format_notification_html(releases):
             f"<p><strong>{escape(icon)} {escape(heading)}</strong></p><ul>",
         )
 
-        for event in media_events:
-            if event.is_sentinel_time:
-                line = escape(str(event))
+        for unit in collapse_batch_events(media_events):
+            if isinstance(unit, BatchEvent):
+                first_event = unit.first_event
+                label = f"{first_event.item} ({unit.range_label})"
+                is_finale = unit.is_finale
             else:
-                local_dt = timezone.localtime(event.datetime)
+                label = str(unit)
+                first_event = unit
+                is_finale = unit._is_season_finale
+
+            if first_event.is_sentinel_time:
+                line = escape(label)
+            else:
+                local_dt = timezone.localtime(first_event.datetime)
                 time_str = local_dt.strftime("%H:%M")
-                line = f"{escape(str(event))} ({time_str})"
-            if event._is_season_finale:
+                line = f"{escape(label)} ({time_str})"
+            if is_finale:
                 line += ' <span style="color: #dc2626;">* Season Finale</span>'
             notification_html.append(f"<li>{line}</li>")
 

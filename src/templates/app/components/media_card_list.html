@@ -149,11 +149,11 @@
 
   {# Track Modal #}
   <div x-show="trackOpen"
+       @mousedown.self="trackOpen = false"
        @keydown.escape.window="trackOpen = false"
        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
     <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
-         style="width: min(96vw, 72rem);"
-         @click.outside="trackOpen = false">
+         style="width: min(96vw, 72rem);">
       <div id="{% component_id 'track' item media.id %}"></div>
     </div>
   </div>
@@ -161,9 +161,9 @@
   {# Lists Modal #}
   <div x-show="listsOpen"
        @keydown.escape.window="listsOpen = false"
-       class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-    <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60"
-         @click.outside="listsOpen = false">
+       class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+       @mousedown.self="listsOpen = false">
+    <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
       <div id="{% component_id 'lists' item %}"></div>
     </div>
   </div>

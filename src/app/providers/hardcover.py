@@ -34,6 +34,15 @@ def cap_search_query(query):
     return capped_query[:word_boundary].rstrip()
 
 
+def enabled() -> bool:
+    """Return whether an instance-wide Hardcover token is configured.
+
+    Background jobs have no user context and must never spend a member's
+    personal token, so they gate on this rather than on a per-user key.
+    """
+    return bool(settings.HARDCOVER_API)
+
+
 def _resolve_api_token(user):
     """Return the user's personal Hardcover token if set, else the instance default."""
     if user is not None and getattr(user, "hardcover_api_key", None):
@@ -44,10 +53,20 @@ def _resolve_api_token(user):
 
 
 def _authorization_header(user=None):
-    """Return the Hardcover auth header, normalizing raw tokens."""
+    """Return the Hardcover auth header, normalizing raw tokens.
+
+    Hardcover ships no default token (#1025), so an unconfigured instance would
+    otherwise send an empty Authorization header and spend a request earning a
+    401. Fail before the network call instead.
+    """
     api_token = (_resolve_api_token(user) or settings.HARDCOVER_API or "").strip()
     if not api_token:
-        return api_token
+        logger.warning("Hardcover request skipped: no API token configured")
+        raise services.ProviderAPIError(
+            Sources.HARDCOVER.value,
+            requests.exceptions.RequestException("no Hardcover API token"),
+            "set HARDCOVER_API, or add a personal token in Preferences",
+        )
     if api_token.lower().startswith("bearer "):
         return api_token
     return f"Bearer {api_token}"
@@ -65,7 +84,7 @@ def handle_error(error):
         raise services.ProviderAPIError(Sources.HARDCOVER.value, error) from json_error
 
     if status_code == requests.codes.unauthorized:
-        details = error_json["error"]
+        details = error_json.get("error")
         raise services.ProviderAPIError(Sources.HARDCOVER.value, error, details)
 
     raise services.ProviderAPIError(Sources.HARDCOVER.value, error)

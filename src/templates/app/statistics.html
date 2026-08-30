@@ -1886,9 +1886,9 @@
     <div x-show="open"
          x-cloak
          @keydown.escape.window="open = false"
-         class="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50">
-      <div class="w-full sm:w-[420px] relative z-60"
-           @click.outside="open = false">
+         class="fixed inset-0 bg-black/50 flex items-end sm:items-center justify-center z-50"
+         @mousedown.self="open = false">
+      <div class="w-full sm:w-[420px] relative z-60">
         <div class="bg-[var(--color-surface)] rounded-t-2xl sm:rounded-xl p-6 overflow-visible modal-max-height">
           {# Header #}
           <div class="flex items-center justify-between mb-5">

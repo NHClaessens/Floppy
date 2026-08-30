@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import Client, TestCase, tag
@@ -290,16 +291,42 @@ class KodiProcessorUnitTests(TestCase):
         self.assertEqual(ids["tmdb_id"], "603")
         self.assertEqual(ids["imdb_id"], "tt0133093")
         self.assertEqual(ids["tvdb_id"], "456")
+        self.assertIsNone(ids["tvmaze_id"])
 
     def test_extract_external_ids_empty(self):
         ids = self.processor._extract_external_ids({"uniqueIds": {}})
         self.assertIsNone(ids["tmdb_id"])
         self.assertIsNone(ids["imdb_id"])
         self.assertIsNone(ids["tvdb_id"])
+        self.assertIsNone(ids["tvmaze_id"])
 
     def test_extract_external_ids_missing_key(self):
         ids = self.processor._extract_external_ids({})
         self.assertIsNone(ids["tmdb_id"])
+
+    def test_extract_external_ids_falls_back_to_show_level_ids(self):
+        """Episode-level uniqueIds may only have tvmaze; tvShowUniqueIds fills the rest."""
+        payload = {
+            "uniqueIds": {"tvmaze": "1541703"},
+            "tvShowUniqueIds": {
+                "imdb": "tt9054364",
+                "tvdb": "352408",
+                "tvmaze": "38390",
+            },
+        }
+        ids = self.processor._extract_external_ids(payload)
+        self.assertIsNone(ids["tmdb_id"])
+        self.assertEqual(ids["imdb_id"], "tt9054364")
+        self.assertEqual(ids["tvdb_id"], "352408")
+        self.assertEqual(ids["tvmaze_id"], "1541703")
+
+    def test_extract_external_ids_episode_level_wins_over_show_level(self):
+        payload = {
+            "uniqueIds": {"tvdb": "111"},
+            "tvShowUniqueIds": {"tvdb": "999"},
+        }
+        ids = self.processor._extract_external_ids(payload)
+        self.assertEqual(ids["tvdb_id"], "111")
 
     def test_extract_season_episode(self):
         payload = {"season": 2, "episode": 5}
@@ -331,3 +358,81 @@ class KodiProcessorUnitTests(TestCase):
 
     def test_is_played_missing_progress(self):
         self.assertFalse(self.processor._is_played({"event": "stop"}))
+
+
+class KodiTvMazeResolutionTests(TestCase):
+    """Tests for resolving TV IDs when Kodi only supplies a TVMaze id (#1023)."""
+
+    def setUp(self):
+        self.processor = KodiWebhookProcessor()
+
+    def test_show_level_tvdb_id_resolves_without_tvmaze_lookup(self):
+        """Reproduces the reported failure: episode-level has only tvmaze, but
+        tvShowUniqueIds already has a usable tvdb id, so no TVMaze API call
+        should even be needed.
+        """
+        payload = {
+            "uniqueIds": {"tvmaze": "1541703"},
+            "tvShowUniqueIds": {
+                "imdb": "tt9054364",
+                "tvdb": "352408",
+                "tvmaze": "38390",
+            },
+        }
+        ids = self.processor._extract_external_ids(payload)
+        self.assertTrue(any(ids.values()))
+
+        with (
+            patch("integrations.webhooks.base.tvmaze.external_ids") as mock_tvmaze,
+            patch("app.providers.tmdb.find") as mock_tmdb_find,
+        ):
+            mock_tmdb_find.return_value = {
+                "tv_results": [{"id": "88329"}],
+                "tv_episode_results": [],
+            }
+            media_id, _season, _episode = self.processor._find_tv_media_id(ids)
+
+        mock_tvmaze.assert_not_called()
+        mock_tmdb_find.assert_called_once_with("352408", "tvdb_id")
+        self.assertEqual(media_id, "88329")
+
+    def test_tvmaze_only_id_resolves_via_tvmaze_bridge(self):
+        """When TVMaze is the only id anywhere, resolve it via the TVMaze API first."""
+        ids = {
+            "tmdb_id": None,
+            "imdb_id": None,
+            "tvdb_id": None,
+            "tvmaze_id": "38390",
+        }
+
+        with (
+            patch("integrations.webhooks.base.tvmaze.external_ids") as mock_tvmaze,
+            patch("app.providers.tmdb.find") as mock_tmdb_find,
+        ):
+            mock_tvmaze.return_value = {"tvdb_id": "352408", "imdb_id": "tt9054364"}
+            mock_tmdb_find.return_value = {
+                "tv_results": [{"id": "88329"}],
+                "tv_episode_results": [],
+            }
+            media_id, _season, _episode = self.processor._find_tv_media_id(ids)
+
+        mock_tvmaze.assert_called_once_with("38390")
+        mock_tmdb_find.assert_called_once_with("352408", "tvdb_id")
+        self.assertEqual(media_id, "88329")
+
+    def test_tvmaze_lookup_failure_does_not_raise(self):
+        ids = {
+            "tmdb_id": None,
+            "imdb_id": None,
+            "tvdb_id": None,
+            "tvmaze_id": "38390",
+        }
+        with patch(
+            "integrations.webhooks.base.tvmaze.external_ids",
+            side_effect=RuntimeError("boom"),
+        ):
+            media_id, season, episode = self.processor._find_tv_media_id(ids)
+
+        self.assertIsNone(media_id)
+        self.assertIsNone(season)
+        self.assertIsNone(episode)

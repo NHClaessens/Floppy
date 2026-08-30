@@ -744,3 +744,57 @@ class EventManagerCrossBucketAnimeDedupTests(TestCase):
             events = Event.objects.get_user_events(self.user, when.date(), when.date())
 
         self.assertCountEqual(list(events), [anime_event, season_event])
+
+    def test_hides_anime_duplicate_via_title_fallback_when_mapping_misses(self):
+        anime_item = Item.objects.create(
+            title="Re:Zero Season 4",
+            media_id="63830",
+            media_type=MediaTypes.ANIME.value,
+            source=Sources.MAL.value,
+            image="",
+        )
+        Anime.objects.create(
+            item=anime_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        tv_item = Item.objects.create(
+            title="Re:Zero",
+            media_id="1396",
+            media_type=MediaTypes.TV.value,
+            source=Sources.TMDB.value,
+            image="",
+        )
+        season_item = Item.objects.create(
+            title="Re:Zero - Season 4",
+            media_id="1396",
+            media_type=MediaTypes.SEASON.value,
+            source=Sources.TMDB.value,
+            image="",
+            season_number=4,
+        )
+        TV.objects.create(
+            item=tv_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        when = timezone.now() + datetime.timedelta(days=1)
+        anime_event = Event.objects.create(
+            item=anime_item,
+            content_number=1,
+            datetime=when,
+        )
+        season_event = Event.objects.create(
+            item=season_item,
+            content_number=1,
+            datetime=when,
+        )
+
+        with mock.patch(
+            "events.models.resolve_provider_series_id",
+            return_value=None,
+        ):
+            events = Event.objects.get_user_events(self.user, when.date(), when.date())
+
+        self.assertEqual(list(events), [season_event])
+        self.assertNotIn(anime_event, events)

@@ -295,7 +295,10 @@ def media_search(request):
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("Local search failed: %s", exception_summary(exc))
 
-    source_options = metadata_resolution.available_metadata_sources(media_type)
+    source_options = metadata_resolution.available_metadata_sources(
+        media_type,
+        request.user,
+    )
     default_source = metadata_resolution.metadata_default_source(
         request.user,
         media_type,

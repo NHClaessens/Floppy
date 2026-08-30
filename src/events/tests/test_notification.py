@@ -823,6 +823,105 @@ class NotificationTests(TestCase):
         self.assertIn("#10", notification_html)
         self.assertIn("Enjoy your media!", notification_html)
 
+    def test_format_notification_collapses_full_season_batch(self):
+        """A run of >= 3 episodes for one item collapses into one summary line."""
+        events = [self.season1_event]
+        for content_number in (1, 2, 3, 4):
+            events.append(
+                Event.objects.create(
+                    item=self.season1_item,
+                    content_number=content_number,
+                    datetime=timezone.now(),
+                ),
+            )
+
+        notification_text = format_notification(events)
+
+        self.assertEqual(
+            notification_text.count("Test TV Show - Season 1 S1"),
+            1,
+        )
+        self.assertIn("All Episodes 1-5", notification_text)
+        self.assertIn("* Season Finale", notification_text)
+        self.assertNotIn("E5", notification_text)
+
+    def test_format_notification_batch_mid_season_range(self):
+        """A batch that doesn't start at episode 1 shows a plain range, no finale."""
+        # A later, not-yet-notified episode establishes the real season finale,
+        # so the mid-season batch below must not be flagged as one.
+        Event.objects.create(
+            item=self.season2_item,
+            content_number=10,
+            datetime=timezone.now(),
+        )
+        events = [
+            Event.objects.create(
+                item=self.season2_item,
+                content_number=content_number,
+                datetime=timezone.now(),
+            )
+            for content_number in (4, 5, 6)
+        ]
+
+        notification_text = format_notification(events)
+
+        self.assertIn("Episodes 4-6", notification_text)
+        self.assertNotIn("All Episodes", notification_text)
+        self.assertNotIn("* Season Finale", notification_text)
+
+    def test_format_notification_keeps_one_and_two_episodes_uncollapsed(self):
+        """Fewer than 3 episodes for an item still render as individual bullets."""
+        second_episode = Event.objects.create(
+            item=self.season1_item,
+            content_number=4,
+            datetime=timezone.now(),
+        )
+
+        notification_text = format_notification([self.season1_event, second_episode])
+
+        self.assertIn("Test TV Show - Season 1 S1 E5", notification_text)
+        self.assertIn("Test TV Show - Season 1 S1 E4", notification_text)
+        self.assertNotIn("Episodes", notification_text)
+
+    def test_format_notification_only_collapses_the_batch_item(self):
+        """A batch for one item doesn't affect an unrelated single-episode item."""
+        events = [self.season3_event]
+        for content_number in (1, 2, 3, 4):
+            events.append(
+                Event.objects.create(
+                    item=self.season1_item,
+                    content_number=content_number,
+                    datetime=timezone.now(),
+                ),
+            )
+        events.append(self.season1_event)
+
+        notification_text = format_notification(events)
+
+        self.assertIn("Episodes 1-5", notification_text)
+        self.assertIn("Test TV Show - Season 3 S3 E1", notification_text)
+
+    def test_format_notification_html_collapses_full_season_batch(self):
+        """HTML notifications collapse batches the same way as plain text."""
+        events = [self.season1_event]
+        for content_number in (1, 2, 3, 4):
+            events.append(
+                Event.objects.create(
+                    item=self.season1_item,
+                    content_number=content_number,
+                    datetime=timezone.now(),
+                ),
+            )
+
+        notification_html = format_notification_html(events)
+
+        self.assertEqual(notification_html.count("<li>"), 1)
+        self.assertIn("All Episodes 1-5", notification_html)
+        self.assertIn(
+            '<span style="color: #dc2626;">* Season Finale</span>',
+            notification_html,
+        )
+
     @patch("events.notifications.send_notifications")
     def test_no_recent_events(self, mock_send_notifications):
         """Test behavior when no recent events are found."""

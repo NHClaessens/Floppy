@@ -233,6 +233,44 @@ class MediaSearchViewTests(TestCase):
             user=self.user,
         )
 
+    @override_settings(HARDCOVER_API="")
+    @patch("app.providers.services.search")
+    def test_book_search_falls_back_to_open_library(self, mock_search):
+        """Book search must work out of the box without a Hardcover key (#1025)."""
+        mock_search.return_value = {
+            "page": 1,
+            "total_results": 0,
+            "total_pages": 0,
+            "results": [],
+        }
+
+        response = self.client.get(reverse("search") + "?media_type=book&q=quo+vadis")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_search.call_args.args[3], Sources.OPENLIBRARY.value)
+        self.assertNotIn(
+            Sources.HARDCOVER,
+            response.context["source_options"],
+        )
+
+    @override_settings(HARDCOVER_API="")
+    @patch("app.providers.services.search")
+    def test_an_explicit_hardcover_source_is_coerced(self, mock_search):
+        """A bookmarked ?source=hardcover URL must not resurrect the dead path."""
+        mock_search.return_value = {
+            "page": 1,
+            "total_results": 0,
+            "total_pages": 0,
+            "results": [],
+        }
+
+        response = self.client.get(
+            reverse("search") + "?media_type=book&q=quo+vadis&source=hardcover",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mock_search.call_args.args[3], Sources.OPENLIBRARY.value)
+
     @patch("app.providers.services.search")
     def test_search_uses_interactive_request_scope(self, mock_search):
         """Rate-limit retries must fail fast, not block the request (#1001)."""

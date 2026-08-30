@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 
 from django.db import models
@@ -24,6 +25,16 @@ INACTIVE_TRACKING_STATUSES = [
     Status.PAUSED.value,
     Status.DROPPED.value,
 ]
+
+
+_SEASON_PART_SUFFIX_RE = re.compile(r"(?i)\b(season|part|cour)\b.*$")
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _normalize_anime_title(title: str) -> str:
+    """Strip season/part suffixes and punctuation for an exact-match fallback."""
+    stripped = _SEASON_PART_SUFFIX_RE.sub("", title)
+    return _NON_ALNUM_RE.sub("", stripped.lower())
 
 
 class SentinelDatetime:
@@ -166,9 +177,13 @@ class EventManager(models.Manager):
         and `Event`s, so without this the calendar and release notifications
         fire twice for the same episode (#968). Uses the pinned Kometa
         Anime-IDs mapping (`integrations.anime_mapping`) to resolve a MAL id
-        to its verified TMDB/TVDB series id - never a title guess. The TV
-        bucket is always kept since it carries season/episode structure; the
-        Anime bucket duplicate is hidden.
+        to its verified TMDB/TVDB series id. Newly announced anime aren't in
+        that static snapshot yet (#1000), so as a guarded fallback - only
+        when the verified lookup misses, and only against the user's own
+        actively-tracked shows, never the global DB - an anime item whose
+        normalized title exactly matches a tracked TV show's is also hidden.
+        The TV bucket is always kept since it carries season/episode
+        structure; the Anime bucket duplicate is hidden.
         """
         if MediaTypes.ANIME.value not in enabled_types:
             return set()
@@ -188,24 +203,34 @@ class EventManager(models.Manager):
         if not active_anime_items:
             return set()
 
-        active_tv_shows = set(
+        active_tv_rows = list(
             TV.objects.filter(
                 user=user,
                 item__media_type=MediaTypes.TV.value,
             )
             .exclude(status__in=INACTIVE_TRACKING_STATUSES)
-            .values_list("item__source", "item__media_id"),
+            .values_list("item__source", "item__media_id", "item__title"),
         )
-        if not active_tv_shows:
+        if not active_tv_rows:
             return set()
+
+        active_tv_shows = {(source, media_id) for source, media_id, _ in active_tv_rows}
+        active_tv_title_slugs = {
+            slug
+            for _, _, title in active_tv_rows
+            if (slug := _normalize_anime_title(title))
+        }
 
         hidden_ids = set()
         for anime_item in active_anime_items:
             tmdb_id = resolve_provider_series_id(anime_item.media_id, "tmdb")
             tvdb_id = resolve_provider_series_id(anime_item.media_id, "tvdb")
-            if (tmdb_id and (Sources.TMDB.value, tmdb_id) in active_tv_shows) or (
-                tvdb_id and (Sources.TVDB.value, tvdb_id) in active_tv_shows
-            ):
+            has_verified_match = (
+                tmdb_id and (Sources.TMDB.value, tmdb_id) in active_tv_shows
+            ) or (tvdb_id and (Sources.TVDB.value, tvdb_id) in active_tv_shows)
+            title_slug = _normalize_anime_title(anime_item.title)
+            has_title_fallback_match = title_slug and title_slug in active_tv_title_slugs
+            if has_verified_match or has_title_fallback_match:
                 hidden_ids.add(anime_item.id)
 
         return hidden_ids

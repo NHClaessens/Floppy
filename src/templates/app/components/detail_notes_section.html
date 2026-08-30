@@ -1,22 +1,39 @@
 {% load app_tags %}
 {% load user_tags %}
 
-<section id="detail-notes-section" class="mb-8" {% if notes_section_oob %}hx-swap-oob="outerHTML"{% endif %}>
-  <div class="mb-4 flex items-center gap-2">
-    <h2 class="text-xl font-bold">{% if public_notes_view|default:False %}Notes{% else %}Your Notes{% endif %}</h2>
-  </div>
+{% comment %}
+  The section element renders even with no notes, and is deliberately inert when
+  empty: it is the OOB target media_save swaps into, so it has to already exist
+  in the DOM the first time a note is saved. Gating it on having a note meant
+  htmx found no target and dropped the fragment, and the note only appeared on a
+  reload. The heading is inside the emptiness check for the mirror case — the
+  last note being cleared must not leave a bare "Your Notes" behind.
+{% endcomment %}
+<section id="detail-notes-section" class="{% if notes_entries or notes_entry %}mb-8{% endif %}" {% if notes_section_oob %}hx-swap-oob="outerHTML"{% endif %}>
+  {% if notes_entries or notes_entry %}
+    <div class="mb-4 flex items-center gap-2">
+      <h2 class="text-xl font-bold">{% if public_notes_view|default:False %}Notes{% else %}Your Notes{% endif %}</h2>
+    </div>
+  {% endif %}
 
   {% for entry in notes_entries %}
-    {% with notes_modal_id=entry.id|stringformat:"s"|add:"-notes" notes_content_id=entry.id|stringformat:"s"|add:"-notes-content" %}
+    {% comment %}
+      entry_id must be stringified before it is concatenated below: Django's
+      `add` filter returns "" for str + int, which silently emptied the modal
+      target id and left the edit button pointing at "#".
+    {% endcomment %}
+    {% with entry_id=entry.id|stringformat:"s" %}
+    {% with notes_modal_id=entry_id|add:"-notes" notes_content_id=entry_id|add:"-notes-content" %}
       {{ entry.notes|json_script:notes_content_id }}
       {% if detail_notes_target_id %}
-        {% with notes_modal_target_id=detail_notes_target_id|add:"-"|add:entry.id %}
+        {% with notes_modal_target_id=detail_notes_target_id|add:"-"|add:entry_id %}
           {% include "app/components/detail_notes_block.html" with entry=entry notes_modal_target_id=notes_modal_target_id %}
         {% endwith %}
       {% else %}
         {% component_id 'track' media notes_modal_id as notes_modal_target_id %}
         {% include "app/components/detail_notes_block.html" with entry=entry notes_modal_target_id=notes_modal_target_id %}
       {% endif %}
+    {% endwith %}
     {% endwith %}
   {% empty %}
     {% if notes_entry %}

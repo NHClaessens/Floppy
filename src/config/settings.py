@@ -1121,19 +1121,14 @@ STEAM_API_KEY = config(
     ),  # Generate default key https://steamcommunity.com/dev/apikey
 )
 
+# Intentionally has no default. Hardcover meters its free tier per account
+# (5000 requests/day), so a token bundled with the image is a single quota
+# shared by every Floppy install on the internet and is permanently exhausted
+# (#1025). Operators supply their own token, or users set a personal one in
+# Preferences; without either, Hardcover is simply not an available source.
 HARDCOVER_API = config(
     "HARDCOVER_API",
-    default=secret(
-        "HARDCOVER_API_FILE",
-        "Bearer eyJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJIYXJkY292ZXIiLCJ2ZXJzaW9uIjoiOCIsImp0"
-        "aSI6IjcyYTc1ZmU3LTBlY2EtNDYzZC04Njc4LThlMTVhMjM4MzY0OCIsImFwcGxpY2F0aW9uSWQi"
-        "OjIsInN1YiI6IjczODAxIiwiYXVkIjoiMSIsImlkIjoiNzM4MDEiLCJsb2dnZWRJbiI6dHJ1ZSwi"
-        "aWF0IjoxNzc4NjI3MzIwLCJleHAiOjE4MTAxNjMzMjAsImh0dHBzOi8vaGFzdXJhLmlvL2p3dC9j"
-        "bGFpbXMiOnsieC1oYXN1cmEtYWxsb3dlZC1yb2xlcyI6WyJ1c2VyIl0sIngtaGFzdXJhLWRlZmF1"
-        "bHQtcm9sZSI6InVzZXIiLCJ4LWhhc3VyYS1yb2xlIjoidXNlciIsIlgtaGFzdXJhLXVzZXItaWQi"
-        "OiI3MzgwMSJ9LCJ1c2VyIjp7ImlkIjo3MzgwMX19.3b6v1FJ24VTrKtmxMiIUO4o5LR2HGhw6zn"
-        "PlDwL5Df4",
-    ),
+    default=secret("HARDCOVER_API_FILE", ""),
 )
 
 GOOGLE_BOOKS_API_KEY = config(

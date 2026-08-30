@@ -171,25 +171,38 @@ def sync_season_ratings() -> int:
 
     Returns the number of Items updated.
     """
-    show_keys = set(
-        Item.objects.filter(
+    # Item.save() defaults library_media_type to media_type when it was never
+    # set explicitly, so an episode/season pair in the same (non-anime) bucket
+    # can carry different raw values ("episode" vs "season"). Group by whether
+    # the bucket is the anime one instead of by the raw stored value, mirroring
+    # api.helpers.resolve_item_queryset's "anime vs everything else" split.
+    show_keys = {
+        (media_id, source, library_media_type == MediaTypes.ANIME.value)
+        for media_id, source, library_media_type in Item.objects.filter(
             media_type=MediaTypes.EPISODE.value,
             imdb_rating_count__isnull=False,
-        ).values_list("media_id", "source"),
-    )
+        ).values_list("media_id", "source", "library_media_type")
+    }
     if not show_keys:
         return 0
 
     updated = []
-    for media_id, source in show_keys:
-        episode_ratings = Item.objects.filter(
+    for media_id, source, is_anime_bucket in show_keys:
+        episode_qs = Item.objects.filter(
             media_id=media_id,
             source=source,
             media_type=MediaTypes.EPISODE.value,
             season_number__isnull=False,
             imdb_rating__isnull=False,
             imdb_rating_count__isnull=False,
-        ).values_list("season_number", "imdb_rating", "imdb_rating_count")
+        )
+        if is_anime_bucket:
+            episode_qs = episode_qs.filter(library_media_type=MediaTypes.ANIME.value)
+        else:
+            episode_qs = episode_qs.exclude(library_media_type=MediaTypes.ANIME.value)
+        episode_ratings = episode_qs.values_list(
+            "season_number", "imdb_rating", "imdb_rating_count",
+        )
 
         totals_by_season = {}
         for season_number, rating, rating_count in episode_ratings:
@@ -204,15 +217,17 @@ def sync_season_ratings() -> int:
         if not totals_by_season:
             continue
 
-        season_items = {
-            item.season_number: item
-            for item in Item.objects.filter(
-                media_id=media_id,
-                source=source,
-                media_type=MediaTypes.SEASON.value,
-                season_number__in=totals_by_season.keys(),
-            )
-        }
+        season_qs = Item.objects.filter(
+            media_id=media_id,
+            source=source,
+            media_type=MediaTypes.SEASON.value,
+            season_number__in=totals_by_season.keys(),
+        )
+        if is_anime_bucket:
+            season_qs = season_qs.filter(library_media_type=MediaTypes.ANIME.value)
+        else:
+            season_qs = season_qs.exclude(library_media_type=MediaTypes.ANIME.value)
+        season_items = {item.season_number: item for item in season_qs}
         for season_number, (weighted_sum, vote_count) in totals_by_season.items():
             season_item = season_items.get(season_number)
             if season_item is None or vote_count == 0:

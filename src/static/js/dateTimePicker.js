@@ -11,6 +11,7 @@ if (!window.__floppyDateTimePickerBound) {
     suggestionDate: config.suggestionDate || "",
     suggestionRuntimeMinutes: config.suggestionRuntimeMinutes || "",
     copyFrom: config.copyFrom || "",
+    copyAvailable: false,
 
     value: config.initialValue || "",
     open: false,
@@ -175,14 +176,20 @@ if (!window.__floppyDateTimePickerBound) {
     },
 
     parts() {
-      if (!this.value) {
+      return this.partsFor(this.value);
+    },
+
+    // Parses any value in this field's own format, not just the current one,
+    // so the copy-from-the-other-field path can reuse it.
+    partsFor(value) {
+      if (!value) {
         return null;
       }
 
       // Django renders bound DateTimeField values with a space separator,
       // while values selected in this picker use the HTML datetime-local
       // format with a `T` separator.
-      const [datePart, timePart] = this.value.trim().split(/[T ]/, 2);
+      const [datePart, timePart] = value.trim().split(/[T ]/, 2);
       const [y, m, d] = datePart.split("-").map(Number);
       if ([y, m, d].some(Number.isNaN)) {
         return null;
@@ -528,33 +535,27 @@ if (!window.__floppyDateTimePickerBound) {
       this.backfillStartDateIfNeeded();
     },
 
-    copyFromOther() {
+    copySourceValue() {
       if (!this.copyFrom) {
-        return;
+        return "";
       }
-      const form = this.$refs.hiddenInput.closest("form");
-      if (!form) {
-        return;
-      }
-      const sourceInput = form.querySelector(`[name="${this.copyFrom}"]`);
-      if (!sourceInput || !sourceInput.value) {
-        return;
-      }
-      const sourceParts = this.partsFor(sourceInput.value);
+      const form = this.$refs.hiddenInput?.closest("form");
+      return form?.querySelector(`[name="${this.copyFrom}"]`)?.value || "";
+    },
+
+    copyFromOther() {
+      const sourceParts = this.partsFor(this.copySourceValue());
       if (!sourceParts) {
         return;
       }
-      // The form's progress-based start-date auto-fill recomputes start_date
-      // from end_date on every end_date change. A copy is an explicit user
-      // intent, so suppress that auto-fill for this commit regardless of which
-      // field we are writing, otherwise the copied value gets overwritten.
-      if (form && window.Alpine) {
-        try {
-          Alpine.$data(form).manualStartDate = true;
-        } catch {
-          // Ignore Alpine lookup failures.
-        }
-      }
+      // No backfill on this path. The runtime-based auto-fill recomputes
+      // start_date from end_date, which would immediately overwrite a copy
+      // into start_date with end minus the runtime. commit() already marks
+      // start_date as manually set when that is the field being written, and
+      // backfillStartDateIfNeeded honours that flag, so a copy into start_date
+      // also survives later edits to end_date. A copy into end_date leaves the
+      // flag alone: the user has not touched start_date, so the auto-fill must
+      // stay armed for it.
       this.commit(
         this.formatValueFromParts(
           sourceParts.y,
@@ -565,28 +566,6 @@ if (!window.__floppyDateTimePickerBound) {
           sourceParts.s,
         ),
       );
-      this.backfillStartDateIfNeeded();
-    },
-
-    partsFor(value) {
-      if (!value) {
-        return null;
-      }
-      const [datePart, timePart] = value.trim().split(/[T ]/, 2);
-      const [y, m, d] = datePart.split("-").map(Number);
-      if ([y, m, d].some(Number.isNaN)) {
-        return null;
-      }
-      let h = 0;
-      let min = 0;
-      let s = 0;
-      if (timePart) {
-        const segments = timePart.split(":").map(Number);
-        h = segments[0] || 0;
-        min = segments[1] || 0;
-        s = segments[2] || 0;
-      }
-      return { y, m, d, h, min, s };
     },
 
     backfillStartDateIfNeeded() {
@@ -695,6 +674,10 @@ if (!window.__floppyDateTimePickerBound) {
     openPicker() {
       this.open = true;
       this.pickerView = "days";
+      // Recomputed per open rather than watched: the copy button only exists
+      // while the picker is open, and opening one picker closes the other, so
+      // the source field cannot change underneath it.
+      this.copyAvailable = Boolean(this.copySourceValue());
       this.positionPopover();
       this.$nextTick(() => {
         this.positionPopover();

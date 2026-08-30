@@ -636,6 +636,192 @@ class MediaSeasonTests(FloppyApiTestCase):
         self.assertEqual(episode["item"]["imdb_rating_count"], 17)
 
     @patch("api.views.services.get_media_metadata")
+    def test_season_detail_untracked_episode_falls_back_to_provider_artwork(
+        self,
+        mock_metadata,
+    ):
+        """An image-less reused episode Item still shows the provider's still."""
+        tv_item = self.items_by_type[MediaTypes.TV.value][0]
+        season_item = self.items_by_type[MediaTypes.SEASON.value][0]
+        existing_item = Item.objects.create(
+            media_id=tv_item.media_id,
+            source=tv_item.source,
+            media_type=MediaTypes.EPISODE.value,
+            title="Untracked Episode 99",
+            season_number=season_item.season_number,
+            episode_number=99,
+        )
+
+        mock_metadata.return_value = {
+            "source": tv_item.source,
+            "media_id": tv_item.media_id,
+            "media_type": "season",
+            "season_number": season_item.season_number,
+            "episodes": [
+                {
+                    "episode_number": 99,
+                    "season_number": season_item.season_number,
+                    "show_id": tv_item.media_id,
+                    "name": "Untracked Episode 99",
+                    "overview": "",
+                    "vote_average": 0.0,
+                    "vote_count": 0,
+                    "air_date": None,
+                    "runtime": None,
+                    "episode_type": None,
+                    "crew": [],
+                    "guest_stars": [],
+                    "still_path": "/still.jpg",
+                },
+            ],
+            "related": {"episodes": []},
+        }
+
+        response = self.call_api(
+            "get",
+            "api_media_season_detail",
+            args=(
+                MediaTypes.TV.value,
+                tv_item.source,
+                tv_item.media_id,
+                season_item.season_number,
+            ),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        episode = response.json()["related"]["episodes"][0]
+        self.assertEqual(
+            episode["item"]["image"],
+            "https://image.tmdb.org/t/p/original/still.jpg",
+        )
+        existing_item.refresh_from_db()
+        self.assertEqual(existing_item.image, "")
+
+    @patch("api.views.services.get_media_metadata")
+    def test_season_detail_untracked_tvdb_episode_uses_normalized_image(
+        self,
+        mock_metadata,
+    ):
+        """A TVDB episode with no still_path still shows its normalized image."""
+        tv_item = self.items_by_type[MediaTypes.TV.value][0]
+        season_item = self.items_by_type[MediaTypes.SEASON.value][0]
+        Item.objects.create(
+            media_id=tv_item.media_id,
+            source=tv_item.source,
+            media_type=MediaTypes.EPISODE.value,
+            title="Untracked Episode 99",
+            season_number=season_item.season_number,
+            episode_number=99,
+        )
+
+        mock_metadata.return_value = {
+            "source": tv_item.source,
+            "media_id": tv_item.media_id,
+            "media_type": "season",
+            "season_number": season_item.season_number,
+            "episodes": [
+                {
+                    "episode_number": 99,
+                    "season_number": season_item.season_number,
+                    "show_id": tv_item.media_id,
+                    "name": "Untracked Episode 99",
+                    "overview": "",
+                    "vote_average": 0.0,
+                    "vote_count": 0,
+                    "air_date": None,
+                    "runtime": None,
+                    "episode_type": None,
+                    "crew": [],
+                    "guest_stars": [],
+                    "still_path": None,
+                    "image": "https://tvdb.example.com/still.jpg",
+                },
+            ],
+            "related": {"episodes": []},
+        }
+
+        response = self.call_api(
+            "get",
+            "api_media_season_detail",
+            args=(
+                MediaTypes.TV.value,
+                tv_item.source,
+                tv_item.media_id,
+                season_item.season_number,
+            ),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        episode = response.json()["related"]["episodes"][0]
+        self.assertEqual(
+            episode["item"]["image"],
+            "https://tvdb.example.com/still.jpg",
+        )
+
+    @patch("api.views.services.get_media_metadata")
+    def test_season_detail_does_not_leak_anime_bucket_episode(
+        self,
+        mock_metadata,
+    ):
+        """A TV-bucket season request must not resolve the anime bucket's Item."""
+        tv_item = self.items_by_type[MediaTypes.TV.value][0]
+        season_item = self.items_by_type[MediaTypes.SEASON.value][0]
+        Item.objects.create(
+            media_id=tv_item.media_id,
+            source=tv_item.source,
+            media_type=MediaTypes.EPISODE.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Anime Bucket Episode 99",
+            season_number=season_item.season_number,
+            episode_number=99,
+            imdb_rating=6.0,
+            imdb_rating_count=10,
+        )
+
+        mock_metadata.return_value = {
+            "source": tv_item.source,
+            "media_id": tv_item.media_id,
+            "media_type": "season",
+            "season_number": season_item.season_number,
+            "episodes": [
+                {
+                    "episode_number": 99,
+                    "season_number": season_item.season_number,
+                    "show_id": tv_item.media_id,
+                    "name": "Untracked Episode 99",
+                    "overview": "",
+                    "vote_average": 0.0,
+                    "vote_count": 0,
+                    "air_date": None,
+                    "runtime": None,
+                    "episode_type": None,
+                    "crew": [],
+                    "guest_stars": [],
+                    "still_path": None,
+                },
+            ],
+            "related": {"episodes": []},
+        }
+
+        response = self.call_api(
+            "get",
+            "api_media_season_detail",
+            args=(
+                MediaTypes.TV.value,
+                tv_item.source,
+                tv_item.media_id,
+                season_item.season_number,
+            ),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        episode = response.json()["related"]["episodes"][0]
+        self.assertIsNone(episode["item"]["imdb_rating"])
+
+    @patch("api.views.services.get_media_metadata")
     def test_season_detail_patch_updates_season_fields(self, mock_metadata):
         """Season detail PATCH should update season fields."""
         status = 2

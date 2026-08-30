@@ -1,3 +1,5 @@
+import copy
+
 from django.conf import settings
 from django.utils.timezone import now
 from rest_framework import serializers
@@ -37,6 +39,7 @@ from .changes_history_processor import (
 from .helpers import (
     build_item_id,
     build_parent_id,
+    filter_item_bucket,
     get_media_status,
 )
 
@@ -220,7 +223,12 @@ class CompleteEpisodeSerializer(serializers.Serializer):
 class CompleteMediaSerializer(serializers.Serializer):
     """Serializer that builds a CompleteMedia response."""
 
-    def _process_seasons(self, media_metadata, seasons_by_number=None):
+    def _process_seasons(
+        self,
+        media_metadata,
+        seasons_by_number=None,
+        library_media_type=None,
+    ):
         """Process seasons in related data."""
         if "related" not in media_metadata or media_metadata["related"] is None:
             media_metadata["related"] = {}
@@ -235,10 +243,14 @@ class CompleteMediaSerializer(serializers.Serializer):
         # Item, one batched query for the whole show rather than per-season.
         existing_items_by_season = {
             existing_item.season_number: existing_item
-            for existing_item in Item.objects.filter(
-                media_id=str(media_metadata.get("media_id") or ""),
-                source=media_metadata.get("source"),
-                media_type=MediaTypes.SEASON.value,
+            for existing_item in filter_item_bucket(
+                Item.objects.filter(
+                    media_id=str(media_metadata.get("media_id") or ""),
+                    source=media_metadata.get("source"),
+                    media_type=MediaTypes.SEASON.value,
+                ),
+                MediaTypes.SEASON.value,
+                library_media_type=library_media_type,
             )
         }
 
@@ -252,6 +264,14 @@ class CompleteMediaSerializer(serializers.Serializer):
             item = getattr(tracked_season, "item", None)
             if item is None:
                 item = existing_items_by_season.get(season_number)
+                if item is not None and not app_helpers.has_real_image(item.image):
+                    fallback_image = app_helpers.first_real_image(
+                        season.get("image"),
+                        default=None,
+                    )
+                    if fallback_image:
+                        item = copy.copy(item)
+                        item.image = fallback_image
             if item is None:
                 item = Item(
                     media_id=str(
@@ -288,7 +308,12 @@ class CompleteMediaSerializer(serializers.Serializer):
 
         media_metadata["related"]["seasons"] = processed_seasons
 
-    def _process_episodes(self, media_metadata, episodes_by_number=None):
+    def _process_episodes(
+        self,
+        media_metadata,
+        episodes_by_number=None,
+        library_media_type=None,
+    ):
         """Process episodes in media data."""
         if "related" not in media_metadata or media_metadata["related"] is None:
             media_metadata["related"] = {}
@@ -304,11 +329,15 @@ class CompleteMediaSerializer(serializers.Serializer):
         # Item, one batched query for the whole season rather than per-episode.
         existing_items_by_episode = {
             existing_item.episode_number: existing_item
-            for existing_item in Item.objects.filter(
-                media_id=str(media_metadata.get("media_id") or ""),
-                source=media_metadata.get("source"),
-                media_type=MediaTypes.EPISODE.value,
-                season_number=media_metadata.get("season_number"),
+            for existing_item in filter_item_bucket(
+                Item.objects.filter(
+                    media_id=str(media_metadata.get("media_id") or ""),
+                    source=media_metadata.get("source"),
+                    media_type=MediaTypes.EPISODE.value,
+                    season_number=media_metadata.get("season_number"),
+                ),
+                MediaTypes.EPISODE.value,
+                library_media_type=library_media_type,
             )
         }
         serializer = EpisodeSerializer(
@@ -330,11 +359,20 @@ class CompleteMediaSerializer(serializers.Serializer):
         user_medias = instance.get("user_medias")
         lists = instance.get("lists", [])
         media_type = media_metadata.get("media_type")
+        library_media_type = instance.get("library_media_type")
 
         if media_type == MediaTypes.TV.value:
-            self._process_seasons(media_metadata, instance.get("seasons"))
+            self._process_seasons(
+                media_metadata,
+                instance.get("seasons"),
+                library_media_type=library_media_type,
+            )
         elif media_type == MediaTypes.SEASON.value:
-            self._process_episodes(media_metadata, instance.get("episodes"))
+            self._process_episodes(
+                media_metadata,
+                instance.get("episodes"),
+                library_media_type=library_media_type,
+            )
 
         temp_media = type("TempMedia", (), media_metadata)()
 
@@ -476,11 +514,24 @@ class EpisodeSerializer(serializers.ModelSerializer):
             # instead of always building an ephemeral in-memory Item.
             existing_items_by_episode = context.get("existing_items_by_episode", {})
             item = existing_items_by_episode.get(episode_number)
-            if item is None:
-                image = (
+            if item is not None and not app_helpers.has_real_image(item.image):
+                fallback_image = app_helpers.first_real_image(
                     "https://image.tmdb.org/t/p/original" + instance.get("still_path")
                     if instance.get("still_path")
-                    else None
+                    else None,
+                    instance.get("image"),
+                    default=None,
+                )
+                if fallback_image:
+                    item = copy.copy(item)
+                    item.image = fallback_image
+            if item is None:
+                image = app_helpers.first_real_image(
+                    "https://image.tmdb.org/t/p/original" + instance.get("still_path")
+                    if instance.get("still_path")
+                    else None,
+                    instance.get("image"),
+                    default=None,
                 )
                 item = Item(
                     media_id=media_id,

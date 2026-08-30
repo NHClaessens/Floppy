@@ -162,11 +162,11 @@
     <div class="shrink-0" x-data="{ trackOpen: false }">
       {% include "app/components/detail_episode_track_button.html" with episode=episode detail_return_url=detail_return_url request=request track_button_oob=False target_suffix="-list" only %}
       <div x-show="trackOpen"
+           @mousedown.self="trackOpen = false"
            @keydown.escape.window="trackOpen = false"
            class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
              style="width: min(96vw, 72rem);"
-             @click.outside="trackOpen = false"
              @click.stop>
           <div id="{% component_id 'track' episode %}-list"></div>
         </div>

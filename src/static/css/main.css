@@ -6033,8 +6033,12 @@ html.light .theme-toggle-icon-moon {
   box-shadow: 0 0 0 2px #6366f1;
   border-color: transparent;
 }
-.date-picker-common-time-button:hover {
+.date-picker-common-time-button:hover:not(:disabled) {
   background-color: var(--color-surface-muted);
+}
+.date-picker-common-time-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 @media (min-width: 40rem) {
   .date-picker-day-cell {

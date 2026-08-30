@@ -56,3 +56,6 @@ STEAM_API_KEY = "test_steam_api_key"
 
 # Trakt API key for testing (production default is empty; see #464)
 TRAKT_API = "test_trakt_api_key"
+
+# Hardcover token for testing (production default is empty; see #1025)
+HARDCOVER_API = "Bearer test_hardcover_token"

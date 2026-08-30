@@ -69,9 +69,12 @@ DATA_DIR_INPUT=${FLOPPY_DATA_DIR:-/floppy/db}
 DATA_DIR=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$DATA_DIR_INPUT")
 LOG_DIR_INPUT=${LOG_DIR:-/floppy/logs}
 LOG_DIR_PATH=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$LOG_DIR_INPUT")
+BACKUP_DIR_INPUT=${BACKUP_DIR:-/floppy/backups}
+BACKUP_DIR_PATH=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$BACKUP_DIR_INPUT")
 
 reject_unsafe_managed_directory FLOPPY_DATA_DIR "$DATA_DIR"
 reject_unsafe_managed_directory LOG_DIR "$LOG_DIR_PATH"
+reject_unsafe_managed_directory BACKUP_DIR "$BACKUP_DIR_PATH"
 
 # Check the mounts with the shell, before anything imports Django.
 #
@@ -110,6 +113,7 @@ warn_when_not_writable() {
 
 warn_when_not_writable FLOPPY_DATA_DIR "$DATA_DIR"
 warn_when_not_writable LOG_DIR "$LOG_DIR_PATH"
+warn_when_not_writable BACKUP_DIR "$BACKUP_DIR_PATH"
 
 # Safe identifiers only, so this line can be pasted into a bug report without
 # redaction. Correlates a log against the image that produced it, and against
@@ -274,6 +278,14 @@ log_file_path="${LOG_DIR_PATH}/floppy.log"
 if { [ -e "$log_file_path" ] || [ -L "$log_file_path" ]; } && \
    ! timeout 600 chown -h abc:abc -- "$log_file_path"; then
     echo "[entrypoint] WARNING: chown of ${log_file_path} failed or timed out (stalled mount?); continuing" >&2
+fi
+
+# "backups" holds scheduled CSV exports (settings.BACKUP_DIR). It can be an
+# operator-selected bind mount too, and a fresh one is root-owned like any
+# other new bind mount, so give it the same non-fatal chown as LOG_DIR rather
+# than leaving abc-owned processes unable to write scheduled exports.
+if [ -e "$BACKUP_DIR_PATH" ] && ! timeout 600 chown abc:abc -- "$BACKUP_DIR_PATH"; then
+    echo "[entrypoint] WARNING: chown of ${BACKUP_DIR_PATH} failed or timed out (stalled mount?); continuing" >&2
 fi
 
 # Bound recursive ownership fixes for the image-managed service directories: a

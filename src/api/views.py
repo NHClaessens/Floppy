@@ -1298,7 +1298,12 @@ class MediaDetailView(drf_views.APIView):
             game_length_item = (
                 user_medias[0].item
                 if user_medias
-                else resolve_item_queryset(media_id, source, media_type).first()
+                else resolve_item_queryset(
+                    media_id,
+                    source,
+                    media_type,
+                    library_media_type=library_media_type,
+                ).first()
             )
             if game_length_item is None and source == Sources.IGDB.value:
                 try:
@@ -1344,7 +1349,12 @@ class MediaDetailView(drf_views.APIView):
             top_level_item = (
                 user_medias[0].item
                 if user_medias
-                else resolve_item_queryset(media_id, source, media_type).first()
+                else resolve_item_queryset(
+                    media_id,
+                    source,
+                    media_type,
+                    library_media_type=library_media_type,
+                ).first()
             )
 
         data = {
@@ -1353,6 +1363,7 @@ class MediaDetailView(drf_views.APIView):
             "seasons": seasons_by_number,
             "lists": lists,
             "item": top_level_item,
+            "library_media_type": library_media_type,
         }
 
         serialized = serialize_data(
@@ -2514,6 +2525,7 @@ class MediaSeasonDetailView(drf_views.APIView):
                 source,
                 MediaTypes.SEASON.value,
                 season_number=season_number,
+                library_media_type=library_media_type,
             ).first()
         )
 
@@ -2523,6 +2535,7 @@ class MediaSeasonDetailView(drf_views.APIView):
             "episodes": episodes_by_number,
             "lists": lists,
             "item": season_item,
+            "library_media_type": library_media_type,
         }
 
         serialized = serialize_data(
@@ -3671,6 +3684,7 @@ class MediaEpisodeDetailView(drf_views.APIView):
                 MediaTypes.EPISODE.value,
                 season_number=season_number,
                 episode_number=episode_number,
+                library_media_type=request.query_params.get("library_media_type"),
             ).first()
         )
 

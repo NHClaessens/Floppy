@@ -334,9 +334,25 @@ def fetch_results_all_types(user, status, sort, search, exclude):
 # have two rows differing only in that field (grouped anime stored on TV rows).
 # Raw get()/get_or_create()/first() on media_id+source+media_type alone can raise
 # MultipleObjectsReturned or silently pick/clobber the wrong bucket's row. This
-# resolver mirrors the fork's canonical pattern (app/metadata_sync_views.py):
+# filter mirrors the fork's canonical pattern (app/metadata_sync_views.py):
 # explicit bucket filter when requested, exclude the anime bucket by default for
 # tv/season/episode, and deterministic ordering.
+def filter_item_bucket(queryset, media_type, *, library_media_type=None):  # FORK
+    """Apply bucket filtering to an Item queryset for the given media_type."""
+    if media_type in (
+        MediaTypes.TV.value,
+        MediaTypes.SEASON.value,
+        MediaTypes.EPISODE.value,
+    ):
+        if library_media_type:
+            queryset = queryset.filter(library_media_type=library_media_type)
+        else:
+            queryset = queryset.exclude(
+                library_media_type=MediaTypes.ANIME.value,
+            )
+    return queryset
+
+
 def resolve_item_queryset(  # FORK
     media_id,
     source,
@@ -354,17 +370,11 @@ def resolve_item_queryset(  # FORK
         season_number=season_number,
         episode_number=episode_number,
     )
-    if media_type in (
-        MediaTypes.TV.value,
-        MediaTypes.SEASON.value,
-        MediaTypes.EPISODE.value,
-    ):
-        if library_media_type:
-            queryset = queryset.filter(library_media_type=library_media_type)
-        else:
-            queryset = queryset.exclude(
-                library_media_type=MediaTypes.ANIME.value,
-            )
+    queryset = filter_item_bucket(
+        queryset,
+        media_type,
+        library_media_type=library_media_type,
+    )
     return queryset.order_by("id")
 
 

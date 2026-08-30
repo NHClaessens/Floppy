@@ -40,6 +40,21 @@ PROVIDER_METADATA_FIELDS = [
 ]
 
 
+def backfill_sources(sources):
+    """Drop providers with no instance credential from a backfill source list.
+
+    Hardcover meters its free tier per account and ships no default token, so
+    background jobs must not queue work for it on an unconfigured instance
+    (#1025). Resolved per call, not at import, so adding HARDCOVER_API and
+    restarting takes effect without a code change.
+    """
+    from app.providers import hardcover
+
+    if hardcover.enabled():
+        return tuple(sources)
+    return tuple(source for source in sources if source != Sources.HARDCOVER.value)
+
+
 def _coerce_list(value, *, allow_scalar: bool = True) -> list:
     if isinstance(value, list):
         return value

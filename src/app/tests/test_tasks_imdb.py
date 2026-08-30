@@ -12,6 +12,7 @@ from app.models import (
     Person,
     Sources,
 )
+from app.services.imdb_ratings import sync_season_ratings
 from app.tasks_backfill_state import _record_backfill_success
 from app.tasks_imdb import (
     backfill_imdb_game_person_profiles,
@@ -182,3 +183,57 @@ class SyncImdbRatingsTaskTests(TestCase):
                 "seasons_updated": 1,
             },
         )
+
+
+class SyncSeasonRatingsBucketTests(TestCase):
+    """Regression: TV and grouped-anime buckets must aggregate independently."""
+
+    def test_does_not_pool_ratings_across_buckets(self):
+        Item.objects.create(
+            media_id="tmdb-3",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.EPISODE.value,
+            library_media_type="",
+            title="TV Episode",
+            season_number=1,
+            episode_number=1,
+            imdb_rating=8.0,
+            imdb_rating_count=100,
+        )
+        Item.objects.create(
+            media_id="tmdb-3",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.EPISODE.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Anime Episode",
+            season_number=1,
+            episode_number=1,
+            imdb_rating=6.0,
+            imdb_rating_count=10,
+        )
+        tv_season = Item.objects.create(
+            media_id="tmdb-3",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            library_media_type="",
+            title="TV Season 1",
+            season_number=1,
+        )
+        anime_season = Item.objects.create(
+            media_id="tmdb-3",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Anime Season 1",
+            season_number=1,
+        )
+
+        updated = sync_season_ratings()
+
+        tv_season.refresh_from_db()
+        anime_season.refresh_from_db()
+        self.assertEqual(updated, 2)
+        self.assertEqual(tv_season.imdb_rating, 8.0)
+        self.assertEqual(tv_season.imdb_rating_count, 100)
+        self.assertEqual(anime_season.imdb_rating, 6.0)
+        self.assertEqual(anime_season.imdb_rating_count, 10)

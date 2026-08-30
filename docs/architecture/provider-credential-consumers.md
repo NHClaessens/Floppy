@@ -53,7 +53,7 @@ stripped. Last.fm is the only family below without a `_FILE` input.
 | IGDB | `IGDB_SECRET` | `IGDB_SECRET_FILE` | non-empty shared client secret |
 | Steam | `STEAM_API_KEY` | `STEAM_API_KEY_FILE` | empty |
 | BoardGameGeek | `BGG_API_TOKEN` | `BGG_API_TOKEN_FILE` | non-empty shared token |
-| Hardcover | `HARDCOVER_API` | `HARDCOVER_API_FILE` | non-empty shared `Bearer` token |
+| Hardcover | `HARDCOVER_API` | `HARDCOVER_API_FILE` | empty (metered per account, so no shared default; see #1025) |
 | Google Books | `GOOGLE_BOOKS_API_KEY` | `GOOGLE_BOOKS_API_KEY_FILE` | empty |
 | Comic Vine | `COMICVINE_API` | `COMICVINE_API_FILE` | non-empty shared key |
 | Last.fm | `LASTFM_API_KEY` | none | empty |

@@ -11,6 +11,7 @@ from django.contrib import messages
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import get_object_or_404, redirect, render
 from django.template.loader import render_to_string
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.dateparse import parse_date, parse_datetime
 from django.views.decorators.http import require_GET, require_POST
@@ -401,9 +402,11 @@ def media_save(request):
                     response.write(
                         _render_notes_section_oob(
                             request,
-                            request.user,
-                            media.item,
-                            media,
+                            media.__class__.objects.filter(
+                                user=request.user,
+                                item=media.item,
+                            ),
+                            media=media.item,
                         ),
                     )
             except Exception:
@@ -711,30 +714,41 @@ def _render_season_progress_oob(related_season):
     return spans
 
 
-def _render_notes_section_oob(request, user, item, instance):
+def _render_notes_section_oob(
+    request,
+    entries,
+    *,
+    media=None,
+    detail_notes_target_id="",
+    detail_notes_modal_url="",
+    detail_return_url="",
+):
     """Render the detail notes section as an OOB swap after a watch save.
 
     The notes section lists one block per watch (see detail_notes_section),
     so a note edited in the track modal must be pushed back into the page
     without a full reload.
+
+    The caller supplies the watches rather than this building the queryset:
+    Episode has no `user` field (it is scoped through related_season), so a
+    single `filter(user=...)` here cannot serve both the media and episode
+    save paths. The modal ids are caller-supplied for the same reason — the
+    episode page namespaces its modal targets differently from the movie,
+    season and show pages.
     """
     return render_to_string(
         "app/components/detail_notes_section.html",
         {
             "notes_entries": [
-                entry
-                for entry in instance.__class__.objects.filter(
-                    user=user, item=item
-                )
-                if entry.notes and entry.notes.strip()
+                entry for entry in entries if entry.notes and entry.notes.strip()
             ],
-            "media": item,
-            "user": user,
+            "media": media,
+            "user": request.user,
             "public_notes_view": False,
             "public_view": False,
-            "detail_return_url": "",
-            "detail_notes_modal_url": "",
-            "detail_notes_target_id": "",
+            "detail_return_url": detail_return_url,
+            "detail_notes_modal_url": detail_notes_modal_url,
+            "detail_notes_target_id": detail_notes_target_id,
             "notes_section_oob": True,
         },
         request=request,
@@ -833,6 +847,35 @@ def _write_episode_save_oob(
         response.write(
             _render_track_action_oob(request, related_season, parsed_next),
         )
+        # The episode page lists every watch note, same as the movie/season
+        # pages, so an edited note has to be pushed back the same way. Episode
+        # rows are scoped by season rather than by user, and the page namespaces
+        # its modal targets per episode, so both are passed in explicitly.
+        if episode.item_id:
+            response.write(
+                _render_notes_section_oob(
+                    request,
+                    Episode.objects.filter(
+                        related_season=related_season,
+                        item=episode.item,
+                    ).select_related("item"),
+                    media=episode.item,
+                    detail_notes_target_id=(
+                        f"episode-notes-modal-{source}-{media_id}"
+                        f"-{season_number}-{episode_number}"
+                    ),
+                    detail_notes_modal_url=reverse(
+                        "track_modal",
+                        kwargs={
+                            "source": source,
+                            "media_type": MediaTypes.EPISODE.value,
+                            "media_id": media_id,
+                            "season_number": season_number,
+                        },
+                    ),
+                    detail_return_url=parsed_next,
+                ),
+            )
         # Season-progress spans only exist on the season page — nothing to target here.
         return
 

@@ -16,9 +16,18 @@
         {% include "app/icons/export.svg" with classes="w-6 h-6 text-[var(--color-link)] mr-3" %}
         <h2 class="text-xl font-semibold">Export Data</h2>
       </div>
-      <p class="text-[var(--color-text-muted)] mb-5 text-sm">
+      <p class="text-[var(--color-text-muted)] mb-2 text-sm">
         Export a CSV in Floppy's own backup format now, or create a recurring export schedule and download the initial CSV immediately.
-        Scheduled exports are saved to: <code class="text-[var(--color-text-secondary)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">{{ backup_dir }}</code>
+      </p>
+      <p class="mb-5 text-sm">
+        Scheduled exports save to: <code class="text-[var(--color-text-secondary)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">{{ backup_status.path }}</code>
+        {% if backup_status.host_reachable %}
+          <br>
+          <span class="text-xs text-[var(--color-text-muted)]">{{ backup_status.file_count }} file{{ backup_status.file_count|pluralize }} there now.</span>
+        {% else %}
+          <br>
+          <span class="text-xs text-[var(--color-warning-text)]">Not mounted to the host &mdash; add <code class="text-[var(--color-warning-text)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">./backups:/floppy/backups</code> to your docker-compose volumes to find these files.</span>
+        {% endif %}
       </p>
 
       <form method="post" action="{% url 'create_export_schedule' %}" id="exportForm" x-ref="exportForm">

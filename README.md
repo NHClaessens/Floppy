@@ -212,6 +212,21 @@ If `SECRET` and `SECRET_FILE` are not set, the container stores its generated
 `secret_key` in `FLOPPY_DATA_DIR`. Floppy stores logs and backups in `LOG_DIR`
 and `BACKUP_DIR`. `FLOPPY_DATA_DIR` does not change those settings.
 
+`BACKUP_DIR` defaults to `/floppy/backups` inside the container. The
+Settings → Export page shows this path, but it is a container path, not a
+host path — mount it to a host directory or the scheduled CSVs disappear
+whenever the container is recreated:
+
+```yaml
+services:
+  floppy:
+    image: ghcr.io/dannyvfilms/floppy:latest
+    volumes:
+      - ./backups:/floppy/backups
+```
+
+The default `docker-compose.yml` in this repo already includes this mount.
+
 This example stores the SQLite file and the generated key in one mounted
 directory:
 
@@ -388,7 +403,7 @@ The only universally required variable is `SECRET`. For Docker installs you shou
 - `IGDB_ID` / `IGDB_SECRET` - game metadata from [IGDB](https://www.igdb.com/api)
 - `STEAM_API_KEY` - Steam game imports
 - `BGG_API_TOKEN` - board game metadata from [BoardGameGeek](https://boardgamegeek.com/using_the_xml_api)
-- `HARDCOVER_API` - Hardcover book metadata/imports
+- `HARDCOVER_API` - Hardcover book metadata/imports. **Required to use Hardcover** ([generate a token](https://hardcover.app/account/api)); Hardcover meters its free tier per account (5000 requests/day), so Floppy ships no shared default and book search falls back to Open Library without one. Individual users can also set a personal token in their own settings.
 - `GOOGLE_BOOKS_API_KEY` - optional Google Books book metadata ([Google Books API](https://developers.google.com/books/docs/v1/using)); supports `GOOGLE_BOOKS_API_KEY_FILE` for Docker secrets
 - `COMICVINE_API` - comic metadata
 - `LASTFM_API_KEY` - Last.fm integration and scrobble polling

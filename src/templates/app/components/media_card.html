@@ -665,12 +665,12 @@
 
         {# Track Modal #}
         <div x-show="trackOpen"
+             @mousedown.self="trackOpen = false"
              x-cloak
              @keydown.escape.window="trackOpen = false"
              class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
-               style="width: min(96vw, 72rem);"
-               @click.outside="trackOpen = false">
+               style="width: min(96vw, 72rem);">
             {% if use_podcast_show|default:False and podcast_show %}
               <div id="podcast-show-track-modal-{{ podcast_show.id }}-{{ media.id }}"></div>
             {% elif media|safe_attr:"home_music_card" and media.album %}
@@ -687,9 +687,9 @@
         <div x-show="listsOpen"
              x-cloak
              @keydown.escape.window="listsOpen = false"
-             class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60"
-               @click.outside="listsOpen = false">
+             class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+             @mousedown.self="listsOpen = false">
+          <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
             <div id="{% component_id 'lists' item %}"></div>
           </div>
         </div>

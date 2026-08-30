@@ -301,7 +301,7 @@ def _release_items_queryset():
         Q(
             release_datetime__isnull=True,
             media_type__in=RELEASE_BACKFILL_MEDIA_TYPES,
-            source__in=RELEASE_BACKFILL_SOURCES,
+            source__in=metadata_utils.backfill_sources(RELEASE_BACKFILL_SOURCES),
         )
         | Q(
             # Revisit tracked TMDB shows even after first-air date is stored so

@@ -7,6 +7,7 @@ from django.utils import timezone
 import app
 from app.log_safety import exception_summary
 from app.models import MediaTypes, ProviderMetadataStatus, Sources, Status
+from app.providers import tvmaze
 from app.services.completion import select_preferred_activity_entry
 from integrations import episode_remap
 from integrations.webhooks import anime_mappings
@@ -783,7 +784,8 @@ class BaseWebhookProcessor:
         """Find TV media ID from external IDs, with optional title search fallback.
 
         Args:
-            ids: Dict of external IDs (tmdb_id, tvdb_id, imdb_id, anidb_id).
+            ids: Dict of external IDs (tmdb_id, tvdb_id, imdb_id, anidb_id,
+                tvmaze_id). Only Kodi populates tvmaze_id.
             series_title: Show title used for title-search fallback.
             allow_title_fallback: Enable title-search when all ID lookups fail.
             year: First-air year used to disambiguate title-search results.
@@ -791,6 +793,23 @@ class BaseWebhookProcessor:
         Returns:
             tuple: (media_id, season_number, episode_number)
         """
+        ids = dict(ids)
+        if ids.get("tvmaze_id") and not (
+            ids.get("tvdb_id") or ids.get("imdb_id") or ids.get("tmdb_id")
+        ):
+            try:
+                resolved = tvmaze.external_ids(ids["tvmaze_id"])
+            except Exception as exc:  # pragma: no cover - defensive network guard
+                resolved = None
+                logger.warning(
+                    "TVMaze resolution failed for %s: %s",
+                    ids["tvmaze_id"],
+                    exception_summary(exc),
+                )
+            if resolved:
+                ids["tvdb_id"] = resolved.get("tvdb_id")
+                ids["imdb_id"] = resolved.get("imdb_id")
+
         # Prioritize TVDB/IMDB — TMDB find API resolves episode-level IDs to show IDs
         for ext_id, ext_type in [
             (ids["tvdb_id"], "tvdb_id"),

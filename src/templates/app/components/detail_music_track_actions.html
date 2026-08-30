@@ -18,9 +18,9 @@
 
       <div x-show="listsOpen"
            @keydown.escape.window="listsOpen = false"
-           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60"
-             @click.outside="listsOpen = false">
+           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+           @mousedown.self="listsOpen = false">
+        <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
           <div id="lists-modal-{{ track_data.track.id }}"></div>
         </div>
       </div>
@@ -39,9 +39,9 @@
       </button>
       <div x-show="historyOpen"
            @keydown.escape.window="historyOpen = false"
-           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-        <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60"
-             @click.outside="historyOpen = false">
+           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+           @mousedown.self="historyOpen = false">
+        <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
           <div id="history-modal-{{ track_data.track.id }}"></div>
         </div>
       </div>

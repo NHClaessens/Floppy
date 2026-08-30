@@ -3,7 +3,9 @@ from unittest.mock import patch
 from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 
-from app.providers import hardcover
+from app import metadata_utils
+from app.models import Sources
+from app.providers import hardcover, services
 from integrations.imports.helpers import encrypt
 
 
@@ -71,3 +73,56 @@ class HardcoverUserTokenTests(TestCase):
 
         headers = mock_api_request.call_args.kwargs["headers"]
         self.assertEqual(headers["Authorization"], "Bearer personal-token")
+
+
+class HardcoverUnconfiguredTests(TestCase):
+    """Hardcover ships no default token, so it must degrade cleanly (#1025).
+
+    The bundled token authenticated every Floppy install as one Hardcover
+    account, whose per-account daily quota was permanently exhausted.
+    """
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="no-hardcover",
+            password="12345",
+        )
+
+    @override_settings(HARDCOVER_API="")
+    def test_enabled_is_false_without_an_instance_token(self):
+        self.assertFalse(hardcover.enabled())
+
+    @override_settings(HARDCOVER_API="")
+    def test_a_request_fails_before_the_network_call(self):
+        """An empty Authorization header would spend a request earning a 401."""
+        with self.assertRaises(services.ProviderAPIError) as caught:
+            hardcover._authorization_header(self.user)
+
+        self.assertIn("HARDCOVER_API", str(caught.exception))
+
+    @override_settings(HARDCOVER_API="")
+    def test_a_personal_token_still_works(self):
+        self.user.hardcover_api_key = encrypt("personal-token")
+
+        self.assertEqual(
+            hardcover._authorization_header(self.user),
+            "Bearer personal-token",
+        )
+
+    @override_settings(HARDCOVER_API="")
+    def test_backfills_skip_hardcover_without_an_instance_token(self):
+        """Background jobs have no user, so they must not queue dead work."""
+        sources = metadata_utils.backfill_sources(
+            (Sources.TMDB.value, Sources.HARDCOVER.value, Sources.OPENLIBRARY.value),
+        )
+
+        self.assertNotIn(Sources.HARDCOVER.value, sources)
+        self.assertIn(Sources.OPENLIBRARY.value, sources)
+
+    @override_settings(HARDCOVER_API="instance-token")
+    def test_backfills_keep_hardcover_when_configured(self):
+        sources = metadata_utils.backfill_sources(
+            (Sources.TMDB.value, Sources.HARDCOVER.value),
+        )
+
+        self.assertIn(Sources.HARDCOVER.value, sources)

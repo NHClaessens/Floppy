@@ -1,9 +1,11 @@
 import contextvars
+import hashlib
 import logging
 import os
 import re
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import contextmanager
 from difflib import SequenceMatcher
 from http import HTTPStatus
@@ -58,6 +60,9 @@ RATE_LIMIT_DEFAULT_WAIT_SECONDS = 5
 # don't need the patient background-job retry budget above — sleeping up to
 # 3x60s in a gunicorn worker just makes the page look like it never loads,
 # and can exceed the worker timeout entirely (#1008).
+# Upper bound on how long a 429 may silence a provider. Retry-After is
+# attacker-ish input, and a bad value must not disable a provider for days.
+RATE_LIMIT_MAX_COOLDOWN_SECONDS = 60 * 60
 RATE_LIMIT_MAX_RETRIES_INTERACTIVE = 1
 RATE_LIMIT_MAX_WAIT_SECONDS_INTERACTIVE = 5
 
@@ -375,6 +380,10 @@ session.mount(
     "https://xbl.io/api",
     _build_host_limiter_adapter(per_hour=120),
 )
+session.mount(
+    "https://api.tvmaze.com",
+    _build_host_limiter_adapter(per_second=2),
+)
 
 
 class ProviderAPIError(Exception):
@@ -396,7 +405,10 @@ class ProviderAPIError(Exception):
         content_type = None
         if response is not None:
             raw_headers = getattr(response, "headers", None)
-            headers = raw_headers if isinstance(raw_headers, dict) else {}
+            # requests uses CaseInsensitiveDict, which is a Mapping but NOT a
+            # dict subclass - an isinstance(..., dict) check here silently
+            # discarded the headers of every real response (#1025).
+            headers = raw_headers if isinstance(raw_headers, Mapping) else {}
             raw_content_type = headers.get("Content-Type")
             if isinstance(raw_content_type, str):
                 content_type = raw_content_type.split(";", 1)[0]
@@ -502,8 +514,8 @@ def _get_tmdb_proxy_url():
     return proxy_url or None
 
 
-def _rate_limit_wait_seconds(response) -> int:
-    """Return how long to wait after a 429, clamped and never raising.
+def _retry_after_seconds(response) -> int | None:
+    """Return the provider's requested wait, or None when it did not give one.
 
     Retry-After may legitimately be an HTTP date rather than a number, and some
     providers send neither; an unguarded int() would throw out of the exception
@@ -511,12 +523,73 @@ def _rate_limit_wait_seconds(response) -> int:
     """
     raw = response.headers.get("Retry-After") if response is not None else None
     try:
-        seconds = int(raw)
+        return int(raw)
     except (TypeError, ValueError):
+        return None
+
+
+def _rate_limit_wait_seconds(response, max_wait=RATE_LIMIT_MAX_WAIT_SECONDS) -> int:
+    """Return how long to wait after a 429, clamped and never raising."""
+    seconds = _retry_after_seconds(response)
+    if seconds is None:
         seconds = RATE_LIMIT_DEFAULT_WAIT_SECONDS
     # A small margin over what the provider asked for, so a clock skew of a
     # second doesn't earn another 429 immediately.
-    return max(1, min(seconds + 3, RATE_LIMIT_MAX_WAIT_SECONDS))
+    return max(1, min(seconds + 3, max_wait))
+
+
+def _rate_limit_cooldown_key(provider, headers=None) -> str:
+    """Return the cooldown key for the credential this request authenticates as.
+
+    Providers meter per account, not per host: Hardcover's daily quota belongs
+    to whichever token signed the request. Keying on a digest of the
+    Authorization header keeps a member's personal token from being silenced by
+    the instance token's exhausted quota. Only the digest is stored.
+    """
+    authorization = (headers or {}).get("Authorization") or ""
+    if not authorization:
+        return f"provider_cooldown:{provider}"
+    digest = hashlib.sha256(authorization.encode("utf-8", "replace")).hexdigest()
+    return f"provider_cooldown:{provider}:{digest[:16]}"
+
+
+def _rate_limit_headers(response) -> dict[str, str]:
+    """Return the provider's rate-limit headers for logging."""
+    headers = getattr(response, "headers", None)
+    if not isinstance(headers, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in headers.items()
+        if key.lower().startswith(("ratelimit", "x-ratelimit", "retry-after"))
+    }
+
+
+def _raise_rate_limited(provider, error, retry_after, headers=None):
+    """Arm the provider cooldown and fail without retrying.
+
+    A Retry-After longer than the retry budget means the provider is telling us
+    the quota will not recover in time - Hardcover answers an exhausted daily
+    quota with hours (#1025). Retrying into that only spends more quota and
+    sleeps a worker, so record the cooldown and short-circuit every later call
+    until it elapses.
+    """
+    logger.warning(
+        "%s rate limited beyond the retry budget, cooling down %s seconds %s",
+        provider,
+        retry_after,
+        _rate_limit_headers(getattr(error, "response", None)),
+    )
+    cache.set(
+        _rate_limit_cooldown_key(provider, headers),
+        True,
+        min(retry_after, RATE_LIMIT_MAX_COOLDOWN_SECONDS),
+    )
+    raise ProviderAPIError(
+        provider,
+        error,
+        f"rate limit exceeded, retry in {retry_after} seconds",
+    )
 
 
 def api_request(
@@ -543,6 +616,14 @@ def api_request(
     Returns:
         Parsed JSON dict or ElementTree for XML
     """
+    if cache.get(_rate_limit_cooldown_key(provider, headers)):
+        logger.warning("%s request skipped: provider is in rate-limit cooldown", provider)
+        raise ProviderAPIError(
+            provider,
+            requests.exceptions.RequestException("rate-limit cooldown"),
+            "rate limit exceeded, still cooling down",
+        )
+
     try:
         request_kwargs = {
             "url": url,
@@ -579,31 +660,39 @@ def api_request(
         max_retries = (
             RATE_LIMIT_MAX_RETRIES_INTERACTIVE if interactive else RATE_LIMIT_MAX_RETRIES
         )
-        if status_code == requests.codes.too_many_requests and _retry_attempt < max_retries:
-            seconds_to_wait = _rate_limit_wait_seconds(error_resp)
-            if interactive:
-                seconds_to_wait = min(seconds_to_wait, RATE_LIMIT_MAX_WAIT_SECONDS_INTERACTIVE)
-            logger.warning(
-                "%s rate limited, waiting %s seconds (attempt %s/%s)",
-                provider,
-                seconds_to_wait,
-                _retry_attempt + 1,
-                max_retries,
+        if status_code == requests.codes.too_many_requests:
+            max_wait = (
+                RATE_LIMIT_MAX_WAIT_SECONDS_INTERACTIVE
+                if interactive
+                else RATE_LIMIT_MAX_WAIT_SECONDS
             )
-            time.sleep(seconds_to_wait)
-            return api_request(
-                provider,
-                method,
-                url,
-                params=params,
-                data=data,
-                headers=headers,
-                response_format=response_format,
-                # Previously passed through unchanged, so a provider that kept
-                # returning 429 recursed and slept forever, holding a worker
-                # (#521).
-                _retry_attempt=_retry_attempt + 1,
-            )
+            retry_after = _retry_after_seconds(error_resp)
+            if retry_after is not None and retry_after > max_wait:
+                _raise_rate_limited(provider, error, retry_after, headers)
+
+            if _retry_attempt < max_retries:
+                seconds_to_wait = _rate_limit_wait_seconds(error_resp, max_wait)
+                logger.warning(
+                    "%s rate limited, waiting %s seconds (attempt %s/%s)",
+                    provider,
+                    seconds_to_wait,
+                    _retry_attempt + 1,
+                    max_retries,
+                )
+                time.sleep(seconds_to_wait)
+                return api_request(
+                    provider,
+                    method,
+                    url,
+                    params=params,
+                    data=data,
+                    headers=headers,
+                    response_format=response_format,
+                    # Previously passed through unchanged, so a provider that
+                    # kept returning 429 recursed and slept forever, holding a
+                    # worker (#521).
+                    _retry_attempt=_retry_attempt + 1,
+                )
 
         if (
             status_code in TRANSIENT_HTTP_STATUS_CODES

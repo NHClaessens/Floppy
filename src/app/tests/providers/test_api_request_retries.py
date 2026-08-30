@@ -8,19 +8,32 @@ concurrency 1, so the whole queue - sleeping indefinitely.
 from unittest.mock import Mock, patch
 
 import requests
+from django.core.cache import cache
 from django.test import SimpleTestCase
 
 from app.providers import services
 from app.providers.services import (
     RATE_LIMIT_DEFAULT_WAIT_SECONDS,
+    RATE_LIMIT_MAX_COOLDOWN_SECONDS,
     RATE_LIMIT_MAX_RETRIES,
     RATE_LIMIT_MAX_RETRIES_INTERACTIVE,
     RATE_LIMIT_MAX_WAIT_SECONDS,
     RATE_LIMIT_MAX_WAIT_SECONDS_INTERACTIVE,
+    ProviderAPIError,
+    _rate_limit_cooldown_key,
     _rate_limit_wait_seconds,
     api_request,
     interactive_request_scope,
 )
+
+
+class CooldownIsolationMixin:
+    """Cooldowns outlive a request by design, so clear them between tests."""
+
+    def setUp(self):
+        super().setUp()
+        cache.clear()
+        self.addCleanup(cache.clear)
 
 
 def rate_limited_response(retry_after="1"):
@@ -72,7 +85,7 @@ class RetryAfterParsingTests(SimpleTestCase):
         )
 
 
-class RateLimitRetryTests(SimpleTestCase):
+class RateLimitRetryTests(CooldownIsolationMixin, SimpleTestCase):
     """The 429 retry loop must terminate."""
 
     def test_a_persistent_429_gives_up_instead_of_recursing_forever(self):
@@ -89,21 +102,83 @@ class RateLimitRetryTests(SimpleTestCase):
         self.assertEqual(get.call_count, RATE_LIMIT_MAX_RETRIES + 1)
         self.assertEqual(sleep.call_count, RATE_LIMIT_MAX_RETRIES)
 
-    def test_total_sleep_is_bounded(self):
-        """Bounding the attempts is pointless if each one can sleep for hours."""
+    def test_a_wait_longer_than_the_budget_is_not_retried_at_all(self):
+        """Hardcover answers an exhausted daily quota with hours (#1025).
+
+        Sleeping the clamped 60s and retrying into that only spends more of the
+        quota and strands a worker, so the whole attempt budget is skipped.
+        """
         get = Mock(return_value=rate_limited_response(retry_after="86400"))
         with (
             patch.object(services.session, "get", get),
             patch.object(services.time, "sleep") as sleep,
-            self.assertRaises(requests.exceptions.HTTPError),
+            self.assertRaises(ProviderAPIError),
         ):
             api_request("mal", "GET", "https://example.test/x")
 
-        total = sum(call.args[0] for call in sleep.call_args_list)
-        self.assertLessEqual(
-            total,
-            RATE_LIMIT_MAX_RETRIES * RATE_LIMIT_MAX_WAIT_SECONDS,
-        )
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(sleep.call_count, 0)
+
+    def test_a_long_wait_arms_a_cooldown_that_skips_the_next_request(self):
+        """The next caller must not spend another request into the same wall."""
+        get = Mock(return_value=rate_limited_response(retry_after="86400"))
+        with (
+            patch.object(services.session, "get", get),
+            patch.object(services.time, "sleep"),
+            self.assertRaises(ProviderAPIError),
+        ):
+            api_request("mal", "GET", "https://example.test/x")
+
+        get.reset_mock()
+        with (
+            patch.object(services.session, "get", get),
+            self.assertRaises(ProviderAPIError),
+        ):
+            api_request("mal", "GET", "https://example.test/x")
+
+        self.assertEqual(get.call_count, 0)
+
+    def test_the_cooldown_is_keyed_to_the_credential_that_was_limited(self):
+        """A member's personal token must survive the instance token's quota."""
+        instance = {"Authorization": "Bearer instance-token"}
+        personal = {"Authorization": "Bearer personal-token"}
+        get = Mock(return_value=rate_limited_response(retry_after="86400"))
+        with (
+            patch.object(services.session, "get", get),
+            self.assertRaises(ProviderAPIError),
+        ):
+            api_request("hardcover", "GET", "https://example.test/x", headers=instance)
+
+        self.assertTrue(cache.get(_rate_limit_cooldown_key("hardcover", instance)))
+        self.assertIsNone(cache.get(_rate_limit_cooldown_key("hardcover", personal)))
+
+        get.reset_mock()
+        with (
+            patch.object(services.session, "get", get),
+            self.assertRaises(ProviderAPIError),
+        ):
+            api_request("hardcover", "GET", "https://example.test/x", headers=personal)
+
+        # The personal token is not in cooldown, so it still gets to try.
+        self.assertEqual(get.call_count, 1)
+
+    def test_the_cooldown_key_never_stores_the_token(self):
+        """The digest is the point: cache keys land in logs and dumps."""
+        key = _rate_limit_cooldown_key("hardcover", {"Authorization": "Bearer s3cret"})
+
+        self.assertNotIn("s3cret", key)
+
+    def test_the_cooldown_is_capped(self):
+        """Retry-After is provider-controlled; a bad value must expire."""
+        get = Mock(return_value=rate_limited_response(retry_after="999999"))
+        with (
+            patch.object(services.session, "get", get),
+            patch.object(services.cache, "set") as cache_set,
+            self.assertRaises(ProviderAPIError),
+        ):
+            api_request("mal", "GET", "https://example.test/x")
+
+        self.assertEqual(cache_set.call_args.args[2], RATE_LIMIT_MAX_COOLDOWN_SECONDS)
 
     def test_a_retry_that_succeeds_returns_the_payload(self):
         """Retrying still has to work, not just terminate."""
@@ -122,12 +197,12 @@ class RateLimitRetryTests(SimpleTestCase):
         self.assertEqual(get.call_count, 2)
 
 
-class InteractiveRequestScopeTests(SimpleTestCase):
+class InteractiveRequestScopeTests(CooldownIsolationMixin, SimpleTestCase):
     """Request-serving callers must fail fast instead of blocking (#1008)."""
 
     def test_interactive_scope_caps_retries_and_wait(self):
         """A book detail page must not block for the background retry budget."""
-        get = Mock(return_value=rate_limited_response(retry_after="3600"))
+        get = Mock(return_value=rate_limited_response(retry_after="4"))
         with (
             patch.object(services.session, "get", get),
             patch.object(services.time, "sleep") as sleep,
@@ -165,3 +240,38 @@ class InteractiveRequestScopeTests(SimpleTestCase):
 
         self.assertEqual(get.call_count, RATE_LIMIT_MAX_RETRIES + 1)
         self.assertEqual(sleep.call_count, RATE_LIMIT_MAX_RETRIES)
+
+
+class ProviderErrorLoggingTests(SimpleTestCase):
+    """The error log has to be diagnosable on its own (#1025).
+
+    An isinstance(headers, dict) check silently discarded the headers of every
+    real response, because requests uses CaseInsensitiveDict - a Mapping, but
+    not a dict subclass. Every provider error logged content_type=None and
+    never parsed the body, which is what made a plain Hardcover rate-limit
+    message look like a mysterious headerless blob.
+    """
+
+    def test_case_insensitive_headers_are_read(self):
+        response = Mock(status_code=429)
+        response.headers = requests.structures.CaseInsensitiveDict(
+            {"Content-Type": "application/json; charset=utf-8"},
+        )
+        response.json.return_value = {"error": "Too Many Requests"}
+        error = requests.exceptions.HTTPError(response=response)
+
+        with self.assertLogs("app.providers.services", level="ERROR") as logs:
+            ProviderAPIError("hardcover", error)
+
+        self.assertIn("response_keys=['error']", logs.output[0])
+
+    def test_rate_limit_headers_are_surfaced(self):
+        response = Mock()
+        response.headers = requests.structures.CaseInsensitiveDict(
+            {"Retry-After": "5980", "X-Ratelimit-Daily-Remaining": "0"},
+        )
+
+        self.assertEqual(
+            services._rate_limit_headers(response),
+            {"Retry-After": "5980", "X-Ratelimit-Daily-Remaining": "0"},
+        )

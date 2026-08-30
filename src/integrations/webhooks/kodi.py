@@ -78,9 +78,11 @@ class KodiWebhookProcessor(BaseWebhookProcessor):
         return payload.get("tvShowTitle")
 
     def _extract_external_ids(self, payload):
-        provider_ids = payload.get("uniqueIds", {})
+        episode_ids = payload.get("uniqueIds", {})
+        series_ids = payload.get("tvShowUniqueIds", {})
         return {
-            "tmdb_id": provider_ids.get("tmdb"),
-            "imdb_id": provider_ids.get("imdb"),
-            "tvdb_id": provider_ids.get("tvdb"),
+            "tmdb_id": episode_ids.get("tmdb") or series_ids.get("tmdb"),
+            "imdb_id": episode_ids.get("imdb") or series_ids.get("imdb"),
+            "tvdb_id": episode_ids.get("tvdb") or series_ids.get("tvdb"),
+            "tvmaze_id": episode_ids.get("tvmaze") or series_ids.get("tvmaze"),
         }

@@ -80,7 +80,7 @@ def _genre_items_queryset(*, for_reconcile: bool = False):
             MediaTypes.COMIC.value,
             MediaTypes.MANGA.value,
         ],
-        source__in=GENRE_BACKFILL_SOURCES,
+        source__in=metadata_utils.backfill_sources(GENRE_BACKFILL_SOURCES),
     ).filter(genre_filters)
     queryset = _apply_backfill_state_filters(
         queryset,
