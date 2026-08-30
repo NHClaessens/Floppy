@@ -890,8 +890,8 @@ class KoreaderAccount(models.Model):
         help_text="Skip progress fetches for books already marked completed in Floppy",
     )
     finished_threshold = models.FloatField(
-        default=0.95,
-        help_text="Reading progress fraction (0-1) at which a book is marked read",
+        default=1.0,
+        help_text="Reading progress fraction (0-1) at which a synced book is marked completed",
     )
     supports_document_list = models.BooleanField(null=True, blank=True)
     last_sync_at = models.DateTimeField(null=True, blank=True)

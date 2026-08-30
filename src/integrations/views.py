@@ -2010,12 +2010,29 @@ def import_storyteller(request):
 KOREADER_IMPORT_TASK_NAME = "Import from KOReader"
 
 
+def _parse_finished_threshold_percent(post):
+    """Return a 0-1 completion threshold from a percentage form field."""
+    raw = (post.get("finished_threshold_percent") or "").strip()
+    if not raw:
+        return 1.0
+    try:
+        percent = float(raw)
+    except ValueError as exc:
+        msg = "Completion threshold must be a number between 1 and 100."
+        raise ValueError(msg) from exc
+    if not 1 <= percent <= 100:
+        msg = "Completion threshold must be between 1 and 100 percent."
+        raise ValueError(msg)
+    return percent / 100.0
+
+
 def _koreader_options_from_post(post):
     """Read KOReader account toggles from a form POST."""
     return {
         "verify_ssl": post.get("verify_ssl") == "on",
         "create_missing": post.get("create_missing") == "on",
         "skip_finished_books": post.get("skip_finished_books") == "on",
+        "finished_threshold": _parse_finished_threshold_percent(post),
     }
 
 
@@ -2031,7 +2048,11 @@ def koreader_connect(request):
     server_url = request.POST.get("server_url", "").strip().rstrip("/")
     username = request.POST.get("username", "").strip()
     password = request.POST.get("password", "")
-    options = _koreader_options_from_post(request.POST)
+    try:
+        options = _koreader_options_from_post(request.POST)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect("import_data")
     mode = request.POST.get("mode", "new")
     frequency = request.POST.get("frequency", "once")
     import_time = request.POST.get("time", "00:00")
@@ -2099,7 +2120,11 @@ def koreader_settings(request):
     server_url = request.POST.get("server_url", "").strip().rstrip("/")
     username = request.POST.get("username", "").strip()
     password = request.POST.get("password", "")
-    options = _koreader_options_from_post(request.POST)
+    try:
+        options = _koreader_options_from_post(request.POST)
+    except ValueError as exc:
+        messages.error(request, str(exc))
+        return redirect("import_data")
 
     if not server_url or not username:
         messages.error(request, "Server URL and username are required.")
@@ -2137,6 +2162,7 @@ def koreader_settings(request):
     account.verify_ssl = options["verify_ssl"]
     account.create_missing = options["create_missing"]
     account.skip_finished_books = options["skip_finished_books"]
+    account.finished_threshold = options["finished_threshold"]
     account.connection_broken = False
     account.last_error_message = ""
     account.save(
@@ -2147,6 +2173,7 @@ def koreader_settings(request):
             "verify_ssl",
             "create_missing",
             "skip_finished_books",
+            "finished_threshold",
             "connection_broken",
             "last_error_message",
             "updated_at",

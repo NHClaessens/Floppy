@@ -90,6 +90,7 @@ class KoreaderImporterTests(TestCase):
                 KoreaderClient.password_to_auth_key("secret"),
             ),
             create_missing=False,
+            finished_threshold=1.0,
         )
         self.item = Item.objects.create(
             media_id="42",
@@ -283,6 +284,75 @@ class KoreaderImporterTests(TestCase):
                 item=self.item,
             ).exists(),
         )
+        media = Book.objects.get(user=self.user, item=self.item)
+        self.assertEqual(media.status, Status.IN_PROGRESS.value)
+        self.assertEqual(media.progress, 384)
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_near_complete_progress_stays_in_progress_below_threshold(
+        self,
+        mock_progress,
+        mock_probe,
+    ):
+        mock_probe.return_value = False
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 1896 / 1907,
+            "timestamp": 1_700_000_000,
+        }
+        self.item.number_of_pages = 1907
+        self.item.save(update_fields=["number_of_pages"])
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=1800,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(warnings, "")
+        media = Book.objects.get(user=self.user, item=self.item)
+        self.assertEqual(media.status, Status.IN_PROGRESS.value)
+        self.assertEqual(media.progress, 1896)
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_marks_completed_when_progress_meets_threshold(
+        self,
+        mock_progress,
+        mock_probe,
+    ):
+        KoreaderAccount.objects.filter(user=self.user).update(finished_threshold=0.95)
+        mock_probe.return_value = False
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 0.96,
+            "timestamp": 1_700_000_000,
+        }
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=10,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(warnings, "")
         media = Book.objects.get(user=self.user, item=self.item)
         self.assertEqual(media.status, Status.COMPLETED.value)
         self.assertEqual(media.progress, 400)
@@ -519,6 +589,7 @@ class KoreaderImporterTests(TestCase):
                 "username": "reader2",
                 "verify_ssl": "on",
                 "create_missing": "on",
+                "finished_threshold_percent": "100",
             },
         )
         self.assertEqual(response.status_code, 302)
@@ -528,6 +599,7 @@ class KoreaderImporterTests(TestCase):
         self.assertTrue(account.create_missing)
         self.assertFalse(account.skip_finished_books)
         self.assertTrue(account.verify_ssl)
+        self.assertEqual(account.finished_threshold, 1.0)
 
 
 class KoreaderViewTests(TestCase):
