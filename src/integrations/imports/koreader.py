@@ -16,6 +16,7 @@ from django.conf import settings
 from django.utils import timezone
 
 import app
+from app import custom_metadata
 from app import helpers as app_helpers
 from app.log_safety import exception_summary
 from app.models import MediaTypes, Sources, Status
@@ -212,6 +213,7 @@ class KoreaderImporter:
             "created": 0,
             "updated": 0,
             "skipped": 0,
+            "failed": 0,
             MediaTypes.BOOK.value: 0,
         }
         self._library_items = self._build_library_index()
@@ -235,6 +237,7 @@ class KoreaderImporter:
                 self._mark_broken(str(error))
                 raise MediaImportError(str(error)) from error
             except KoreaderClientError as error:
+                imported_counts["failed"] += 1
                 self.warnings.append(
                     f"Could not fetch progress for {document_hash[:8]}…: {error}",
                 )
@@ -292,6 +295,13 @@ class KoreaderImporter:
                     user=self.user,
                     document_hash=document_hash,
                 )
+
+        if (
+            imported_counts["failed"] > 0
+            and imported_counts["created"] + imported_counts["updated"] == 0
+        ):
+            message = "\n".join(dict.fromkeys(self.warnings)) or "KOReader import failed"
+            raise MediaImportError(message)
 
         self.account.last_sync_at = timezone.now()
         self.account.connection_broken = False
@@ -400,9 +410,7 @@ class KoreaderImporter:
                 defaults={"item": item},
             )
 
-        number_of_pages = item.number_of_pages
-        if not number_of_pages and self.enable_provider_enrichment:
-            number_of_pages = self._fetch_page_count(item)
+        number_of_pages = self._resolve_number_of_pages(item)
 
         is_finished = percentage >= self.account.finished_threshold
         if number_of_pages:
@@ -435,6 +443,9 @@ class KoreaderImporter:
             progress_value,
             status,
             end_date,
+            percentage=percentage,
+            number_of_pages=number_of_pages,
+            is_finished=is_finished,
         ):
             return None
 
@@ -450,12 +461,66 @@ class KoreaderImporter:
         )
         return media, existing is None
 
-    def _book_progress_unchanged(self, existing, progress_value, status, end_date):
+    def _resolve_number_of_pages(self, item):
+        """Return the best available page count for progress conversion."""
+        item.refresh_from_db(
+            fields=["number_of_pages", "manual_metadata", "source", "media_type"],
+        )
+        if item.media_type != MediaTypes.BOOK.value:
+            return None
+
+        if custom_metadata.supports_custom_metadata(item):
+            pages = custom_metadata.detail_value_for_item(item, "page_count")
+            if pages:
+                return int(pages)
+
+        if item.number_of_pages:
+            return item.number_of_pages
+
+        if not self.enable_provider_enrichment:
+            return None
+
+        return self._fetch_page_count(item)
+
+    def _book_progress_unchanged(
+        self,
+        existing,
+        progress_value,
+        status,
+        end_date,
+        *,
+        percentage,
+        number_of_pages,
+        is_finished,
+    ):
+        if self._needs_pseudo_progress_recalc(
+            existing,
+            percentage,
+            number_of_pages,
+            is_finished,
+        ):
+            return False
         return (
             existing.progress == progress_value
             and existing.status == status
             and existing.end_date == end_date
         )
+
+    def _needs_pseudo_progress_recalc(
+        self,
+        existing,
+        percentage,
+        number_of_pages,
+        is_finished,
+    ):
+        """Detect progress stored as whole-percent before a page count existed."""
+        if not number_of_pages:
+            return False
+        if is_finished:
+            return existing.progress != number_of_pages
+        page_based = max(1, round(percentage * number_of_pages))
+        pseudo_based = max(1, round(percentage * 100))
+        return existing.progress == pseudo_based and page_based != pseudo_based
 
     def _resolve_item(self, title: str, authors: list[str]):
         existing_item = self._find_existing_library_item(title, authors)
@@ -488,6 +553,15 @@ class KoreaderImporter:
                     item.media_id,
                     item.source,
                 )
+                if (
+                    item.source != Sources.MANUAL.value
+                    and custom_metadata.supports_custom_metadata(item)
+                    and item.manual_metadata
+                ):
+                    metadata = custom_metadata.build_custom_overlay_metadata(
+                        metadata if isinstance(metadata, dict) else {},
+                        item,
+                    )
         except services.ProviderAPIError:
             return None
         except Exception:

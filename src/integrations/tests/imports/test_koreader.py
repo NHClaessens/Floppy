@@ -12,6 +12,7 @@ from integrations.imports.helpers import MediaImportError
 from integrations.imports.koreader import (
     KoreaderAuthError,
     KoreaderClient,
+    KoreaderClientError,
     KoreaderImporter,
 )
 from integrations.imports.koreader import (
@@ -377,6 +378,94 @@ class KoreaderImporterTests(TestCase):
         account = KoreaderAccount.objects.get(user=self.user)
         self.assertTrue(account.connection_broken)
         self.assertIn("bad creds", account.last_error_message)
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_import_run_failed_when_linked_fetch_errors(self, mock_progress, mock_probe):
+        mock_probe.return_value = False
+        mock_progress.side_effect = KoreaderClientError(
+            "KOReader progress response was not JSON",
+        )
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+
+        with self.assertRaises(MediaImportError):
+            import_media(koreader_importer, None, self.user.id, "new")
+
+        run = ImportRun.objects.get(user=self.user, source="koreader")
+        self.assertEqual(run.status, ImportRun.Status.FAILED)
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_recalculates_progress_after_page_count_added(
+        self,
+        mock_progress,
+        mock_probe,
+    ):
+        mock_probe.return_value = False
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 0.45,
+            "timestamp": 1_700_000_000,
+        }
+        self.item.number_of_pages = 400
+        self.item.save(update_fields=["number_of_pages"])
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=45,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(warnings, "")
+        media = Book.objects.get(user=self.user, item=self.item)
+        self.assertEqual(media.progress, 180)
+
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    @patch("integrations.imports.koreader.KoreaderClient.get_progress")
+    def test_uses_custom_metadata_page_count_when_item_pages_cleared(
+        self,
+        mock_progress,
+        mock_probe,
+    ):
+        mock_probe.return_value = False
+        mock_progress.return_value = {
+            "document": DOCUMENT_HASH,
+            "percentage": 0.93,
+            "timestamp": 1_700_000_000,
+        }
+        self.item.number_of_pages = 0
+        self.item.manual_metadata = {"details": {"number_of_pages": 1907}}
+        self.item.save(update_fields=["number_of_pages", "manual_metadata"])
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=DOCUMENT_HASH,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=93,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(warnings, "")
+        media = Book.objects.get(user=self.user, item=self.item)
+        self.assertEqual(media.progress, 1774)
 
 
     @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")

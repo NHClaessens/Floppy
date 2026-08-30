@@ -108,6 +108,7 @@ def import_media(
         created_count=created_count,
         updated_count=updated_count,
         skipped_count=imported_counts.get("skipped", 0),
+        failed_count=imported_counts.get("failed", 0),
         finished_at=timezone.now(),
     )
 
