@@ -16,6 +16,14 @@
               <p class="text-sm text-[var(--color-text-muted)]">
                 {% if episode.episode_number %}Episode {{ episode.episode_number }} • {% endif %}{{ episode.air_date|user_date_format:user|default_if_none:"Unknown date" }}{% if episode.runtime %} • {{ episode.runtime }}{% endif %}
               </p>
+              {% if episode.website_url %}
+                <a href="{{ episode.website_url }}"
+                   target="_blank"
+                   rel="noopener noreferrer"
+                   class="text-sm text-[var(--color-text-secondary)] hover:text-indigo-500 transition-colors duration-200">
+                  Episode website
+                </a>
+              {% endif %}
             </div>
             <div class="flex space-x-2">
               {# Track Episode #}
@@ -48,6 +56,7 @@
                 </button>
 
                 <div x-show="listsOpen"
+                     x-cloak
                      @keydown.escape.window="listsOpen = false"
                      class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
                      @mousedown.self="listsOpen = false">

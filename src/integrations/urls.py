@@ -31,6 +31,11 @@ urlpatterns = [
         name="plex_disable_watchlist",
     ),
     path("import/plex", views.import_plex, name="import_plex"),
+    path(
+        "import/plex/cover/<str:token>",
+        views.plex_cover,
+        name="plex_cover",
+    ),
     path("import/simkl-oauth", views.simkl_oauth, name="simkl_oauth"),
     path(
         "import/simkl_private",

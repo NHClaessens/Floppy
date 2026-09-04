@@ -7,7 +7,7 @@ from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 
-from app.models import Item, MediaTypes, Sources
+from app.models import Item, MediaTypes, PodcastShow, Sources
 from app.providers import tmdb, tvdb
 
 User = get_user_model()
@@ -18,6 +18,84 @@ class SyncMetadataViewTests(TestCase):
         self.credentials = {"username": "sync-user", "password": "12345"}
         self.user = User.objects.create_user(**self.credentials)
         self.client.login(**self.credentials)
+
+    @patch("app.fork_services_podcast.podcast_rss.fetch_feed_from_rss")
+    def test_sync_metadata_on_a_podcast_show_uuid_rereads_the_feed(
+        self,
+        mock_feed,
+    ):
+        """Regression for issue #1014: the button 404'd on every podcast show.
+
+        A podcast route addresses a show by podcast_uuid, which only ever
+        resolved as an episode uuid, so the sync answered
+        "Podcast episode with ID gp_... not found". A show also has no Item row
+        of its own, so the generic path must not run and mint one.
+        """
+        show = PodcastShow.objects.create(
+            podcast_uuid="gp_75aa1669b361ba1e0a22d07adddfb7f1",
+            source=Sources.GPODDER.value,
+            title="The Jeff Gerstmann Show",
+            rss_feed_url="https://feeds.megaphone.fm/QCD5913450294",
+        )
+        mock_feed.return_value = (
+            {
+                "title": "The Jeff Gerstmann Show",
+                "website_url": "https://example.com/jeff",
+            },
+            [],
+        )
+
+        response = self.client.post(
+            reverse(
+                "sync_metadata",
+                kwargs={
+                    "source": Sources.GPODDER.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "media_id": show.podcast_uuid,
+                },
+            ),
+            {"next": "/"},
+        )
+
+        self.assertEqual(response.status_code, 302)
+        messages = [str(message) for message in get_messages(response.wsgi_request)]
+        self.assertIn("Metadata synced successfully.", messages)
+
+        show.refresh_from_db()
+        self.assertEqual(show.website_url, "https://example.com/jeff")
+        self.assertFalse(
+            Item.objects.filter(media_id=show.podcast_uuid).exists(),
+            "the show uuid must not gain an Item row of its own",
+        )
+
+    @patch(
+        "app.fork_services_podcast.podcast_rss.fetch_feed_from_rss",
+        side_effect=requests.exceptions.ConnectionError("boom"),
+    )
+    def test_sync_metadata_on_a_podcast_show_survives_an_unreachable_feed(
+        self,
+        _mock_feed,
+    ):
+        show = PodcastShow.objects.create(
+            podcast_uuid="gp_unreachable",
+            source=Sources.GPODDER.value,
+            title="Unreachable",
+            rss_feed_url="https://example.com/gone.xml",
+        )
+
+        response = self.client.post(
+            reverse(
+                "sync_metadata",
+                kwargs={
+                    "source": Sources.GPODDER.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "media_id": show.podcast_uuid,
+                },
+            ),
+            {"next": "/"},
+        )
+
+        self.assertEqual(response.status_code, 302)
 
     @patch("app.metadata_sync_views._sync_plex_rating")
     @patch("app.views.Item.fetch_releases")
@@ -339,7 +417,12 @@ class SyncMetadataViewTests(TestCase):
             )
 
         self.assertEqual(response.status_code, 302)
-        mock_delete_many.assert_called_once_with(cache_keys)
+        mock_delete_many.assert_called_once()
+        deleted_keys = mock_delete_many.call_args.args[0]
+        # The refresh reads its TTL from the first key, so the one this request
+        # is actually about has to lead; the rest are order-independent.
+        self.assertEqual(deleted_keys[0], primary_key)
+        self.assertEqual(set(deleted_keys), set(cache_keys))
 
     @patch("app.metadata_sync_views._sync_plex_rating")
     @patch("app.views.Item.fetch_releases")

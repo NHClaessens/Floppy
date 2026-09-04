@@ -3,7 +3,9 @@
 
 {# djlint:off #}
 <!DOCTYPE html>
-<html lang="en" class="scheme-dark bg-[var(--color-page-bg)]">
+<html lang="en"
+      data-img-none="{{ IMG_NONE }}"
+      class="scheme-dark bg-[var(--color-page-bg)]">
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -40,6 +42,8 @@
     </script>
     <script defer src="{% static 'js/libraries/alpinejs-3.14.9.min.js' %}"></script>
     <script src="{% static 'js/libraries/lazysizes-5.3.2.min.js' %}" async></script>
+    <script defer
+            src="{% static 'js/image-fallback.js' %}{% get_static_file_mtime 'js/image-fallback.js' %}"></script>
 
     <link rel="apple-touch-icon" sizes="180x180" href="{% static 'favicon/apple-touch-icon.png' %}">
     <link rel="icon" type="image/png" sizes="32x32" href="{% static 'favicon/favicon-32x32.png' %}">

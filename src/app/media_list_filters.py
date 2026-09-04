@@ -22,6 +22,7 @@ from app.models import (
     Status,
 )
 from app.providers import tmdb
+from app.services import metadata_resolution
 from app.templatetags.app_tags import media_url
 from users.models import MediaSortChoices
 
@@ -969,13 +970,13 @@ def _statusless_entries(user, media_type, filters, tracked_item_ids, tag_ids=(No
                 library_media_type=MediaTypes.ANIME.value,
             )
         )
-        library_mode = getattr(user, "anime_library_mode", MediaTypes.ANIME.value)
-        if library_mode not in {MediaTypes.ANIME.value, "both"}:
+        include_in_anime, _ = metadata_resolution.anime_library_visibility(user)
+        if not include_in_anime:
             items = items.filter(media_type=MediaTypes.ANIME.value)
     elif media_type == MediaTypes.TV.value:
         items = items.filter(media_type=MediaTypes.TV.value)
-        library_mode = getattr(user, "anime_library_mode", MediaTypes.ANIME.value)
-        if library_mode != "both":
+        _, include_in_tv = metadata_resolution.anime_library_visibility(user)
+        if not include_in_tv:
             items = items.exclude(library_media_type=MediaTypes.ANIME.value)
     else:
         items = items.filter(media_type=media_type)
@@ -1046,16 +1047,16 @@ def _get_media_entries_for_type(
     )
     entries = [MediaListEntry(item=media.item, media=media) for media in queryset]
     if media_type == MediaTypes.TV.value:
-        library_mode = getattr(user, "anime_library_mode", MediaTypes.ANIME.value)
-        if library_mode != "both":
+        _, include_in_tv = metadata_resolution.anime_library_visibility(user)
+        if not include_in_tv:
             entries = [
                 entry
                 for entry in entries
                 if getattr(entry.item, "library_media_type", None) != MediaTypes.ANIME.value
             ]
     if media_type == MediaTypes.ANIME.value:
-        library_mode = getattr(user, "anime_library_mode", MediaTypes.ANIME.value)
-        if library_mode in {MediaTypes.ANIME.value, "both"}:
+        include_in_anime, _ = metadata_resolution.anime_library_visibility(user)
+        if include_in_anime:
             grouped = BasicMedia.objects.get_media_list(
                 user=user,
                 media_type=MediaTypes.TV.value,

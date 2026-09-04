@@ -130,6 +130,13 @@ class Media(models.Model):
         if self.item.media_type == MediaTypes.PODCAST.value:
             return self.item.runtime_minutes
 
+        # Audiobooks track progress in minutes, so their total is the runtime.
+        if (
+            self.item.media_type == MediaTypes.BOOK.value
+            and self.item.format == "audiobook"
+        ):
+            return self.item.book_max_progress
+
         if self.item.media_type != MediaTypes.MUSIC.value:
             return None
 
@@ -158,11 +165,15 @@ class Media(models.Model):
         if self.progress < 0:
             self.progress = 0
         elif self.status == Status.IN_PROGRESS.value:
-            # Music and board games are play-count based; podcasts use local runtime data.
+            # Music and board games are play-count based; podcasts and
+            # audiobooks use local runtime data.
             if self.item.media_type in (
                 MediaTypes.PODCAST.value,
                 MediaTypes.MUSIC.value,
                 MediaTypes.BOARDGAME.value,
+            ) or (
+                self.item.media_type == MediaTypes.BOOK.value
+                and self.item.format == "audiobook"
             ):
                 max_progress = self._get_local_max_progress()
             else:
@@ -265,6 +276,12 @@ class Media(models.Model):
     def progress_unit(self):
         """Return the unit `progress` is measured in, or None if not well-defined."""
         return None
+
+    @property
+    def formatted_max_progress(self):
+        """Return max_progress rendered in the same unit as `formatted_progress`."""
+        max_progress = getattr(self, "max_progress", None)
+        return "" if max_progress is None else str(max_progress)
 
     @property
     def formatted_aggregated_progress(self):
@@ -993,6 +1010,18 @@ class Book(Media):
         if getattr(self, "item", None) and self.item.format == "audiobook":
             return "minutes"
         return "pages"
+
+    @property
+    def formatted_max_progress(self):
+        """Return the total as listening time for audiobooks, else a page count."""
+        max_progress = getattr(self, "max_progress", None)
+        if (
+            max_progress is not None
+            and getattr(self, "item", None)
+            and self.item.format == "audiobook"
+        ):
+            return app.helpers.minutes_to_hhmm(max_progress)
+        return super().formatted_max_progress
 
     def increase_progress(self):
         """Increase progress, respecting the percentage tracking preference."""

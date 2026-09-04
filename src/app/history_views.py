@@ -3,7 +3,8 @@ import contextlib
 import logging
 import time
 from collections import defaultdict
-from datetime import date
+from datetime import date, timedelta
+from itertools import pairwise
 from urllib.parse import urlencode
 
 from django.apps import apps
@@ -22,14 +23,28 @@ from app import (
     fork_services_history,
     helpers,
     history_cache,
+    history_cache_reader,
     history_processor,
 )
 from app import statistics as stats
-from app.models import BasicMedia, MediaTypes
+from app.models import (
+    Anime,
+    BasicMedia,
+    BoardGame,
+    Book,
+    Comic,
+    Episode,
+    Game,
+    Manga,
+    MediaTypes,
+    Movie,
+    Podcast,
+)
 
 logger = logging.getLogger(__name__)
 
 MONTHS_PER_YEAR = 12
+SESSION_HISTORY_MAX_DAYS = 400
 
 _MONTH_CACHE_UNSUPPORTED_FILTER_KEYS = frozenset(
     {
@@ -759,6 +774,173 @@ def _annotate_history_day_for_template(day):
     return annotated_day
 
 
+def _attach_session_notes(days):
+    """Attach current per-instance notes without changing cached history payloads."""
+    ids_by_media_type = defaultdict(set)
+    for day in days:
+        for entry in day.get("entries", []):
+            instance_id = entry.get("instance_id")
+            media_type = entry.get("media_type")
+            if instance_id is not None and media_type != MediaTypes.MUSIC.value:
+                ids_by_media_type[media_type].add(instance_id)
+
+    model_by_media_type = {
+        MediaTypes.MOVIE.value: Movie,
+        MediaTypes.EPISODE.value: Episode,
+        MediaTypes.GAME.value: Game,
+        MediaTypes.BOARDGAME.value: BoardGame,
+        MediaTypes.BOOK.value: Book,
+        MediaTypes.COMIC.value: Comic,
+        MediaTypes.MANGA.value: Manga,
+        MediaTypes.ANIME.value: Anime,
+        MediaTypes.PODCAST.value: Podcast,
+    }
+    notes_by_media_type = {}
+    for media_type, instance_ids in ids_by_media_type.items():
+        model = model_by_media_type.get(media_type)
+        if model is None:
+            continue
+        notes_by_media_type[media_type] = dict(
+            model.objects.filter(id__in=instance_ids).values_list("id", "notes"),
+        )
+
+    for day in days:
+        for entry in day.get("entries", []):
+            media_notes = notes_by_media_type.get(entry.get("media_type"), {})
+            entry["notes"] = media_notes.get(entry.get("instance_id"), "")
+
+
+def _build_session_history_stats(history_days):
+    """Build display-ready statistics for the filtered session history."""
+    dated_days = [day for day in history_days if day.get("date")]
+    dates = sorted({day["date"] for day in dated_days})
+    activity_entries = sum(len(day.get("entries", [])) for day in history_days)
+    total_minutes = sum(day.get("total_minutes") or 0 for day in history_days)
+
+    gaps = [
+        (current - previous).days
+        for previous, current in pairwise(dates)
+    ]
+    average_gap = sum(gaps) / len(gaps) if gaps else None
+
+    longest_streak = 0
+    current_streak = 0
+    for index, current in enumerate(dates):
+        previous = dates[index - 1] if index else None
+        if previous is not None and (current - previous).days == 1:
+            current_streak += 1
+        else:
+            current_streak = 1
+        longest_streak = max(longest_streak, current_streak)
+
+    entries_by_weekday = defaultdict(int)
+    for day in dated_days:
+        entries_by_weekday[day["date"].weekday()] += len(day.get("entries", []))
+    most_active_weekday = None
+    if entries_by_weekday:
+        weekday = max(
+            entries_by_weekday,
+            key=lambda value: (entries_by_weekday[value], -value),
+        )
+        most_active_weekday = formats.date_format(
+            date(2024, 1, 1) + timedelta(days=weekday),
+            "l",
+        )
+
+    def format_minutes(minutes):
+        return helpers.minutes_to_hhmm(round(minutes)) if minutes is not None else "—"
+
+    def format_days(days):
+        if days is None:
+            return "—"
+        rounded = round(days, 1)
+        return f"{rounded:g} day{'s' if rounded != 1 else ''}"
+
+    return [
+        {"label": "Active days", "value": str(len(dates))},
+        {"label": "Activity entries", "value": str(activity_entries)},
+        {
+            "label": "Tracked time",
+            "value": format_minutes(total_minutes if activity_entries else None),
+        },
+        {
+            "label": "Average per active day",
+            "value": format_minutes(total_minutes / len(dates)) if dates else "—",
+        },
+        {"label": "Average gap", "value": format_days(average_gap)},
+        {
+            "label": "Longest streak",
+            "value": (
+                f"{longest_streak} day{'s' if longest_streak != 1 else ''}"
+                if longest_streak
+                else "—"
+            ),
+        },
+        {
+            "label": "Most active weekday",
+            "value": most_active_weekday or "—",
+        },
+    ]
+
+
+@require_GET
+def activity_sessions_modal(request):
+    """Return the in-place, date-grouped activity history for one media item."""
+    filters, logging_style = _parse_history_filters(request)
+    history_days = history_cache_reader.get_history_days(
+        request.user,
+        filters,
+        None,
+        logging_style,
+        cap_entries_per_day=False,
+    )
+    history_days = _filter_history_by_enabled_media_types(
+        history_days,
+        request.user,
+    )
+    _attach_session_notes(history_days)
+    history_days = [
+        annotated_day
+        for day in history_days
+        if (annotated_day := _annotate_history_day_for_template(day))
+    ]
+    session_history_stats = _build_session_history_stats(history_days)
+
+    marker_days = sorted(
+        {
+            day["date"].isoformat()
+            for day in history_days
+            if day.get("date")
+        },
+    )
+    newest_dated_day = next(
+        (day["date"] for day in history_days if day.get("date")),
+        timezone.localdate(),
+    )
+    visible_days = history_days[:SESSION_HISTORY_MAX_DAYS]
+    visible_marker_days = sorted(
+        {
+            day["date"].isoformat()
+            for day in visible_days
+            if day.get("date")
+        },
+    )
+    return render(
+        request,
+        "app/components/session_history_modal.html",
+        {
+            "user": request.user,
+            "history_days": visible_days,
+            "marker_days": marker_days,
+            "visible_marker_days": visible_marker_days,
+            "session_history_stats": session_history_stats,
+            "initial_month": newest_dated_day.strftime("%Y-%m"),
+            "history_capped": len(history_days) > SESSION_HISTORY_MAX_DAYS,
+            "history_querystring": request.GET.urlencode(),
+        },
+    )
+
+
 def _prepare_history_day_page(day, user, filters, offset=0):
     """Filter and bound one cached month-view day for HTML rendering."""
     filtered_days = _filter_cached_history_days([day], filters)
@@ -892,6 +1074,16 @@ def history_genres(request):
 @require_GET
 def history(request):
     """Show a day-by-day history of episode and movie plays."""
+    # Surface the media type the user came from (e.g. "view your activity
+    # history" on a movie page) so the navbar search type stays in context
+    # instead of falling back to a stale last_search_type. Invalid values are
+    # dropped so the search bar falls back to last_search_type.
+    requested_media_type = request.GET.get("media_type")
+    context_media_type = (
+        requested_media_type
+        if requested_media_type in MediaTypes.values
+        else None
+    )
     try:
         view_start = time.perf_counter()
         history_mode = request.GET.get("history_mode")
@@ -1084,6 +1276,7 @@ def history(request):
             "active_filters": active_filters,
             "history_refreshing": history_refreshing,
             "history_mode": history_mode,
+            "media_type": context_media_type,
             "use_month_view": use_month_cache,
             "view_year": view_year,
             "view_month": view_month,
@@ -1170,6 +1363,7 @@ def history(request):
             "active_filters": {},
             "database_error": True,
             "history_refreshing": False,
+            "media_type": context_media_type,
         }
         return render(request, "app/history.html", context)
     else:

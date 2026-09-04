@@ -490,6 +490,91 @@ def fetch_metadata(
     return entries[0] if entries else None
 
 
+def find_cached_section(
+    sections: list[dict[str, Any]] | None,
+    machine_identifier: str | None,
+    section_id: Any = None,
+) -> dict[str, Any] | None:
+    """Return a cached section for a server, optionally a specific library.
+
+    Plex rating keys and section ids are only unique within a server, so
+    anything resolving a server connection has to match the machine identifier
+    rather than taking whichever section happens to be cached first.
+    """
+    if not sections or not machine_identifier:
+        return None
+
+    fallback = None
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        if section.get("machine_identifier") != machine_identifier:
+            continue
+        if not section.get("uri"):
+            continue
+        if section_id is None:
+            return section
+        if str(section.get("id")) == str(section_id):
+            return section
+        fallback = fallback or section
+    return fallback
+
+
+def connection_for_machine(
+    sections: list[dict[str, Any]] | None,
+    machine_identifier: str | None,
+    token: str | None = None,
+    section_id: Any = None,
+) -> tuple[str | None, str | None]:
+    """Return (uri, token) for a cached server connection, or (None, None).
+
+    Prefers the section's own access token, which is what a server shared by
+    another user requires.
+    """
+    section = find_cached_section(sections, machine_identifier, section_id)
+    if not section:
+        return None, None
+    return section.get("uri"), section.get("access_token") or token
+
+
+def fetch_children(
+    token: str, uri: str, rating_key: str, timeout: int = 20
+) -> list[dict[str, Any]]:
+    """Fetch the children of a Plex item (e.g. the tracks of an album).
+
+    Args:
+        token: Plex authentication token
+        uri: Plex server URI
+        rating_key: Plex rating key of the parent item
+        timeout: Request timeout in seconds
+    """
+    try:
+        response = requests.get(
+            f"{uri}/library/metadata/{rating_key}/children",
+            headers=_headers(token),
+            params={"X-Plex-Token": token},
+            timeout=timeout,
+            verify=settings.PLEX_SSL_VERIFY,
+        )
+    except RequestException as exc:
+        raise PlexClientError(str(exc)) from exc
+    if response.status_code == HTTPStatus.NOT_FOUND:
+        return []
+    _raise_for_auth(response)
+
+    content_type = response.headers.get("Content-Type", "")
+    if "json" in content_type:
+        container = response.json().get("MediaContainer") or {}
+        return container.get("Metadata") or []
+
+    try:
+        entries, _ = _parse_history_xml(response.text)
+    except ElementTree.ParseError as exc:  # pragma: no cover - defensive
+        msg = f"Could not parse Plex children: {exc}"
+        raise PlexClientError(msg) from exc
+    return entries
+
+
 def _fetch_sections_from_connection(
     connection: dict[str, Any],
     server: dict[str, Any],
@@ -543,6 +628,11 @@ def _fetch_sections_from_connection(
                 "id": attrs.get("key"),
                 "title": attrs.get("title"),
                 "type": attrs.get("type"),
+                # agent/scanner identify audiobook-specific metadata agents
+                # (Audnexus, Booksonic, lazyAudiobooks) in a music library.
+                "agent": attrs.get("agent"),
+                "scanner": attrs.get("scanner"),
+                "uuid": attrs.get("uuid"),
                 "server_name": server.get("name"),
                 "machine_identifier": server.get("machine_identifier"),
                 "uri": uri,
@@ -621,6 +711,12 @@ def _parse_history_xml(xml_text: str) -> tuple[list[dict[str, Any]], int]:
         data = dict(child.attrib)
         data["type"] = data.get("type") or child.tag.lower()
         data["Guid"] = [guid.attrib for guid in child.findall("Guid")]
+        # Genre/Style/Mood carry the audiobook signal for music libraries and
+        # are child elements, so they would otherwise be dropped here.
+        for tag_name in ("Genre", "Style", "Mood"):
+            tags = [tag.attrib for tag in child.findall(tag_name)]
+            if tags:
+                data[tag_name] = tags
         entries.append(data)
 
     total_size = _coerce_int(

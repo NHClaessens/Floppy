@@ -3172,8 +3172,12 @@ class MediaListViewTests(TestCase):
             html=False,
         )
         grid_html = grid_page.content.decode()
-        self.assertRegex(grid_html, r'x-show="trackOpen"\s+x-cloak')
-        self.assertRegex(grid_html, r'x-show="listsOpen"\s+x-cloak')
+        # x-cloak has to be on the modal so it can't flash before Alpine
+        # initialises, but it need not be the very next attribute: #1016
+        # inserted @mousedown.self between the two on the track modal, and an
+        # adjacency-pinned regex turned that into a red suite on latest.
+        self.assertRegex(grid_html, r'x-show="trackOpen"[^>]*\sx-cloak\b')
+        self.assertRegex(grid_html, r'x-show="listsOpen"[^>]*\sx-cloak\b')
 
         first_page = self.client.get(
             reverse("medialist", args=[MediaTypes.MOVIE.value])
@@ -3198,7 +3202,7 @@ class MediaListViewTests(TestCase):
         )
         second_html = second_page.content.decode()
         self.assertNotIn("<thead", second_html)
-        self.assertRegex(second_html, r'x-show="trackOpen"\s+x-cloak')
+        self.assertRegex(second_html, r'x-show="trackOpen"[^>]*\sx-cloak\b')
 
         second_rows = re.findall(r"<tr[^>]*>(.*?)</tr>", second_html, flags=re.DOTALL)
         self.assertGreater(len(second_rows), 0)

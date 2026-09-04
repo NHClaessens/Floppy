@@ -1003,6 +1003,16 @@ TRACK_TIME = config("TRACK_TIME", default=True, cast=bool)
 
 BACKUP_DIR = config("BACKUP_DIR", default=str(BASE_DIR / "backups"))
 
+# Raw SQLite snapshots for disaster recovery (#1053) -- distinct from the CSV
+# exports above, which cannot replace a physically damaged db.sqlite3. Rides
+# the same BACKUP_DIR volume mount installs already have.
+DB_SNAPSHOT_ENABLED = config("DB_SNAPSHOT_ENABLED", default=True, cast=bool)
+DB_SNAPSHOT_RETENTION_COUNT = config(
+    "DB_SNAPSHOT_RETENTION_COUNT", default=7, cast=int,
+)
+DB_SNAPSHOT_HOUR = config("DB_SNAPSHOT_HOUR", default=2, cast=int)
+DB_SNAPSHOT_MINUTE = config("DB_SNAPSHOT_MINUTE", default=30, cast=int)
+
 # Runtime population settings
 RUNTIME_POPULATION_DISABLED = config(
     "RUNTIME_POPULATION_DISABLED", default=False, cast=bool
@@ -1478,6 +1488,7 @@ RECONCILE_BATCH_SIZE = config(
     cast=int,
 )
 WATCH_PROVIDERS_RECONCILE_BATCH_SIZE = RECONCILE_BATCH_SIZE
+EXTERNAL_IDS_RECONCILE_BATCH_SIZE = RECONCILE_BATCH_SIZE
 GENRE_RECONCILE_BATCH_SIZE = RECONCILE_BATCH_SIZE
 # Chunks of 50 items enqueued per reconcile pass, bounding in-flight work.
 RECONCILE_MAX_CHUNKS_PER_RUN = config(
@@ -1551,6 +1562,14 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": 60 * 15,
         "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
     },
+    # Folds shows that the old routing tracked in both Anime and TV Shows back
+    # into one row. Self-limiting: once no duplicates remain each run is a
+    # single cheap query (discussion #967).
+    "repair_duplicated_anime_libraries": {
+        "task": "Repair duplicated anime libraries",
+        "schedule": crontab(hour=5, minute=30),
+        "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
+    },
     "reload_calendar": {
         "task": "Reload calendar",
         "schedule": 60 * 60 * 24,  # every 24 hours
@@ -1558,6 +1577,11 @@ CELERY_BEAT_SCHEDULE = {
     "cleanup_image_cache": {
         "task": "Cleanup image cache",
         "schedule": crontab(hour=4, minute=0),
+        "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
+    },
+    "write_database_snapshot": {
+        "task": "Write database snapshot",
+        "schedule": crontab(hour=DB_SNAPSHOT_HOUR, minute=DB_SNAPSHOT_MINUTE),
         "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
     },
     "send_release_notifications": {
@@ -1626,6 +1650,22 @@ CELERY_BEAT_SCHEDULE = {
         "kwargs": {
             "batch_size": WATCH_PROVIDERS_RECONCILE_BATCH_SIZE,
         },
+        "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
+    },
+    "ensure_external_ids_backfill_reconcile": {
+        "task": "Ensure external ID backfill reconcile",
+        "schedule": RECONCILE_INTERVAL_SECONDS,
+        "kwargs": {
+            "batch_size": EXTERNAL_IDS_RECONCILE_BATCH_SIZE,
+        },
+        "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
+    },
+    # One-shot: goes quiet for good once every show with a feed has been swept
+    # (app/tasks_podcast.py), so this only has to catch the passes after the
+    # first one the startup hook kicks off.
+    "ensure_podcast_website_backfill_reconcile": {
+        "task": "Ensure podcast website backfill reconcile",
+        "schedule": RECONCILE_INTERVAL_SECONDS,
         "options": {"priority": CELERY_TASK_PRIORITY_BACKGROUND},
     },
     "warm_discover_api_cache": {

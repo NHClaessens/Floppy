@@ -1107,6 +1107,26 @@
           <li>Playback start marks the item in progress; the recurring library import marks items watched.</li>
         </ol>
       </div>
+      {% if stremio_catalog_readiness %}
+        <div class="mt-4">
+          <h4 class="text-sm font-medium mb-2">Catalog Status</h4>
+          <ul class="space-y-1 text-sm text-[var(--color-text-muted)]">
+            {% for catalog in stremio_catalog_readiness %}
+              <li>
+                {% if catalog.unresolved %}
+                  <strong class="text-[var(--color-text-secondary)]">{{ catalog.publishable }} of {{ catalog.total }}</strong>
+                  {{ catalog.noun }} in <strong class="text-[var(--color-text-secondary)]">{{ catalog.list_name }}</strong> can be published.
+                  Stremio identifies titles by IMDb ID, and the other {{ catalog.unresolved }} {{ catalog.unresolved|pluralize:"has,have" }} none yet.
+                  Floppy resolves these in the background, but a title with no IMDb ID at its provider stays unpublishable.
+                {% else %}
+                  All <strong class="text-[var(--color-text-secondary)]">{{ catalog.total }}</strong>
+                  {{ catalog.noun }} in <strong class="text-[var(--color-text-secondary)]">{{ catalog.list_name }}</strong> can be published.
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+      {% endif %}
     </div>
 
     {# Seerr #}

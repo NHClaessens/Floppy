@@ -167,6 +167,9 @@ def _build_domain_from_albums(
                 "selector_label": _track_selector_label(track),
                 "air_date": _track_release_datetime(album, track_index),
                 "release_datetime": _track_release_datetime(album, track_index),
+                "runtime_minutes": track.duration_ms // 60000
+                if track.duration_ms
+                else "",
                 "existing_play_count": 0,
                 "track_id": track.id,
                 "album_id": album.id,
@@ -241,7 +244,7 @@ def _build_domain_from_albums(
         "selection_noun": "track",
         "selection_noun_plural": "tracks",
         "distribution_target_label": "release date",
-        "date_shortcut_label": "Release date",
+        "date_shortcut_label": "Release Date",
         "missing_target_date_fallback_distribution": "even",
         "tab_label": "Track Plays",
         "submit_label": "Save plays",

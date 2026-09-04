@@ -279,6 +279,8 @@ class LibraryMoveViewTests(TestCase):
         self,
         mock_search,
     ):
+        self.user.anime_metadata_source_default = Sources.MAL.value
+        self.user.save(update_fields=["anime_metadata_source_default"])
         mock_search.return_value = {
             "results": [
                 {

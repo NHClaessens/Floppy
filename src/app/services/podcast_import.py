@@ -6,11 +6,10 @@ create/import shows the same way instead of duplicating the logic.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 
 from app.log_safety import exception_summary
-from app.models import PodcastEpisode, PodcastShow
+from app.models import PodcastShow
 
 logger = logging.getLogger(__name__)
 
@@ -123,50 +122,11 @@ def import_show_from_itunes_id(itunes_id: str) -> PodcastShow:
 
 def _import_episodes_from_rss(show: PodcastShow, rss_feed_url: str) -> None:
     """Import every episode from an RSS feed into a newly created show."""
-    from integrations import podcast_rss
+    from app.fork_services_podcast import refresh_show_episodes_from_rss
 
-    episodes_data = podcast_rss.fetch_episodes_from_rss(rss_feed_url, limit=None)
-    seen_uuids = set()
-
-    for episode_data in episodes_data:
-        episode_uuid = episode_data.get("guid")
-        if not episode_uuid:
-            uuid_str = (
-                f"{episode_data.get('title', '')}{episode_data.get('published', '')}"
-            )
-            episode_uuid = hashlib.md5(
-                uuid_str.encode(),
-                usedforsecurity=False,
-            ).hexdigest()[:36]
-
-        if episode_uuid in seen_uuids:
-            continue
-
-        exists = False
-        if episode_data.get("title") and episode_data.get("published"):
-            exists = PodcastEpisode.objects.filter(
-                show=show,
-                title__iexact=episode_data["title"].strip(),
-                published__date=episode_data["published"].date(),
-            ).exists()
-
-        if not exists:
-            try:
-                PodcastEpisode.objects.create(
-                    show=show,
-                    episode_uuid=episode_uuid,
-                    title=episode_data.get("title", "Unknown Episode"),
-                    published=episode_data.get("published"),
-                    duration=episode_data.get("duration"),
-                    audio_url=episode_data.get("audio_url", ""),
-                    website_url=episode_data.get("website_url", ""),
-                    episode_number=episode_data.get("episode_number"),
-                    season_number=episode_data.get("season_number"),
-                )
-                seen_uuids.add(episode_uuid)
-            except Exception:
-                logger.debug(
-                    "Skipping duplicate episode UUID %s for show %s",
-                    episode_uuid,
-                    show.title,
-                )
+    # The show was just created from this feed, so rss_feed_url is already the
+    # one to read; the shared reconciler builds the whole catalog when the show
+    # has no episodes yet, and is the only place episode rows are written from
+    # a feed.
+    show.rss_feed_url = rss_feed_url
+    refresh_show_episodes_from_rss(show)

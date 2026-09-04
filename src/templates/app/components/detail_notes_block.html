@@ -3,9 +3,11 @@
 
 {% comment %}
   canHover keys the edit affordance off the pointer's actual capability rather
-  than a width breakpoint: a touch device never fires mouseenter, so a
-  hover-only button is unreachable there, and a large tablet would defeat a
-  min-width proxy. focusin/focusout keep it reachable by keyboard too.
+  than a width breakpoint, which a large tablet would defeat. Touch browsers do
+  fire an emulated mouseenter on tap, so a hover-only button is reachable there
+  only by accident: it appears after a tap aimed at something else and vanishes
+  on the next one. Where hover is not real the button is simply always shown.
+  focusin/focusout keep it reachable by keyboard.
 {% endcomment %}
 <div class="mb-2"
      x-data="{ hovered: false, trackOpen: false, canHover: window.matchMedia('(hover: hover)').matches }"
@@ -14,6 +16,7 @@
      @focusin="hovered = true"
      @focusout="if (!$el.contains($event.relatedTarget)) hovered = false">
   <div x-show="trackOpen"
+       x-cloak
        @mousedown.self="trackOpen = false"
        @keydown.escape.window="trackOpen = false"
        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"

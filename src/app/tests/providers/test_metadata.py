@@ -2986,3 +2986,47 @@ class OpenLibraryPublishDateTests(TestCase):
 
     def test_missing_publish_date_returns_none(self):
         self.assertIsNone(openlibrary.get_publish_date({}))
+
+
+class GetTvdbEpisodeImageMapErrorLogging(TestCase):
+    """A TVDB 404 means the TMDB season/episode doesn't exist under TVDB's own
+    numbering (common for grouped-anime shows) - expected, not a warning.
+    """
+
+    def setUp(self):
+        cache.clear()
+
+    @staticmethod
+    def _provider_error(status_code):
+        error = Exception("boom")
+        error.response = MagicMock(status_code=status_code, headers={})
+        return services.ProviderAPIError(Sources.TVDB.value, error)
+
+    @patch("app.providers.tvdb.tv_with_seasons")
+    @patch("app.providers.tvdb.enabled", return_value=True)
+    def test_404_logs_at_info(self, _mock_enabled, mock_tv_with_seasons):
+        mock_tv_with_seasons.side_effect = self._provider_error(404)
+
+        with self.assertLogs("app.providers.tmdb", level="INFO") as captured:
+            result = tmdb.get_tvdb_episode_image_map("352408", 1, tmdb_media_id="82684")
+
+        self.assertEqual(result, {})
+        self.assertTrue(
+            any(record.levelname == "INFO" for record in captured.records),
+        )
+        self.assertFalse(
+            any(record.levelname == "WARNING" for record in captured.records),
+        )
+
+    @patch("app.providers.tvdb.tv_with_seasons")
+    @patch("app.providers.tvdb.enabled", return_value=True)
+    def test_non_404_still_logs_at_warning(self, _mock_enabled, mock_tv_with_seasons):
+        mock_tv_with_seasons.side_effect = self._provider_error(500)
+
+        with self.assertLogs("app.providers.tmdb", level="INFO") as captured:
+            result = tmdb.get_tvdb_episode_image_map("352408", 1, tmdb_media_id="82684")
+
+        self.assertEqual(result, {})
+        self.assertTrue(
+            any(record.levelname == "WARNING" for record in captured.records),
+        )

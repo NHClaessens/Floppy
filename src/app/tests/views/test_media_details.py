@@ -1,5 +1,6 @@
 import re
 from datetime import UTC, datetime, timedelta
+from html import unescape
 from unittest.mock import patch
 from urllib.parse import urlparse
 
@@ -3093,12 +3094,12 @@ class MediaDetailsViewTests(TestCase):
         self.assertContains(response, "1h 30min watched")
         self.assertIn('<div class="mb-3 sm:mb-1 text-center md:text-start">', content)
         self.assertIn(
-            'class="flex items-center justify-center gap-0.5 whitespace-nowrap text-[13px] tracking-[-0.01em] sm:hidden"',
+            'class="flex w-full items-center justify-center gap-0.5 whitespace-nowrap text-[13px] tracking-[-0.01em] sm:hidden cursor-pointer"',
             content,
         )
         self.assertIn("1h 30min (1/8)", content)
         self.assertIn(
-            'class="hidden flex-wrap items-center justify-center gap-y-1 sm:flex md:justify-start"',
+            'class="hidden w-full flex-wrap items-center justify-center gap-y-1 sm:flex md:justify-start cursor-pointer"',
             content,
         )
         self.assertNotContains(response, "Your History")
@@ -6173,6 +6174,15 @@ class MediaDetailsViewTests(TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertIsNone(first.context["prev_episode_number"])
         self.assertEqual(first.context["next_episode_number"], 2)
+        first_content = first.content.decode()
+        self.assertEqual(first_content.count('aria-label="Select episode"'), 2)
+        self.assertIn('@click="open = !open"', first_content)
+        self.assertIn("Episode 1", first_content)
+        self.assertIn("Episode 2", first_content)
+        self.assertNotIn(
+            'class="flex h-11 w-full items-center justify-center space-x-2 px-4',
+            first_content,
+        )
 
         middle = get_episode_details(2)
         self.assertEqual(middle.status_code, 200)
@@ -6274,361 +6284,6 @@ class MediaDetailsViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.context["notes_entry"].notes, "Public episode note")
         self.assertContains(response, "Public episode note")
-
-    @patch("integrations.tasks.fetch_collection_metadata_for_item.delay")
-    @patch("app.views.credits.sync_item_credits_from_metadata")
-    @patch("app.views.metadata_utils.apply_item_metadata", return_value=[])
-    @patch("app.providers.services.get_media_metadata")
-    def test_first_saved_note_swaps_into_a_pre_existing_section(
-        self,
-        mock_get_metadata,
-        _mock_apply_item_metadata,
-        _mock_sync_credits,
-        _mock_fetch_delay,
-    ):
-        """The notes section anchor exists before there is any note to show.
-
-        media_save returns the section as an hx-swap-oob fragment. htmx drops an
-        OOB fragment whose target is not already in the DOM, so gating the
-        section on having a note meant the *first* note saved never appeared
-        until a reload.
-        """
-        mock_get_metadata.return_value = {
-            "media_id": "238",
-            "title": "Test Movie",
-            "media_type": MediaTypes.MOVIE.value,
-            "source": Sources.TMDB.value,
-            "image": "http://example.com/image.jpg",
-            "synopsis": "Test overview",
-            "max_progress": 1,
-            "details": {},
-            "related": {},
-            "cast": [],
-            "crew": [],
-            "studios_full": [],
-        }
-        item = Item.objects.create(
-            media_id="238",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.MOVIE.value,
-            title="Test Movie",
-            image="http://example.com/image.jpg",
-        )
-        Movie.objects.create(
-            item=item,
-            user=self.user,
-            status=Status.COMPLETED.value,
-            progress=1,
-        )
-
-        fragment = self.client.get(
-            reverse(
-                "media_details",
-                kwargs={
-                    "source": Sources.TMDB.value,
-                    "media_type": MediaTypes.MOVIE.value,
-                    "media_id": item.media_id,
-                    "title": "test-movie",
-                },
-            ),
-            {"fragment": "secondary"},
-        )
-
-        self.assertEqual(fragment.status_code, 200)
-        # The anchor is present with no notes yet, and carries no stray heading.
-        self.assertContains(fragment, 'id="detail-notes-section"', html=False)
-        self.assertNotContains(
-            fragment, '<h2 class="text-xl font-bold">Your Notes</h2>', html=False
-        )
-
-        saved = self.client.post(
-            reverse("media_save"),
-            {
-                "media_id": item.media_id,
-                "source": Sources.TMDB.value,
-                "media_type": MediaTypes.MOVIE.value,
-                "status": Status.COMPLETED.value,
-                "progress": 1,
-                "repeats": 0,
-                "notes": "First note ever",
-            },
-            headers={"hx-request": "true"},
-        )
-
-        self.assertEqual(saved.status_code, 200)
-        body = saved.content.decode()
-        section = body[body.index('id="detail-notes-section"') :]
-        self.assertIn('hx-swap-oob="outerHTML"', section)
-        self.assertIn('<h2 class="text-xl font-bold">Your Notes</h2>', section)
-        self.assertIn("First note ever", section)
-
-    @patch("integrations.tasks.fetch_collection_metadata_for_item.delay")
-    @patch("app.views.credits.sync_item_credits_from_metadata")
-    @patch("app.views.metadata_utils.apply_item_metadata", return_value=[])
-    @patch("app.providers.services.get_media_metadata")
-    def test_clearing_the_last_note_leaves_no_bare_heading(
-        self,
-        mock_get_metadata,
-        _mock_apply_item_metadata,
-        _mock_sync_credits,
-        _mock_fetch_delay,
-    ):
-        """The mirror case: an emptied section must not keep its heading."""
-        mock_get_metadata.return_value = {
-            "media_id": "238",
-            "title": "Test Movie",
-            "media_type": MediaTypes.MOVIE.value,
-            "source": Sources.TMDB.value,
-            "image": "http://example.com/image.jpg",
-            "synopsis": "Test overview",
-            "max_progress": 1,
-            "details": {},
-            "related": {},
-            "cast": [],
-            "crew": [],
-            "studios_full": [],
-        }
-        item = Item.objects.create(
-            media_id="238",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.MOVIE.value,
-            title="Test Movie",
-            image="http://example.com/image.jpg",
-        )
-        movie = Movie.objects.create(
-            item=item,
-            user=self.user,
-            status=Status.COMPLETED.value,
-            progress=1,
-            notes="Soon to be cleared",
-        )
-
-        saved = self.client.post(
-            reverse("media_save"),
-            {
-                "media_id": item.media_id,
-                "source": Sources.TMDB.value,
-                "media_type": MediaTypes.MOVIE.value,
-                "status": Status.COMPLETED.value,
-                "progress": 1,
-                "repeats": 0,
-                "instance_id": movie.id,
-                "notes": "",
-            },
-            headers={"hx-request": "true"},
-        )
-
-        self.assertEqual(saved.status_code, 200)
-        body = saved.content.decode()
-        section = body[body.index('id="detail-notes-section"') :]
-        self.assertIn('hx-swap-oob="outerHTML"', section)
-        self.assertNotIn('<h2 class="text-xl font-bold">Your Notes</h2>', section)
-
-    def test_editing_an_episode_note_swaps_the_section_back(self):
-        """Episode saves push the notes section back like movie saves do.
-
-        Episode rows are scoped through related_season rather than a `user`
-        field, so the notes OOB helper cannot build its own `filter(user=...)`
-        queryset — episodes were left out entirely and an edited note only
-        showed up after a reload.
-        """
-        tv_item = Item.objects.create(
-            media_id="1668",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.TV.value,
-            title="Test TV Show",
-        )
-        tv = TV.objects.create(
-            item=tv_item,
-            user=self.user,
-            status=Status.IN_PROGRESS.value,
-        )
-        season_item = Item.objects.create(
-            media_id="1668",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.SEASON.value,
-            season_number=1,
-            title="Season 1",
-        )
-        season = Season.objects.create(
-            item=season_item,
-            user=self.user,
-            related_tv=tv,
-            status=Status.IN_PROGRESS.value,
-        )
-        episode_item = Item.objects.create(
-            media_id="1668",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.EPISODE.value,
-            season_number=1,
-            episode_number=1,
-            title="Episode 1",
-        )
-        episode = Episode.objects.create(
-            item=episode_item,
-            related_season=season,
-            notes="note before the edit",
-            end_date=datetime(2026, 8, 1, tzinfo=UTC),
-        )
-
-        next_path = reverse(
-            "episode_details",
-            kwargs={
-                "source": Sources.TMDB.value,
-                "media_id": "1668",
-                "title": "test-tv-show",
-                "season_number": 1,
-                "episode_number": 1,
-            },
-        )
-        response = self.client.post(
-            f"{reverse('episode_save')}?next={next_path}",
-            {
-                "media_id": "1668",
-                "source": Sources.TMDB.value,
-                "media_type": MediaTypes.EPISODE.value,
-                "season_number": 1,
-                "episode_number": 1,
-                "instance_id": episode.id,
-                "status": Status.COMPLETED.value,
-                "end_date": "2026-08-01T00:00",
-                "notes": "note after the edit",
-            },
-            headers={"hx-request": "true"},
-        )
-
-        self.assertEqual(response.status_code, 200)
-        body = response.content.decode()
-        self.assertIn('id="detail-notes-section"', body)
-        section = body[body.index('id="detail-notes-section"') :]
-        self.assertIn('hx-swap-oob="outerHTML"', section)
-        self.assertIn("note after the edit", section)
-        self.assertNotIn("note before the edit", section)
-        # The swapped-in blocks must keep the episode page's own modal
-        # namespace, not fall back to the movie/season component ids.
-        self.assertIn(
-            f"episode-notes-modal-tmdb-1668-1-1-{episode.id}",
-            section,
-        )
-
-    @patch("app.views.tmdb.episode", return_value={})
-    @patch("app.providers.services.get_media_metadata")
-    @patch("app.providers.tmdb.process_episodes")
-    def test_episode_notes_blocks_get_distinct_modal_targets(
-        self,
-        mock_process_episodes,
-        mock_get_metadata,
-        _mock_episode,
-    ):
-        """Every watch note renders its own edit-modal target.
-
-        The target id is built by concatenating the episode's modal id with the
-        watch's pk. Django's `add` filter returns "" for str + int, so an
-        unstringified pk silently emptied every id and left the edit buttons
-        pointing at "#".
-        """
-        tv_item = Item.objects.create(
-            media_id="1668",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.TV.value,
-            title="Test TV Show",
-        )
-        tv = TV.objects.create(
-            item=tv_item,
-            user=self.user,
-            status=Status.IN_PROGRESS.value,
-        )
-        season_item = Item.objects.create(
-            media_id="1668",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.SEASON.value,
-            season_number=1,
-            title="Season 1",
-        )
-        season = Season.objects.create(
-            item=season_item,
-            user=self.user,
-            related_tv=tv,
-            status=Status.IN_PROGRESS.value,
-        )
-        episode_item = Item.objects.create(
-            media_id="1668",
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.EPISODE.value,
-            season_number=1,
-            episode_number=1,
-            title="Episode 1",
-        )
-        watches = [
-            Episode.objects.create(
-                item=episode_item,
-                related_season=season,
-                notes=f"Watch note {index}",
-                end_date=datetime(2026, 8, index, tzinfo=UTC),
-            )
-            for index in (1, 2)
-        ]
-
-        mock_get_metadata.side_effect = lambda *_args, **_kwargs: {
-            "title": "Test TV Show",
-            "media_id": "1668",
-            "source": Sources.TMDB.value,
-            "media_type": MediaTypes.TV.value,
-            "image": "http://example.com/image.jpg",
-            "season/1": {
-                "title": "Season 1",
-                "season_title": "Season 1",
-                "media_id": "1668",
-                "media_type": MediaTypes.SEASON.value,
-                "source": Sources.TMDB.value,
-                "image": "http://example.com/season.jpg",
-                "episodes": [{"episode_number": 1}],
-            },
-        }
-        mock_process_episodes.return_value = [
-            {
-                "media_id": "1668",
-                "source": Sources.TMDB.value,
-                "media_type": MediaTypes.EPISODE.value,
-                "season_number": 1,
-                "episode_number": 1,
-                "title": "Episode 1",
-                "air_date": "2023-01-01",
-                "watched": True,
-                "history": watches,
-            },
-        ]
-
-        response = self.client.get(
-            reverse(
-                "episode_details",
-                kwargs={
-                    "source": Sources.TMDB.value,
-                    "media_id": "1668",
-                    "title": "test-tv-show",
-                    "season_number": 1,
-                    "episode_number": 1,
-                },
-            ),
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            [entry.notes for entry in response.context["notes_entries"]],
-            ["Watch note 1", "Watch note 2"],
-        )
-
-        html = response.content.decode()
-        section = html[html.index('id="detail-notes-section"') :]
-        targets = re.findall(r'hx-target="#([^"]*)"', section)
-        anchors = re.findall(r'<div id="([^"]*)"></div>', section)
-
-        expected = [
-            f"{response.context['episode_notes_modal_target_id']}-{watch.pk}"
-            for watch in watches
-        ]
-        self.assertEqual(targets, expected)
-        self.assertEqual(anchors, expected)
 
     @patch("app.providers.services.get_media_metadata")
     @patch("app.providers.tmdb.process_episodes")
@@ -7602,16 +7257,20 @@ class MediaDetailsViewTests(TestCase):
             r'<div class="mb-1 text-center md:text-start">\s*<div class="inline-flex items-center gap-2 md:flex md:gap-2">\s*<h1 class="text-3xl font-bold cursor-pointer hover:text-indigo-500 transition-colors duration-200">\s*<a href="[^"]+">Test TV Show</a>\s*</h1>',
         )
         self.assertIn(
-            'class="flex flex-col gap-y-4 md:flex-row md:gap-y-0 items-center justify-between mb-1"',
-            content,
-        )
-        self.assertIn('class="relative w-full md:w-auto"', content)
-        self.assertIn(
-            '<h2 class="text-sm font-medium text-[var(--color-text-muted)] md:hidden">Season 1</h2>',
+            'class="relative flex flex-col gap-y-4 md:flex-row md:gap-y-0 items-center justify-between mb-1"',
             content,
         )
         self.assertIn(
-            'class="hidden flex-wrap items-center justify-start gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] md:flex md:text-start"',
+            'aria-label="Select season"',
+            content,
+        )
+        self.assertIn(
+            '@click="open = !open"',
+            content,
+        )
+        self.assertEqual(content.count('aria-label="Select season"'), 2)
+        self.assertNotIn(
+            'class="flex w-full items-center justify-center space-x-2 px-4 py-2',
             content,
         )
 
@@ -7704,9 +7363,10 @@ class MediaDetailsViewTests(TestCase):
         )
         self.assertIn('aria-label="Show alternative title"', content)
         self.assertIn(
-            '<h2 class="text-sm font-medium text-[var(--color-text-muted)]">Season 3</h2>',
+            'aria-label="Select season"',
             content,
         )
+        self.assertIn(">Season 3</span>", content)
         self.assertIn("<p>Alicization</p>", content)
 
     @patch("app.providers.services.get_media_metadata")
@@ -7809,17 +7469,38 @@ class MediaDetailsViewTests(TestCase):
             content,
         )
         self.assertIn(
-            '<h2 class="text-sm font-medium text-[var(--color-text-muted)] md:hidden">Season 1</h2>',
+            'aria-label="Select season"',
+            content,
+        )
+        self.assertEqual(content.count('aria-label="Select season"'), 2)
+        history_buttons = re.findall(
+            r'<button[^>]*aria-label="View session history"[^>]*>.*?</button>',
+            content,
+            flags=re.DOTALL,
+        )
+        self.assertEqual(len(history_buttons), 2)
+        self.assertTrue(
+            any("season-progress-desktop-" in button for button in history_buttons),
+        )
+        for button in history_buttons:
+            self.assertNotIn("Season 1", button)
+        self.assertIn("Progress: 2/8", content)
+        self.assertIn("2026-03-01 12:00 - 2026-03-12 12:00", content)
+        self.assertNotIn(
+            '<h2 class="text-sm font-medium text-[var(--color-text-muted)]">Season 1</h2>',
             content,
         )
         self.assertIn(
-            'class="mt-3 flex flex-wrap items-center justify-center gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] md:hidden"',
+            'hx-get="/history/sessions?media_type=tv',
             content,
         )
-        self.assertRegex(
-            content,
-            r'class="hidden flex-wrap items-center justify-start gap-y-1 text-center text-sm font-medium text-\[var\(--color-text-muted\)\] md:flex md:text-start">\s*<h2 class="text-sm font-medium text-\[var\(--color-text-muted\)\]">Season 1</h2>\s*<span class="mx-2 text-gray-600">•</span>\s*<span id="season-progress-desktop-\d+" class="text-sm font-medium text-\[var\(--color-text-muted\)\]">\s*Progress: 2/8\s*</span>\s*<span class="mx-2 text-gray-600">•</span>\s*<span class="text-sm font-medium text-\[var\(--color-text-muted\)\]">\s*2026-03-01 12:00 - 2026-03-12 12:00\s*</span>',
+        trigger_start = content.index('hx-get="/history/sessions')
+        trigger_url = content[trigger_start:].split('"', 2)[1]
+        self.assertEqual(
+            unescape(trigger_url),
+            "/history/sessions?media_type=tv&media_id=1668&source=tmdb&season_number=1",
         )
+        self.assertEqual(content.count('id="session-history-modal-host"'), 1)
         self.assertNotIn("Your History", content)
 
     @patch("integrations.tasks.fetch_collection_metadata_for_item.delay")
@@ -9100,6 +8781,89 @@ class MediaDetailsViewTests(TestCase):
         self.assertContains(response, "Episode One")
         self.assertNotContains(response, "Mark All Played")
 
+    def test_detail_action_track_modal_is_cloaked(self):
+        """The detail page's track modal must not flash before Alpine hides it.
+
+        detail_action_buttons.html's overlay is a full-screen
+        `fixed inset-0 bg-black/50` div; without x-cloak it renders visible
+        until Alpine boots and applies x-show="trackOpen".
+        """
+        show = PodcastShow.objects.create(
+            podcast_uuid="itunes:1002937872",
+            title="Cloak Check",
+            image="http://example.com/podcast.jpg",
+            rss_feed_url="",
+        )
+        PodcastEpisode.objects.create(
+            show=show,
+            episode_uuid="cloak-episode-1",
+            title="Episode One",
+            duration=3600,
+        )
+
+        response = self.client.get(
+            reverse(
+                "media_details",
+                kwargs={
+                    "source": Sources.POCKETCASTS.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "media_id": show.podcast_uuid,
+                    "title": "cloak-check",
+                },
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertRegex(
+            response.content.decode(),
+            r'x-show="trackOpen"[^>]*\sx-cloak\b',
+        )
+
+    def test_podcast_media_details_renders_show_and_episode_website_links(self):
+        """Issue #1014: the links have to reach the page users actually open.
+
+        /podcast/show/<id>/ rendered them, but the route the app links to is
+        /details/<source>/podcast/<show_uuid>/<slug>, which builds its own
+        context and carried neither the show's website nor the episodes'.
+        """
+        show = PodcastShow.objects.create(
+            podcast_uuid="itunes:1002937871",
+            title="Voicemail Dump Truck",
+            author="Mary",
+            image="http://example.com/podcast.jpg",
+            rss_feed_url="",
+            website_url="https://www.spreaker.com/show/voicemail-dump-truck",
+        )
+        PodcastEpisode.objects.create(
+            show=show,
+            episode_uuid="vdt-episode-1",
+            title="Dog Sunscreen",
+            duration=3600,
+            website_url="https://www.spreaker.com/episode/dog-sunscreen",
+        )
+
+        response = self.client.get(
+            reverse(
+                "media_details",
+                kwargs={
+                    "source": Sources.POCKETCASTS.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "media_id": show.podcast_uuid,
+                    "title": "voicemail-dump-truck",
+                },
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response,
+            "https://www.spreaker.com/show/voicemail-dump-truck",
+        )
+        self.assertContains(
+            response,
+            "https://www.spreaker.com/episode/dog-sunscreen",
+        )
+
     def test_podcast_media_details_renders_for_show_without_artwork(self):
         """Podcast details should render when the show has no artwork.
 
@@ -9920,6 +9684,359 @@ class MediaDetailsViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         item.refresh_from_db()
         self.assertEqual(item.image, existing_image)
+
+
+    @patch("integrations.tasks.fetch_collection_metadata_for_item.delay")
+    @patch("app.views.credits.sync_item_credits_from_metadata")
+    @patch("app.views.metadata_utils.apply_item_metadata", return_value=[])
+    @patch("app.providers.services.get_media_metadata")
+    def test_first_saved_note_swaps_into_a_pre_existing_section(
+        self,
+        mock_get_metadata,
+        _mock_apply_item_metadata,
+        _mock_sync_credits,
+        _mock_fetch_delay,
+    ):
+        """The notes section anchor exists before there is any note to show.
+
+        media_save returns the section as an hx-swap-oob fragment. htmx drops an
+        OOB fragment whose target is not already in the DOM, so gating the
+        section on having a note meant the *first* note saved never appeared
+        until a reload.
+        """
+        mock_get_metadata.return_value = {
+            "media_id": "238",
+            "title": "Test Movie",
+            "media_type": MediaTypes.MOVIE.value,
+            "source": Sources.TMDB.value,
+            "image": "http://example.com/image.jpg",
+            "synopsis": "Test overview",
+            "max_progress": 1,
+            "details": {},
+            "related": {},
+            "cast": [],
+            "crew": [],
+            "studios_full": [],
+        }
+        item = Item.objects.create(
+            media_id="238",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Test Movie",
+            image="http://example.com/image.jpg",
+        )
+        Movie.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            progress=1,
+        )
+
+        fragment = self.client.get(
+            reverse(
+                "media_details",
+                kwargs={
+                    "source": Sources.TMDB.value,
+                    "media_type": MediaTypes.MOVIE.value,
+                    "media_id": item.media_id,
+                    "title": "test-movie",
+                },
+            ),
+            {"fragment": "secondary"},
+        )
+
+        self.assertEqual(fragment.status_code, 200)
+        # The anchor is present with no notes yet, and carries no stray heading.
+        self.assertContains(fragment, 'id="detail-notes-section"', html=False)
+        self.assertNotContains(
+            fragment, '<h2 class="text-xl font-bold">Your Notes</h2>', html=False
+        )
+
+        saved = self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": item.media_id,
+                "source": Sources.TMDB.value,
+                "media_type": MediaTypes.MOVIE.value,
+                "status": Status.COMPLETED.value,
+                "progress": 1,
+                "repeats": 0,
+                "notes": "First note ever",
+            },
+            headers={"hx-request": "true"},
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        body = saved.content.decode()
+        section = body[body.index('id="detail-notes-section"') :]
+        self.assertIn('hx-swap-oob="outerHTML"', section)
+        self.assertIn('<h2 class="text-xl font-bold">Your Notes</h2>', section)
+        self.assertIn("First note ever", section)
+    @patch("integrations.tasks.fetch_collection_metadata_for_item.delay")
+    @patch("app.views.credits.sync_item_credits_from_metadata")
+    @patch("app.views.metadata_utils.apply_item_metadata", return_value=[])
+    @patch("app.providers.services.get_media_metadata")
+    def test_clearing_the_last_note_leaves_no_bare_heading(
+        self,
+        mock_get_metadata,
+        _mock_apply_item_metadata,
+        _mock_sync_credits,
+        _mock_fetch_delay,
+    ):
+        """The mirror case: an emptied section must not keep its heading."""
+        mock_get_metadata.return_value = {
+            "media_id": "238",
+            "title": "Test Movie",
+            "media_type": MediaTypes.MOVIE.value,
+            "source": Sources.TMDB.value,
+            "image": "http://example.com/image.jpg",
+            "synopsis": "Test overview",
+            "max_progress": 1,
+            "details": {},
+            "related": {},
+            "cast": [],
+            "crew": [],
+            "studios_full": [],
+        }
+        item = Item.objects.create(
+            media_id="238",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Test Movie",
+            image="http://example.com/image.jpg",
+        )
+        movie = Movie.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            progress=1,
+            notes="Soon to be cleared",
+        )
+
+        saved = self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": item.media_id,
+                "source": Sources.TMDB.value,
+                "media_type": MediaTypes.MOVIE.value,
+                "status": Status.COMPLETED.value,
+                "progress": 1,
+                "repeats": 0,
+                "instance_id": movie.id,
+                "notes": "",
+            },
+            headers={"hx-request": "true"},
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        body = saved.content.decode()
+        section = body[body.index('id="detail-notes-section"') :]
+        self.assertIn('hx-swap-oob="outerHTML"', section)
+        self.assertNotIn('<h2 class="text-xl font-bold">Your Notes</h2>', section)
+    def test_editing_an_episode_note_swaps_the_section_back(self):
+        """Episode saves push the notes section back like movie saves do.
+
+        Episode rows are scoped through related_season rather than a `user`
+        field, so the notes OOB helper cannot build its own `filter(user=...)`
+        queryset — episodes were left out entirely and an edited note only
+        showed up after a reload.
+        """
+        tv_item = Item.objects.create(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            title="Test TV Show",
+        )
+        tv = TV.objects.create(
+            item=tv_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        season_item = Item.objects.create(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            season_number=1,
+            title="Season 1",
+        )
+        season = Season.objects.create(
+            item=season_item,
+            user=self.user,
+            related_tv=tv,
+            status=Status.IN_PROGRESS.value,
+        )
+        episode_item = Item.objects.create(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.EPISODE.value,
+            season_number=1,
+            episode_number=1,
+            title="Episode 1",
+        )
+        episode = Episode.objects.create(
+            item=episode_item,
+            related_season=season,
+            notes="note before the edit",
+            end_date=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+
+        next_path = reverse(
+            "episode_details",
+            kwargs={
+                "source": Sources.TMDB.value,
+                "media_id": "1668",
+                "title": "test-tv-show",
+                "season_number": 1,
+                "episode_number": 1,
+            },
+        )
+        response = self.client.post(
+            f"{reverse('episode_save')}?next={next_path}",
+            {
+                "media_id": "1668",
+                "source": Sources.TMDB.value,
+                "media_type": MediaTypes.EPISODE.value,
+                "season_number": 1,
+                "episode_number": 1,
+                "instance_id": episode.id,
+                "status": Status.COMPLETED.value,
+                "end_date": "2026-08-01T00:00",
+                "notes": "note after the edit",
+            },
+            headers={"hx-request": "true"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.content.decode()
+        self.assertIn('id="detail-notes-section"', body)
+        section = body[body.index('id="detail-notes-section"') :]
+        self.assertIn('hx-swap-oob="outerHTML"', section)
+        self.assertIn("note after the edit", section)
+        self.assertNotIn("note before the edit", section)
+        # The swapped-in blocks must keep the episode page's own modal
+        # namespace, not fall back to the movie/season component ids.
+        self.assertIn(
+            f"episode-notes-modal-tmdb-1668-1-1-{episode.id}",
+            section,
+        )
+    @patch("app.views.tmdb.episode", return_value={})
+    @patch("app.providers.services.get_media_metadata")
+    @patch("app.providers.tmdb.process_episodes")
+    def test_episode_notes_blocks_get_distinct_modal_targets(
+        self,
+        mock_process_episodes,
+        mock_get_metadata,
+        _mock_episode,
+    ):
+        """Every watch note renders its own edit-modal target.
+
+        The target id is built by concatenating the episode's modal id with the
+        watch's pk. Django's `add` filter returns "" for str + int, so an
+        unstringified pk silently emptied every id and left the edit buttons
+        pointing at "#".
+        """
+        tv_item = Item.objects.create(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            title="Test TV Show",
+        )
+        tv = TV.objects.create(
+            item=tv_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        season_item = Item.objects.create(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            season_number=1,
+            title="Season 1",
+        )
+        season = Season.objects.create(
+            item=season_item,
+            user=self.user,
+            related_tv=tv,
+            status=Status.IN_PROGRESS.value,
+        )
+        episode_item = Item.objects.create(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.EPISODE.value,
+            season_number=1,
+            episode_number=1,
+            title="Episode 1",
+        )
+        watches = [
+            Episode.objects.create(
+                item=episode_item,
+                related_season=season,
+                notes=f"Watch note {index}",
+                end_date=datetime(2026, 8, index, tzinfo=UTC),
+            )
+            for index in (1, 2)
+        ]
+
+        mock_get_metadata.side_effect = lambda *_args, **_kwargs: {
+            "title": "Test TV Show",
+            "media_id": "1668",
+            "source": Sources.TMDB.value,
+            "media_type": MediaTypes.TV.value,
+            "image": "http://example.com/image.jpg",
+            "season/1": {
+                "title": "Season 1",
+                "season_title": "Season 1",
+                "media_id": "1668",
+                "media_type": MediaTypes.SEASON.value,
+                "source": Sources.TMDB.value,
+                "image": "http://example.com/season.jpg",
+                "episodes": [{"episode_number": 1}],
+            },
+        }
+        mock_process_episodes.return_value = [
+            {
+                "media_id": "1668",
+                "source": Sources.TMDB.value,
+                "media_type": MediaTypes.EPISODE.value,
+                "season_number": 1,
+                "episode_number": 1,
+                "title": "Episode 1",
+                "air_date": "2023-01-01",
+                "watched": True,
+                "history": watches,
+            },
+        ]
+
+        response = self.client.get(
+            reverse(
+                "episode_details",
+                kwargs={
+                    "source": Sources.TMDB.value,
+                    "media_id": "1668",
+                    "title": "test-tv-show",
+                    "season_number": 1,
+                    "episode_number": 1,
+                },
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [entry.notes for entry in response.context["notes_entries"]],
+            ["Watch note 1", "Watch note 2"],
+        )
+
+        html = response.content.decode()
+        section = html[html.index('id="detail-notes-section"') :]
+        targets = re.findall(r'hx-target="#([^"]*)"', section)
+        anchors = re.findall(r'<div id="([^"]*)"></div>', section)
+
+        expected = [
+            f"{response.context['episode_notes_modal_target_id']}-{watch.pk}"
+            for watch in watches
+        ]
+        self.assertEqual(targets, expected)
+        self.assertEqual(anchors, expected)
 
 
 class AnimeNextEpisodeRedirectTests(TestCase):

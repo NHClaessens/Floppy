@@ -39,11 +39,30 @@
 
   <div class="mb-3 flex flex-col items-center justify-between gap-y-4 md:mb-1 md:flex-row md:gap-y-0">
     <div class="w-full">
-      <div class="flex flex-col gap-y-4 md:flex-row md:gap-y-0 items-center justify-between mb-1">
-        <div class="text-center md:text-start">
-          <h2 class="text-sm font-medium text-[var(--color-text-muted)] md:hidden">{{ media.season_header_title|default:media.title }}</h2>
+      <div class="relative flex flex-col gap-y-4 md:flex-row md:gap-y-0 items-center justify-between mb-1"
+           x-data="{ open: false }"
+           @click.away="open = false"
+           @keydown.escape.window="open = false">
+        <div class="w-full text-center md:w-auto md:text-start">
+          <div class="flex flex-col items-center md:hidden">
+            <button type="button"
+                    aria-haspopup="listbox"
+                    aria-label="Select season"
+                    :aria-expanded="open.toString()"
+                    @click="open = !open"
+                    class="inline-flex items-center gap-1 text-sm font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] cursor-pointer">
+              <span>{{ media.season_header_title|default:media.title }}</span>
+              <span class="h-4 w-4" :class="{ 'rotate-180': open }">{% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}</span>
+            </button>
           {% if not public_view|default:False and current_instance %}
-            <div class="mt-3 flex flex-wrap items-center justify-center gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] md:hidden">
+            <button type="button"
+                    aria-haspopup="dialog"
+                    aria-label="View session history"
+                    class="mt-3 flex w-full flex-wrap items-center justify-center gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] cursor-pointer md:hidden"
+                    hx-get="{% url 'activity_sessions_modal' %}?media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}&season_number={{ season_number }}"
+                    hx-target="#session-history-modal-host"
+                    hx-swap="innerHTML"
+                    @click="$dispatch('open-session-history')">
               <span id="season-progress-mobile-{{ current_instance.id }}" class="text-sm font-medium text-[var(--color-text-muted)]">
                 Progress: {{ current_instance.completed_episode_count }}{% if media.max_progress %}/{{ media.max_progress }}{% endif %}
               </span>
@@ -59,27 +78,45 @@
                   {% endif %}
                 </span>
               {% endif %}
-            </div>
+            </button>
           {% endif %}
+          </div>
           <div class="hidden flex-wrap items-center justify-start gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] md:flex md:text-start">
-            <h2 class="text-sm font-medium text-[var(--color-text-muted)]">{{ media.season_header_title|default:media.title }}</h2>
+            <button type="button"
+                    aria-haspopup="listbox"
+                    aria-label="Select season"
+                    :aria-expanded="open.toString()"
+                    @click="open = !open"
+                    class="inline-flex items-center gap-1 text-sm font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] cursor-pointer">
+              <span>{{ media.season_header_title|default:media.title }}</span>
+              <span class="h-4 w-4" :class="{ 'rotate-180': open }">{% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}</span>
+            </button>
             {% if not public_view|default:False and current_instance %}
-              <span class="mx-2 text-gray-600">•</span>
-              <span id="season-progress-desktop-{{ current_instance.id }}" class="text-sm font-medium text-[var(--color-text-muted)]">
-                Progress: {{ current_instance.completed_episode_count }}{% if media.max_progress %}/{{ media.max_progress }}{% endif %}
-              </span>
-              {% if current_instance.start_date or current_instance.end_date %}
                 <span class="mx-2 text-gray-600">•</span>
-                <span class="text-sm font-medium text-[var(--color-text-muted)]">
-                  {% if current_instance.start_date and current_instance.end_date %}
-                    {{ current_instance.start_date|datetime_format:user }} - {{ current_instance.end_date|datetime_format:user }}
-                  {% elif current_instance.start_date %}
-                    {{ current_instance.start_date|datetime_format:user }}
-                  {% else %}
-                    {{ current_instance.end_date|datetime_format:user }}
+                <button type="button"
+                        aria-haspopup="dialog"
+                        aria-label="View session history"
+                        class="flex flex-wrap items-center justify-start gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] cursor-pointer md:text-start"
+                        hx-get="{% url 'activity_sessions_modal' %}?media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}&season_number={{ season_number }}"
+                        hx-target="#session-history-modal-host"
+                        hx-swap="innerHTML"
+                        @click="$dispatch('open-session-history')">
+                  <span id="season-progress-desktop-{{ current_instance.id }}" class="text-sm font-medium text-[var(--color-text-muted)]">
+                    Progress: {{ current_instance.completed_episode_count }}{% if media.max_progress %}/{{ media.max_progress }}{% endif %}
+                  </span>
+                  {% if current_instance.start_date or current_instance.end_date %}
+                    <span class="mx-2 text-gray-600">•</span>
+                    <span class="text-sm font-medium text-[var(--color-text-muted)]">
+                      {% if current_instance.start_date and current_instance.end_date %}
+                        {{ current_instance.start_date|datetime_format:user }} - {{ current_instance.end_date|datetime_format:user }}
+                      {% elif current_instance.start_date %}
+                        {{ current_instance.start_date|datetime_format:user }}
+                      {% else %}
+                        {{ current_instance.end_date|datetime_format:user }}
+                      {% endif %}
+                    </span>
                   {% endif %}
-                </span>
-              {% endif %}
+                </button>
             {% endif %}
           </div>
         </div>
@@ -92,26 +129,14 @@
                hx-swap="none"></div>
         {% endif %}
 
-        {# Season dropdown #}
-        <div class="relative w-full md:w-auto"
-             x-data="{ open: false }"
-             @click.away="open = false"
-             @keydown.escape.window="open = false">
-          <button @click="open = !open"
-                  class="flex w-full items-center justify-center space-x-2 px-4 py-2 border border-[var(--color-surface-border)] bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm hover:bg-[var(--color-surface-muted)] rounded-xl transition-colors duration-200 cursor-pointer md:w-auto md:justify-start">
-            <span class="text-sm font-medium">{{ media.season_header_title|default:media.title }}</span>
-            <div class="w-4 h-4" :class="{ 'rotate-180': open }">
-              {% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}
-            </div>
-          </button>
-          <div x-show="open"
-               x-transition:enter="transition ease-out duration-200"
-               x-transition:enter-start="opacity-0 transform scale-95"
-               x-transition:enter-end="opacity-100 transform scale-100"
-               x-transition:leave="transition ease-in duration-150"
-               x-transition:leave-start="opacity-100 transform scale-100"
-               x-transition:leave-end="opacity-0 transform scale-95"
-               class="absolute right-1/2 md:right-0 translate-x-1/2 md:translate-x-0 mt-2 w-64 bg-[var(--color-surface)] rounded-md shadow-lg overflow-hidden z-10">
+        <div x-show="open"
+             x-transition:enter="transition ease-out duration-200"
+             x-transition:enter-start="opacity-0 transform scale-95"
+             x-transition:enter-end="opacity-100 transform scale-100"
+             x-transition:leave="transition ease-in duration-150"
+             x-transition:leave-start="opacity-100 transform scale-100"
+             x-transition:leave-end="opacity-0 transform scale-95"
+             class="absolute left-0 top-full mt-2 w-64 bg-[var(--color-surface)] rounded-md shadow-lg overflow-hidden z-10">
             <div class="max-h-[300px] overflow-y-auto">
               {% for tv_season in tv.related.seasons %}
                 <a href="{% if parent_media_type == MediaTypes.ANIME.value %}{% url 'anime_season_details' source=media.source media_id=media.media_id title=media.title|slug season_number=tv_season.season_number %}{% else %}{% url 'season_details' source=media.source media_id=media.media_id title=media.title|slug season_number=tv_season.season_number %}{% endif %}"
@@ -130,7 +155,6 @@
                 </a>
               {% endfor %}
             </div>
-          </div>
         </div>
       </div>
     </div>
@@ -176,7 +200,7 @@
       </div>
     </div>
   {% endwith %}
-  {% include "app/components/detail_activity_subtitle_slot.html" with media=media media_type=media_type activity_subtitle=activity_subtitle user=user only %}
+  {% include "app/components/detail_activity_subtitle_slot.html" with media=media media_type=media_type activity_subtitle=activity_subtitle podcast_show=podcast_show user=user only %}
   {% if media.media_type == MediaTypes.BOOK.value and media.series_name %}
     <p class="text-[var(--color-link)] font-medium mb-4 text-center md:text-start">
       {{ media.series_name }}

@@ -8,6 +8,69 @@ from app.models import MediaTypes, Sources
 
 ANIME_SUPPLEMENT_GENRE = "Anime"
 
+
+def provider_metadata_cache_keys(
+    source,
+    media_type,
+    media_id,
+    season_number=None,
+    episode_number=None,
+    route_media_type=None,
+):
+    """Return the provider cache keys holding a payload, canonical key first.
+
+    Callers that refresh metadata used to hand-build `source_mediatype_mediaid`.
+    That shape stopped matching once the TMDB movie and season keys gained a
+    strategy version, so a refresh would read a TTL of None, delete nothing, and
+    then be served the very payload it meant to replace (issue #1066). Building
+    the keys here - through the providers' own helpers - keeps every refresh
+    path honest as versions move.
+    """
+    keys = []
+    if source == Sources.TMDB.value:
+        from app.providers import tmdb
+
+        keys.extend(
+            tmdb.metadata_cache_keys(
+                media_id,
+                media_type,
+                season_number=season_number,
+                episode_number=episode_number,
+            ),
+        )
+    elif source == Sources.TVDB.value:
+        from app.providers import tvdb
+
+        # TVDB routes anime separately from TV, and a grouped-anime route
+        # persists as `tv`, so the canonical key follows the route the request
+        # came in on rather than the tracking type it is stored under.
+        routed_media_type = (
+            MediaTypes.ANIME.value
+            if (route_media_type or media_type) == MediaTypes.ANIME.value
+            else MediaTypes.TV.value
+        )
+        if media_type == MediaTypes.SEASON.value:
+            keys.append(tvdb._season_cache_key(media_id, season_number, routed_media_type))
+        else:
+            keys.append(tvdb._cache_key(routed_media_type, media_id))
+        keys.extend(tvdb.metadata_cache_keys(media_id, season_number))
+
+    if source != Sources.TVDB.value:
+        # The unversioned shape. Still worth evicting for TMDB, where entries
+        # written before the movie key gained a version are sitting in the cache
+        # under it; and it is the only key a provider without a helper uses.
+        # TVDB's keys have always been versioned and its helper is exhaustive.
+        legacy_key = f"{source}_{media_type}_{media_id}"
+        if media_type == MediaTypes.SEASON.value and season_number is not None:
+            legacy_key += f"_{season_number}"
+        keys.append(legacy_key)
+
+    deduped = []
+    for key in keys:
+        if key and key not in deduped:
+            deduped.append(key)
+    return deduped
+
 CORE_METADATA_FIELDS = [
     "synopsis",
     "source_url",

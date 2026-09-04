@@ -1,16 +1,27 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 from django.contrib.auth import get_user_model
 from django.template.loader import render_to_string
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.utils import timezone
 
 from app import config
-from app.models import Album, Artist, Item, MediaTypes, Sources, Studio
+from app.models import (
+    Album,
+    Artist,
+    BasicMedia,
+    Book,
+    Item,
+    MediaTypes,
+    Sources,
+    Status,
+    Studio,
+)
 from app.templatetags import app_tags
 from users.models import DateFormatChoices, TimeFormatChoices
 
@@ -215,6 +226,22 @@ class AppTagsTests(TestCase):
 
             # Check that it returns a non-empty string
             self.assertTrue(isinstance(result, str))
+
+    @override_settings(TIME_ZONE="America/New_York")
+    def test_release_year_handles_year_one_sentinel_datetime(self):
+        """release_year must not raise OverflowError for a year-0001 release_datetime.
+
+        A negative UTC offset (e.g. America/New_York) underflows below
+        datetime.MINYEAR when converting the sentinel to local time.
+        """
+        item = Item(
+            media_id="118340",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Test Movie",
+            release_datetime=datetime(1, 1, 1, tzinfo=UTC),
+        )
+        self.assertIsNone(app_tags.release_year(item))
 
     def test_natural_day(self):
         """Test the natural_day filter."""
@@ -457,6 +484,85 @@ class AppTagsTests(TestCase):
             ),
             content,
         )
+
+    def _render_book_card(self, *, status, progress, percentage=False, audiobook=False):
+        """Render media_card.html for a book and return its markup."""
+        item = Item.objects.create(
+            media_id=f"book-card-{status}-{audiobook}",
+            source=Sources.OPENLIBRARY.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Card Book",
+            image="http://example.com/book.jpg",
+            release_datetime=datetime(2020, 1, 1, tzinfo=UTC),
+            format="audiobook" if audiobook else "",
+            runtime_minutes=600 if audiobook else None,
+            number_of_pages=None if audiobook else 350,
+        )
+        self.user.book_comic_manga_progress_percentage = percentage
+        self.user.save(update_fields=["book_comic_manga_progress_percentage"])
+
+        media = Book.objects.create(
+            item=item, user=self.user, status=status, progress=progress
+        )
+        BasicMedia.objects.annotate_max_progress([media], MediaTypes.BOOK.value)
+
+        request = self.request_factory.get("/library")
+        request.user = self.user
+        return render_to_string(
+            "app/components/media_card.html",
+            {
+                "item": item,
+                "media": media,
+                "user": self.user,
+                "title": item.title,
+                "show_status_chip": False,
+                "show_progress_chip": False,
+                "from_grid": True,
+            },
+            request=request,
+        )
+
+    def test_media_card_shows_book_progress_when_dropped(self):
+        """A dropped book keeps showing how far the reader got."""
+        content = self._render_book_card(status=Status.DROPPED.value, progress=120)
+
+        self.assertIn("120/350 pages", content)
+
+    def test_media_card_shows_book_progress_when_paused(self):
+        """A paused book keeps showing how far the reader got."""
+        content = self._render_book_card(status=Status.PAUSED.value, progress=120)
+
+        self.assertIn("120/350 pages", content)
+
+    def test_media_card_shows_percentage_without_raw_total(self):
+        """Percentage mode renders a bare percentage, never '34% / 350'."""
+        content = self._render_book_card(
+            status=Status.DROPPED.value, progress=120, percentage=True
+        )
+
+        self.assertIn("34%", content)
+        self.assertNotIn("% /", content)
+        self.assertNotIn("350", content)
+
+    def test_media_card_shows_audiobook_progress_as_listening_time(self):
+        """Audiobooks read as h/min on both sides of the slash, never as pages."""
+        content = self._render_book_card(
+            status=Status.IN_PROGRESS.value, progress=150, audiobook=True
+        )
+
+        self.assertIn("2h 30min/10h 00min", content)
+        self.assertNotIn("pages", content)
+
+    def test_media_card_shows_audiobook_percentage(self):
+        """The percentage preference applies to audiobooks too."""
+        content = self._render_book_card(
+            status=Status.IN_PROGRESS.value,
+            progress=150,
+            percentage=True,
+            audiobook=True,
+        )
+
+        self.assertIn("25%", content)
 
     def test_genres_cell_falls_back_to_plain_text_for_blank_media_type(self):
         """Genres cell shouldn't crash reversing 'medialist' for a blank media_type."""
@@ -822,6 +928,77 @@ class AppTagsTests(TestCase):
             "history-podcast-https---api-spreaker-com-episode-74415563",
         )
         self.assertRegex(podcast_url_id, r"^[A-Za-z0-9_-]+$")
+
+    def test_season_card_title(self):
+        """Test the season_card_title tag includes the parent show title (#1060)."""
+        # Numbered season, object input
+        self.assertEqual(
+            app_tags.season_card_title(self.season_item),
+            "Test TV Show Season 1",
+        )
+
+        # Numbered season, dict input
+        self.assertEqual(
+            app_tags.season_card_title(self.season_dict),
+            "Test TV Show Season 1",
+        )
+
+        # Specials (season 0), object input
+        specials_item = Item(
+            media_id="1668",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            title="Test TV Show",
+            season_number=0,
+        )
+        self.assertEqual(
+            app_tags.season_card_title(specials_item),
+            "Test TV Show Specials",
+        )
+
+        # Specials (season 0), dict input
+        specials_dict = {**self.season_dict, "season_number": 0}
+        self.assertEqual(
+            app_tags.season_card_title(specials_dict),
+            "Test TV Show Specials",
+        )
+
+        # Named provider/arc title, object input
+        arc_item = SimpleNamespace(
+            title="Test TV Show",
+            season_number=1,
+            season_title="Indigo League",
+        )
+        self.assertEqual(
+            app_tags.season_card_title(arc_item),
+            "Test TV Show: Indigo League",
+        )
+
+        # Named provider/arc title, dict input
+        arc_dict = {
+            "title": "Test TV Show",
+            "season_number": 1,
+            "season_title": "Indigo League",
+        }
+        self.assertEqual(
+            app_tags.season_card_title(arc_dict),
+            "Test TV Show: Indigo League",
+        )
+
+        # Missing fallback title falls back to the bare season string
+        no_title_item = SimpleNamespace(title="", season_number=2, season_title=None)
+        self.assertEqual(app_tags.season_card_title(no_title_item), "Season 2")
+
+        # Missing fallback title with a named arc falls back to the bare arc title
+        no_title_arc_item = SimpleNamespace(
+            title="",
+            season_number=1,
+            season_title="Indigo League",
+        )
+        self.assertEqual(
+            app_tags.season_card_title(no_title_arc_item),
+            "Indigo League",
+        )
 
     def test_media_view_url(self):
         """Test the media_view_url tag."""

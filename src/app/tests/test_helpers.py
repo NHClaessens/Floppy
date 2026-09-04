@@ -8,6 +8,7 @@ from django.utils import timezone
 
 from app.helpers import (
     enrich_items_with_user_data,
+    extract_release_datetime,
     form_error_messages,
     minutes_to_hhmm,
     normalize_navigation_url,
@@ -85,6 +86,24 @@ class HelpersTest(TestCase):
             "/details/tmdb/movie/118340/guardians-of-the-galaxy",
         )
         self.assertEqual(result, "redirected")
+
+    def test_extract_release_datetime_valid_date_string(self):
+        """A normal release_date string is parsed into a UTC datetime."""
+        result = extract_release_datetime({"release_date": "2020-05-15"})
+        self.assertEqual((result.year, result.month, result.day), (2020, 5, 15))
+
+    def test_extract_release_datetime_valid_year_only(self):
+        """A plausible year-only value produces January 1st of that year."""
+        result = extract_release_datetime({"year": 1999})
+        self.assertEqual((result.year, result.month, result.day), (1999, 1, 1))
+
+    def test_extract_release_datetime_rejects_sentinel_year_one_string(self):
+        """A year-0001 date string must not produce the OverflowError sentinel."""
+        self.assertIsNone(extract_release_datetime({"release_date": "0001-01-01"}))
+
+    def test_extract_release_datetime_rejects_implausible_year(self):
+        """An implausible bare year (e.g. 1) must not produce a datetime."""
+        self.assertIsNone(extract_release_datetime({"year": 1}))
 
     def test_normalize_navigation_url_decodes_encoded_query_separators(self):
         """Navigation URLs from modal forms should restore their query separators."""

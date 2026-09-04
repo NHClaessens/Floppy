@@ -13,7 +13,11 @@
       <div class="media-card {% if secondary_color %}bg-[var(--color-surface-strong)]{% else %}bg-[var(--color-surface)]{% endif %} rounded-lg overflow-hidden shadow-lg relative {% if active %}ring-2 ring-indigo-700{% endif %} {% if from_grid %}hover:ring-2 hover:ring-indigo-500 transition-all {% if resolved_media_type == 'podcast' or resolved_media_type == 'music' %}search-result-card-square{% else %}search-result-card{% endif %}{% endif %} {% if user.media_card_subtitle_display == 'always' %}media-card-subtitle-always{% elif show_episode_identity|default:False and resolved_media_type == MediaTypes.EPISODE.value %}media-card-subtitle-always{% endif %} {% if recommend_mode %}cursor-pointer{% endif %} group"
            data-media-type="{{ item.media_type }}"
            {% if recommend_mode %}hx-get="{% if resolved_search_preview_url %}{{ resolved_search_preview_url }}{% else %}{% url 'recommend_search' recommend_list_id %}{% endif %}?show_preview=true&media_id={{ item.media_id }}&media_type={{ item.media_type }}&source={{ item.source }}&title={{ resolved_item_title|default:title|urlencode }}&image={{ item.image|urlencode }}&q={{ query|urlencode }}&search_media_type={{ media_type|urlencode }}&page={{ page }}" hx-target="{{ resolved_search_modal_target }}" hx-swap="innerHTML"{% endif %}
-           x-data="{ trackOpen: false, listsOpen: false }">
+           x-data="{ trackOpen: false, listsOpen: false, revealed: false, tapToReveal(e) { if (this.revealed) { if (e.target.closest('button, a, input, select, textarea')) { return; } const link = this.$root.querySelector('.media-card-overlay a[href]') || this.$root.querySelector('a.media-card-title[href]'); if (link) { e.preventDefault(); e.stopPropagation(); link.click(); } return; } if (!window.matchMedia('(pointer: coarse)').matches) { return; } e.preventDefault(); e.stopPropagation(); this.revealed = true; window.dispatchEvent(new CustomEvent('media-card-revealed', { detail: this.$root })); } }"
+           @click.capture="tapToReveal($event)"
+           @media-card-revealed.window="if ($event.detail !== $root) revealed = false"
+           @click.window="if (revealed && !$root.contains($event.target)) revealed = false"
+           :class="revealed ? 'media-card-revealed' : ''">
         <div class="media-card-visual relative">
           {% if recommend_mode %}
             <div class="cursor-pointer">
@@ -72,7 +76,7 @@
                     <div class="absolute top-2 right-2 bg-gray-900/90 text-white text-xs px-2 py-1 rounded-md flex items-center shadow-md">
                       <span class="text-sm text-[var(--color-text)]">
                         {{ media.formatted_aggregated_progress }}
-                        {% if media.max_progress %}/ {{ media.max_progress }}{% endif %}
+                        {% if media.max_progress and not media.progress_is_percentage %}/ {{ media.formatted_max_progress }}{% endif %}
                       </span>
                     </div>
                   {% endif %}
@@ -85,7 +89,7 @@
                            data-mobile-show="{% if current_sort_value == 'progress' %}true{% else %}false{% endif %}">
                         <span class="text-sm text-[var(--color-text)]">
                           {{ media.formatted_progress }}
-                          {% if media.max_progress %}/ {{ media.max_progress }}{% endif %}
+                          {% if media.max_progress and not media.progress_is_percentage %}/ {{ media.formatted_max_progress }}{% endif %}
                         </span>
                       </div>
                     {% endif %}
@@ -171,7 +175,8 @@
           {% endif %}
 
           {% if not recommend_mode and not public_view|default:False %}
-            <div class="media-card-overlay absolute inset-0 flex items-center justify-center opacity-0 hover-tap:opacity-100 transition-opacity duration-200 ease-in-out{% if user.clickable_media_cards %} pointer-coarse:hidden{% endif %}"
+            <div class="media-card-overlay absolute inset-0 flex items-center justify-center transition-opacity duration-200 ease-in-out{% if user.clickable_media_cards %} pointer-coarse:hidden{% endif %}"
+                 :class="revealed ? 'opacity-100 pointer-events-auto media-card-overlay-revealed' : 'opacity-0 pointer-events-none'"
                  {% if enable_bulk_select %}x-show="!selectMode"{% endif %}>
               {# Darkening background layer #}
               <div class="absolute inset-0 bg-black/50 z-0"></div>
@@ -547,19 +552,16 @@
                         <span class="ml-1 text-[var(--color-text-muted)]">• {{ media.formatted_progress }}</span>
                       {% endif %}
                     {% elif resolved_media_type == MediaTypes.BOOK.value and media.max_progress %}
-                      {% if user.book_comic_manga_progress_percentage %}
-                        {% if media.status == Status.IN_PROGRESS.value and media.progress %}
+                      {# In progress / Paused / Dropped show partial progress; others show the total. #}
+                      {% if media.progress and media.status != Status.PLANNING.value and media.status != Status.COMPLETED.value %}
+                        {% if user.book_comic_manga_progress_percentage %}
                           {% widthratio media.progress media.max_progress 100 as percentage %}
                           <span class="ml-1 text-[var(--color-text-muted)]">• {{ percentage }}%</span>
                         {% else %}
-                          <span class="ml-1 text-[var(--color-text-muted)]">• {{ media.max_progress }} page{{ media.max_progress|pluralize }}</span>
+                          <span class="ml-1 text-[var(--color-text-muted)]">• {{ media.formatted_progress }}/{{ media.formatted_max_progress }}{% if media.item.format != 'audiobook' %} pages{% endif %}</span>
                         {% endif %}
                       {% else %}
-                        {% if media.status == Status.IN_PROGRESS.value and media.progress %}
-                          <span class="ml-1 text-[var(--color-text-muted)]">• {{ media.progress }}/{{ media.max_progress }} pages</span>
-                        {% else %}
-                          <span class="ml-1 text-[var(--color-text-muted)]">• {{ media.max_progress }} page{{ media.max_progress|pluralize }}</span>
-                        {% endif %}
+                        <span class="ml-1 text-[var(--color-text-muted)]">• {{ media.formatted_max_progress }}{% if media.item.format != 'audiobook' %} page{{ media.max_progress|pluralize }}{% endif %}</span>
                       {% endif %}
                     {% elif media.max_progress and resolved_media_type != MediaTypes.MOVIE.value %}
                       {% with progress_value=aggregated_progress|default_if_none:media.progress %}
@@ -616,15 +618,15 @@
                        data-progress-text="{{ media.formatted_aggregated_progress }}"
                      {% elif resolved_media_type == MediaTypes.GAME.value and media.progress %}
                        data-progress-text="{{ media.formatted_progress }}"
-                     {% elif resolved_media_type == MediaTypes.BOOK.value and media.max_progress and media.status == Status.IN_PROGRESS.value and media.progress %}
+                     {% elif resolved_media_type == MediaTypes.BOOK.value and media.max_progress and media.progress and media.status != Status.PLANNING.value and media.status != Status.COMPLETED.value %}{# i.e. In progress / Paused / Dropped #}
                        {% if user.book_comic_manga_progress_percentage %}
                          {% widthratio media.progress media.max_progress 100 as percentage %}
                          data-progress-text="{{ percentage }}%"
                        {% else %}
-                         data-progress-text="{{ media.progress }}/{{ media.max_progress }} pages"
+                         data-progress-text="{{ media.formatted_progress }}/{{ media.formatted_max_progress }}{% if media.item.format != 'audiobook' %} pages{% endif %}"
                        {% endif %}
                      {% elif resolved_media_type == MediaTypes.BOOK.value and media.max_progress %}
-                       data-progress-text="{{ media.max_progress }} page{{ media.max_progress|pluralize }}"
+                       data-progress-text="{{ media.formatted_max_progress }}{% if media.item.format != 'audiobook' %} page{{ media.max_progress|pluralize }}{% endif %}"
                     {% elif media.max_progress and resolved_media_type != MediaTypes.MOVIE.value %}
                        {% with progress_value=aggregated_progress|default_if_none:media.progress %}
                          {% if progress_value or resolved_media_type == MediaTypes.SEASON.value %}
@@ -665,9 +667,9 @@
 
         {# Track Modal #}
         <div x-show="trackOpen"
-             @mousedown.self="trackOpen = false"
              x-cloak
              @keydown.escape.window="trackOpen = false"
+             @mousedown.self="trackOpen = false"
              class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
                style="width: min(96vw, 72rem);">
@@ -687,8 +689,8 @@
         <div x-show="listsOpen"
              x-cloak
              @keydown.escape.window="listsOpen = false"
-             class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-             @mousedown.self="listsOpen = false">
+             @mousedown.self="listsOpen = false"
+             class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
             <div id="{% component_id 'lists' item %}"></div>
           </div>

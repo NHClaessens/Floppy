@@ -83,6 +83,10 @@ if (!window.__floppyEpisodeBulkTrackFormBound) {
       return this.selectedEpisode(side)?.air_date || "";
     },
 
+    selectedEpisodeRuntime(side) {
+      return this.selectedEpisode(side)?.runtime_minutes || "";
+    },
+
     syncEpisodeOptions(side) {
       const isFirst = side === "first";
       const select = isFirst ? this.$refs.firstEpisode : this.$refs.lastEpisode;

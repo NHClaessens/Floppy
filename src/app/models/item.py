@@ -729,6 +729,13 @@ class Item(CalendarTriggerMixin, models.Model):
         minutes = self.game_time_to_beat_minutes
         return app.helpers.minutes_to_hhmm(minutes) if minutes else "--"
 
+    @property
+    def book_max_progress(self):
+        """Return total progress units: runtime minutes for audiobooks, else pages."""
+        if self.format == "audiobook":
+            return self.runtime_minutes or None
+        return self.number_of_pages or None
+
     def get_alternative_title(self, user=None):
         """Return the opposite title variant for tooltip display."""
         _, alternative_title = self.get_display_and_alternative_title(user=user)

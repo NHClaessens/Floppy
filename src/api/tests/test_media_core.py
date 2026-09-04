@@ -1,7 +1,9 @@
 import datetime
 from unittest.mock import patch
+from urllib.parse import urlencode
 from uuid import UUID
 
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db.utils import OperationalError
 from django.utils import timezone
 
@@ -346,6 +348,125 @@ class MediaCoreTests(FloppyApiTestCase):
         self.assertEqual(str(UUID(manual_media_id)), manual_media_id)
         self.assertEqual(payload["item"]["source"], "manual")
         self.assertEqual(payload["item"]["media_type"], MediaTypes.MOVIE.value)
+
+    def test_media_type_list_post_accepts_multipart(self):
+        """Multipart create should validate exactly like the JSON path (#1043)."""
+        response = self.call_api(
+            "post",
+            "api_media_type_list",
+            args=(MediaTypes.MOVIE.value,),
+            payload={
+                "source": "manual",
+                "title": "Multipart Movie",
+                "image": "https://example.com/poster.jpg",
+                "status": 3,
+                "progress": 0,
+            },
+            headers=self.auth_headers,
+            content_type=None,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        payload = response.json()
+        check_media_structure(self, payload)
+        self.assertEqual(payload["item"]["title"], "Multipart Movie")
+        self.assertEqual(payload["status"], 3)
+
+    def test_media_type_list_post_accepts_form_urlencoded(self):
+        """Form-urlencoded create (no file part) must not hit the immutable QueryDict."""
+        response = self.call_api(
+            "post",
+            "api_media_type_list",
+            args=(MediaTypes.MOVIE.value,),
+            payload=urlencode(
+                {
+                    "source": "manual",
+                    "title": "Urlencoded Movie",
+                    "status": 3,
+                    "progress": 0,
+                },
+            ),
+            headers=self.auth_headers,
+            content_type="application/x-www-form-urlencoded",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(response.json()["item"]["title"], "Urlencoded Movie")
+
+    def test_media_type_list_post_rejects_file_upload(self):
+        """An uploaded file part is rejected instead of being stored as a filename."""
+        response = self.call_api(
+            "post",
+            "api_media_type_list",
+            args=(MediaTypes.MOVIE.value,),
+            payload={
+                "source": "manual",
+                "title": "File Movie",
+                "status": 3,
+                "image": SimpleUploadedFile(
+                    "cover.jpg",
+                    b"not-really-a-jpeg",
+                    content_type="image/jpeg",
+                ),
+            },
+            headers=self.auth_headers,
+            content_type=None,
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("image_url", response.json()["detail"])
+        self.assertFalse(Item.objects.filter(title="File Movie").exists())
+
+    def test_media_type_list_post_applies_image_url(self):
+        """`image_url` supplied on create is written to the item."""
+        response = self.call_api(
+            "post",
+            "api_media_type_list",
+            args=(MediaTypes.MOVIE.value,),
+            payload={
+                "source": "manual",
+                "title": "Image URL Movie",
+                "image_url": "https://example.com/from-image-url.jpg",
+                "status": 3,
+            },
+            headers=self.auth_headers,
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(
+            response.json()["item"]["image"],
+            "https://example.com/from-image-url.jpg",
+        )
+
+    @patch("api.views.services.get_media_metadata")
+    def test_media_type_list_post_applies_image_url_for_provider(self, mock_metadata):
+        """`image_url` overrides provider artwork on create."""
+        mock_metadata.return_value = {
+            "media_id": 424242,
+            "source": Sources.TMDB.value,
+            "media_type": MediaTypes.MOVIE.value,
+            "title": "Provider Movie",
+            "image": "https://image.tmdb.org/t/p/w500/provider.jpg",
+            "max_progress": None,
+            "genres": [],
+            "related": {},
+            "details": {},
+        }
+
+        response = self.call_api(
+            "post",
+            "api_media_type_list",
+            args=(MediaTypes.MOVIE.value,),
+            payload={
+                "source": Sources.TMDB.value,
+                "media_id": 424242,
+                "image_url": "https://example.com/override.jpg",
+                "status": 3,
+            },
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(
+            response.json()["item"]["image"],
+            "https://example.com/override.jpg",
+        )
 
     def test_completed_post_removes_planning_and_merges_metadata(self):
         """Append-style Completed POST removes a stale planning row."""
@@ -1363,6 +1484,55 @@ class MediaCoreTests(FloppyApiTestCase):
         self.assertEqual(payload["consumptions"][0]["status"], status)
         self.assertEqual(payload["consumptions"][0]["score"], score)
         self.assertEqual(payload["consumptions"][0]["notes"], notes)
+
+    def test_media_detail_patch_sets_image_url(self):
+        """PATCH `image_url` should update the item's artwork (#1043)."""
+        movie_item = self.items_by_type[MediaTypes.MOVIE.value][0]
+        response = self.call_api(
+            "patch",
+            "api_media_detail",
+            args=(MediaTypes.MOVIE.value, movie_item.source, movie_item.media_id),
+            payload={
+                "status": 3,
+                "image_url": "https://example.com/patched.jpg",
+            },
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        movie_item.refresh_from_db()
+        self.assertEqual(movie_item.image, "https://example.com/patched.jpg")
+
+    def test_media_detail_patch_image_only_is_allowed(self):
+        """An image-only PATCH must not trip the 'no valid fields' guard."""
+        movie_item = self.items_by_type[MediaTypes.MOVIE.value][0]
+        response = self.call_api(
+            "patch",
+            "api_media_detail",
+            args=(MediaTypes.MOVIE.value, movie_item.source, movie_item.media_id),
+            payload={"image": "https://example.com/alias.jpg"},
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200, response.content)
+        movie_item.refresh_from_db()
+        self.assertEqual(movie_item.image, "https://example.com/alias.jpg")
+
+    def test_media_detail_patch_invalid_image_url_returns_bad_request(self):
+        """A malformed image URL is rejected before anything is written."""
+        movie_item = self.items_by_type[MediaTypes.MOVIE.value][0]
+        original_image = movie_item.image
+        response = self.call_api(
+            "patch",
+            "api_media_detail",
+            args=(MediaTypes.MOVIE.value, movie_item.source, movie_item.media_id),
+            payload={"image_url": "not-a-url"},
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        movie_item.refresh_from_db()
+        self.assertEqual(movie_item.image, original_image)
 
     def test_media_detail_patch_invalid_type_returns_bad_request(self):
         """Media detail PATCH should reject unsupported media types."""

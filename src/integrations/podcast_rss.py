@@ -26,6 +26,117 @@ DURATION_PARTS_MM_SS = 2
 DURATION_PARTS_HH_MM_SS = 3
 
 
+def _fetch_feed_root(rss_feed_url: str) -> Element | None:
+    """Fetch a feed once and return its parsed root, or None if unusable.
+
+    Every reader of a feed goes through here, so a caller that wants both the
+    channel metadata and the episodes can read the document once instead of
+    issuing two identical HTTP requests -- which is what the podcast detail
+    page does on every view.
+    """
+    try:
+        response = requests.get(
+            rss_feed_url, headers={"User-Agent": USER_AGENT}, timeout=30
+        )
+        response.raise_for_status()
+    except requests.RequestException as e:
+        logger.exception(
+            "Failed to fetch RSS feed %s: %s",
+            safe_url(rss_feed_url),
+            exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
+        )
+        return None
+    except Exception as e:
+        logger.exception(
+            "Unexpected error fetching RSS feed %s: %s",
+            safe_url(rss_feed_url),
+            exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
+        )
+        return None
+
+    try:
+        return ET.fromstring(response.content)
+    except ET.ParseError:
+        logger.exception("Failed to parse RSS feed XML")
+        return None
+
+
+def _extract_show_metadata(root: Element) -> dict:
+    """Read the channel-level show metadata out of an already-parsed feed."""
+    metadata = {}
+    namespaces = {
+        "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
+    }
+
+    # Find channel element (RSS) or feed element (Atom)
+    channel = root.find(".//channel")
+    if channel is None:
+        # Try Atom feed
+        channel = root if root.tag == "feed" or root.tag.endswith("}feed") else None
+
+    if channel is not None:
+        title_elem = channel.find("title")
+        if title_elem is None:
+            title_elem = channel.find("{http://www.w3.org/2005/Atom}title")
+        if title_elem is not None and title_elem.text:
+            metadata["title"] = title_elem.text.strip()
+
+        # Description
+        desc_elem = channel.find("description")
+        if desc_elem is None:
+            desc_elem = channel.find("itunes:summary", namespaces)
+        if desc_elem is None:
+            desc_elem = channel.find("{http://www.w3.org/2005/Atom}summary")
+        if desc_elem is not None and desc_elem.text:
+            description = desc_elem.text.strip()
+            # Remove HTML tags
+            description = re.sub(r"<[^>]+>", "", description)
+            metadata["description"] = description
+
+        # Language
+        lang_elem = channel.find("language")
+        if lang_elem is not None and lang_elem.text:
+            metadata["language"] = lang_elem.text.strip()
+
+        # Author, from the iTunes namespace.
+        author_elem = channel.find("itunes:author", namespaces)
+        if author_elem is not None and author_elem.text:
+            metadata["author"] = author_elem.text.strip()
+
+        # Artwork, preferring the iTunes namespace image, falling back to
+        # the plain RSS <image><url> element.
+        itunes_image_elem = channel.find("itunes:image", namespaces)
+        if itunes_image_elem is not None and itunes_image_elem.get("href"):
+            metadata["image"] = itunes_image_elem.get("href").strip()
+        else:
+            image_url_elem = channel.find("image/url")
+            if image_url_elem is not None and image_url_elem.text:
+                metadata["image"] = image_url_elem.text.strip()
+
+        # Website, preferring the plain RSS <link> text content, falling
+        # back to an Atom <link rel="alternate"> element's href.
+        link_elem = channel.find("link")
+        if link_elem is not None and link_elem.text:
+            metadata["website_url"] = link_elem.text.strip()
+        else:
+            for candidate in channel.findall(
+                "{http://www.w3.org/2005/Atom}link"
+            ):
+                rel = candidate.get("rel")
+                href = candidate.get("href")
+                if rel in (None, "alternate") and href:
+                    metadata["website_url"] = href.strip()
+                    break
+    return metadata
+
+
+def _extract_episodes(root: Element, limit: int | None) -> list[dict]:
+    """Read the episode list out of an already-parsed feed."""
+    if root.tag == "feed" or root.tag.endswith("}feed"):
+        return _parse_atom_feed(root, limit)
+    return _parse_rss_feed(root, limit)
+
+
 def fetch_show_metadata_from_rss(rss_feed_url: str) -> dict:
     """Fetch show metadata from RSS feed channel.
 
@@ -40,91 +151,11 @@ def fetch_show_metadata_from_rss(rss_feed_url: str) -> dict:
         - image: Show artwork URL (optional)
         - website_url: Show homepage URL (optional)
     """
-    try:
-        response = requests.get(
-            rss_feed_url, headers={"User-Agent": USER_AGENT}, timeout=30
-        )
-        response.raise_for_status()
-
-        # Parse XML
-        try:
-            root = ET.fromstring(response.content)
-        except ET.ParseError:
-            logger.exception("Failed to parse RSS feed XML")
-            return {}
-
-        metadata = {}
-        namespaces = {
-            "itunes": "http://www.itunes.com/dtds/podcast-1.0.dtd",
-        }
-
-        # Find channel element (RSS) or feed element (Atom)
-        channel = root.find(".//channel")
-        if channel is None:
-            # Try Atom feed
-            channel = root if root.tag == "feed" or root.tag.endswith("}feed") else None
-
-        if channel is not None:
-            title_elem = channel.find("title")
-            if title_elem is None:
-                title_elem = channel.find("{http://www.w3.org/2005/Atom}title")
-            if title_elem is not None and title_elem.text:
-                metadata["title"] = title_elem.text.strip()
-
-            # Description
-            desc_elem = channel.find("description")
-            if desc_elem is None:
-                desc_elem = channel.find("itunes:summary", namespaces)
-            if desc_elem is None:
-                desc_elem = channel.find("{http://www.w3.org/2005/Atom}summary")
-            if desc_elem is not None and desc_elem.text:
-                description = desc_elem.text.strip()
-                # Remove HTML tags
-                description = re.sub(r"<[^>]+>", "", description)
-                metadata["description"] = description
-
-            # Language
-            lang_elem = channel.find("language")
-            if lang_elem is not None and lang_elem.text:
-                metadata["language"] = lang_elem.text.strip()
-
-            # Author, from the iTunes namespace.
-            author_elem = channel.find("itunes:author", namespaces)
-            if author_elem is not None and author_elem.text:
-                metadata["author"] = author_elem.text.strip()
-
-            # Artwork, preferring the iTunes namespace image, falling back to
-            # the plain RSS <image><url> element.
-            itunes_image_elem = channel.find("itunes:image", namespaces)
-            if itunes_image_elem is not None and itunes_image_elem.get("href"):
-                metadata["image"] = itunes_image_elem.get("href").strip()
-            else:
-                image_url_elem = channel.find("image/url")
-                if image_url_elem is not None and image_url_elem.text:
-                    metadata["image"] = image_url_elem.text.strip()
-
-            # Website, preferring the plain RSS <link> text content, falling
-            # back to an Atom <link rel="alternate"> element's href.
-            link_elem = channel.find("link")
-            if link_elem is not None and link_elem.text:
-                metadata["website_url"] = link_elem.text.strip()
-            else:
-                for candidate in channel.findall(
-                    "{http://www.w3.org/2005/Atom}link"
-                ):
-                    rel = candidate.get("rel")
-                    href = candidate.get("href")
-                    if rel in (None, "alternate") and href:
-                        metadata["website_url"] = href.strip()
-                        break
-
-    except requests.RequestException as e:
-        logger.exception(
-            "Failed to fetch RSS feed %s: %s",
-            safe_url(rss_feed_url),
-            exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
-        )
+    root = _fetch_feed_root(rss_feed_url)
+    if root is None:
         return {}
+    try:
+        return _extract_show_metadata(root)
     except Exception as e:
         logger.exception(
             "Unexpected error parsing RSS feed %s: %s",
@@ -132,8 +163,6 @@ def fetch_show_metadata_from_rss(rss_feed_url: str) -> dict:
             exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
         )
         return {}
-    else:
-        return metadata
 
 
 def fetch_episodes_from_rss(rss_feed_url: str, limit: int | None = None) -> list[dict]:
@@ -155,40 +184,11 @@ def fetch_episodes_from_rss(rss_feed_url: str, limit: int | None = None) -> list
         - description: Episode description (optional)
         - website_url: Episode webpage URL (optional)
     """
-    try:
-        response = requests.get(
-            rss_feed_url, headers={"User-Agent": USER_AGENT}, timeout=30
-        )
-        response.raise_for_status()
-
-        # Parse XML - handle both RSS and Atom feeds
-        try:
-            root = ET.fromstring(response.content)
-        except ET.ParseError:
-            logger.exception("Failed to parse RSS feed XML")
-            return []
-
-        # Determine feed type
-        if root.tag == "feed" or root.tag.endswith("}feed"):
-            # Atom feed
-            episodes = _parse_atom_feed(root, limit)
-        else:
-            # RSS 2.0 feed
-            episodes = _parse_rss_feed(root, limit)
-
-        logger.info(
-            "Fetched %d episodes from RSS feed %s",
-            len(episodes),
-            safe_url(rss_feed_url),
-        )
-
-    except requests.RequestException as e:
-        logger.exception(
-            "Failed to fetch RSS feed %s: %s",
-            safe_url(rss_feed_url),
-            exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
-        )
+    root = _fetch_feed_root(rss_feed_url)
+    if root is None:
         return []
+    try:
+        episodes = _extract_episodes(root, limit)
     except Exception as e:
         logger.exception(
             "Unexpected error parsing RSS feed %s: %s",
@@ -196,8 +196,42 @@ def fetch_episodes_from_rss(rss_feed_url: str, limit: int | None = None) -> list
             exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
         )
         return []
-    else:
-        return episodes
+    logger.info(
+        "Fetched %d episodes from RSS feed %s",
+        len(episodes),
+        safe_url(rss_feed_url),
+    )
+    return episodes
+
+
+def fetch_feed_from_rss(
+    rss_feed_url: str,
+    limit: int | None = None,
+) -> tuple[dict, list[dict]]:
+    """Read a feed once, returning (show metadata, episodes).
+
+    For callers that want both. Going through the two single-purpose functions
+    above would fetch the same document twice.
+    """
+    root = _fetch_feed_root(rss_feed_url)
+    if root is None:
+        return {}, []
+    try:
+        metadata = _extract_show_metadata(root)
+        episodes = _extract_episodes(root, limit)
+    except Exception as e:
+        logger.exception(
+            "Unexpected error parsing RSS feed %s: %s",
+            safe_url(rss_feed_url),
+            exception_summary(e),  # noqa: TRY401  # exception_summary() is the project's sanitised rendering
+        )
+        return {}, []
+    logger.info(
+        "Fetched %d episodes from RSS feed %s",
+        len(episodes),
+        safe_url(rss_feed_url),
+    )
+    return metadata, episodes
 
 
 def _parse_rss_feed(root: Element, limit: int | None) -> list[dict]:

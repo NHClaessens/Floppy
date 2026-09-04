@@ -50,6 +50,23 @@ class PublicEndpointsTests(FloppyApiTestCase):
                 response = self.client.get(reverse(route_name))
                 self.assertEqual(response.status_code, 200)
 
+    def test_schema_endpoint_content_negotiation(self):
+        url = reverse("schema")
+
+        default = self.client.get(url)
+        self.assertEqual(default.status_code, 200)
+        self.assertEqual(default["Content-Type"], "text/yaml; charset=utf-8")
+
+        for accept, expected_content_type in (
+            ("application/json", "application/json"),
+            ("application/yaml", "application/yaml; charset=utf-8"),
+            ("application/vnd.oai.openapi+json", "application/vnd.oai.openapi+json"),
+        ):
+            with self.subTest(accept=accept):
+                response = self.client.get(url, HTTP_ACCEPT=accept)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response["Content-Type"], expected_content_type)
+
     def test_openapi_contract_supports_public_cache_validation(self):
         artifact = (
             settings.BASE_DIR / "api" / "contracts" / "openapi.yaml"

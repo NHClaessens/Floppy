@@ -207,6 +207,7 @@ class GPodderImporter:
             "language": rss_metadata.get("language", "")[:10],
             "rss_feed_url": raw_feed_url,
             "image": rss_metadata.get("image", ""),
+            "website_url": rss_metadata.get("website_url", ""),
         }
 
         if show is None:
@@ -266,6 +267,7 @@ class GPodderImporter:
                 published=published,
                 duration=duration,
                 audio_url=audio_url,
+                website_url=rss_episode.get("website_url", ""),
                 episode_number=rss_episode.get("episode_number"),
                 season_number=rss_episode.get("season_number"),
             )
@@ -277,6 +279,7 @@ class GPodderImporter:
                 "published": published,
                 "duration": duration,
                 "audio_url": audio_url,
+                "website_url": rss_episode.get("website_url", ""),
                 "episode_number": rss_episode.get("episode_number"),
                 "season_number": rss_episode.get("season_number"),
             }

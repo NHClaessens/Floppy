@@ -17,7 +17,7 @@
         <h2 class="text-xl font-semibold">Export Data</h2>
       </div>
       <p class="text-[var(--color-text-muted)] mb-2 text-sm">
-        Export a CSV in Floppy's own backup format now, or create a recurring export schedule and download the initial CSV immediately.
+        Export your media, ratings, and lists as CSV, or create a recurring export schedule and download the initial CSV immediately. This is a data export, not a database backup &mdash; it does not restore your account, integrations, or preferences, and it cannot replace a damaged database file.
       </p>
       <p class="mb-5 text-sm">
         Scheduled exports save to: <code class="text-[var(--color-text-secondary)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">{{ backup_status.path }}</code>
@@ -27,6 +27,21 @@
         {% else %}
           <br>
           <span class="text-xs text-[var(--color-warning-text)]">Not mounted to the host &mdash; add <code class="text-[var(--color-warning-text)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">./backups:/floppy/backups</code> to your docker-compose volumes to find these files.</span>
+        {% endif %}
+      </p>
+      <p class="mb-5 text-sm">
+        For disaster recovery, Floppy separately writes a verified database snapshot to: <code class="text-[var(--color-text-secondary)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">{{ db_snapshot_status.path }}</code>
+        {% if db_snapshot_status.enabled %}
+          {% if db_snapshot_status.host_reachable %}
+            <br>
+            <span class="text-xs text-[var(--color-text-muted)]">{{ db_snapshot_status.file_count }} snapshot{{ db_snapshot_status.file_count|pluralize }} there now. This is the file to restore from if the database itself is damaged.</span>
+          {% else %}
+            <br>
+            <span class="text-xs text-[var(--color-warning-text)]">Not mounted to the host &mdash; add <code class="text-[var(--color-warning-text)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">./backups:/floppy/backups</code> to your docker-compose volumes to find these files.</span>
+          {% endif %}
+        {% else %}
+          <br>
+          <span class="text-xs text-[var(--color-warning-text)]">Disabled &mdash; set <code class="text-[var(--color-warning-text)] bg-[var(--color-surface-strong)] px-1.5 py-0.5 rounded text-xs">DB_SNAPSHOT_ENABLED=true</code> to turn it back on.</span>
         {% endif %}
       </p>
 
@@ -186,7 +201,7 @@
         <h2 class="text-xl font-semibold">Export for Other Websites</h2>
       </div>
       <p class="text-[var(--color-text-muted)] mb-5 text-sm">
-        Unlike the Floppy backup above, these exports are trimmed and reshaped to match what a specific external site expects.
+        Unlike the export above, these exports are trimmed and reshaped to match what a specific external site expects.
       </p>
 
       <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3">

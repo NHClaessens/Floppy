@@ -818,7 +818,10 @@ class User(AbstractUser):
     )
     anime_metadata_source_default = models.CharField(
         max_length=20,
-        default=MetadataSourceDefaultChoices.MAL,
+        # TMDB by default so the Anime library gets real season/episode trees,
+        # matching how TV Shows behaves. MAL stays available for users who
+        # prefer its per-cour entries. Existing users keep their stored value.
+        default=MetadataSourceDefaultChoices.TMDB,
         choices=[
             (MetadataSourceDefaultChoices.MAL, MetadataSourceDefaultChoices.MAL.label),
             (

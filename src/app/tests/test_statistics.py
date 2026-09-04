@@ -1690,3 +1690,71 @@ class EpisodelessCompletedSeasonStatisticsTests(TestCase):
         )
         self.assertEqual(media_count[MediaTypes.TV.value], 1)
         self.assertEqual(media_count[MediaTypes.SEASON.value], 1)
+
+
+class GroupedAnimeStatisticsBucketTests(TestCase):
+    """Grouped anime must be counted exactly once, in the anime bucket."""
+
+    def setUp(self):
+        """Create a user tracking one grouped-anime show."""
+        self.user = User.objects.create_user(
+            username="grouped-anime-stats-user",
+            password="password",
+        )
+        self.item = Item.objects.create(
+            media_id="9350138",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Frieren: Beyond Journey's End",
+            image="",
+        )
+
+    def test_all_time_counts_grouped_anime_without_episode_rows(self):
+        """A rating-only grouped anime must not vanish from All Time.
+
+        TV excludes the anime bucket unconditionally, and the anime pass was
+        keyed off shows with episode activity, so a show with no Episode rows
+        was counted in neither bucket.
+        """
+        TV.objects.create(
+            item=self.item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            score=9.0,
+        )
+
+        _, media_count = statistics.get_user_media(self.user, None, None)
+
+        self.assertEqual(media_count[MediaTypes.ANIME.value], 1)
+        self.assertEqual(media_count[MediaTypes.TV.value], 0)
+        self.assertEqual(media_count["total"], 1)
+
+    def test_grouped_anime_seasons_are_not_also_counted_as_seasons(self):
+        """A grouped anime season belongs to anime, not to the Season bucket."""
+        tv = TV.objects.create(
+            item=self.item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        season_item = Item.objects.create(
+            media_id="9350138",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            library_media_type=MediaTypes.ANIME.value,
+            season_number=1,
+            title="Frieren: Beyond Journey's End",
+            image="",
+        )
+        Season.objects.create(
+            item=season_item,
+            user=self.user,
+            related_tv=tv,
+            status=Status.IN_PROGRESS.value,
+        )
+
+        _, media_count = statistics.get_user_media(self.user, None, None)
+
+        self.assertEqual(media_count[MediaTypes.SEASON.value], 0)
+        self.assertEqual(media_count[MediaTypes.TV.value], 0)
+        self.assertEqual(media_count[MediaTypes.ANIME.value], 1)

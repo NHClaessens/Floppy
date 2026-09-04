@@ -163,6 +163,11 @@ class TrackModalViewTests(TestCase):
         self.assertTrue(response.context["metadata_tab_available"])
         self.assertTrue(response.context["discover_tab_available"])
         self.assertFalse(response.context["is_hidden_from_discover"])
+        content = response.content.decode()
+        self.assertEqual(content.count("Start Now"), 2)
+        self.assertEqual(content.count("Just Finished"), 2)
+        self.assertEqual(content.count("Release Date"), 4)
+        self.assertEqual(content.count(':disabled="!resolvedSuggestionDate()"'), 2)
         general_field_names = [
             field.name for field in response.context["general_fields"]
         ]
@@ -181,7 +186,36 @@ class TrackModalViewTests(TestCase):
         self.assertContains(response, "Currently visible in Discover.")
         self.assertContains(response, 'hx-post="/discover/toggle-hidden"', html=False)
         self.assertContains(response, 'name="action"', html=False)
+        self.assertContains(response, "data-calendar-component", html=False)
+        self.assertContains(response, "showMonthsView", html=False)
+        self.assertContains(response, "showYearsView", html=False)
         self.assertNotContains(response, "Custom Metadata")
+
+    def test_session_history_row_opens_standard_modal_for_instance(self):
+        """Session rows preserve the tracked instance when opening the editor."""
+        request = RequestFactory().get(
+            "/history/sessions?media_type=movie&media_id=238&source=tmdb",
+        )
+        markup = render_to_string(
+            "app/components/session_history_row.html",
+            {
+                "entry": {
+                    "item": self.item,
+                    "media_type": MediaTypes.MOVIE.value,
+                    "display_title": self.item.title,
+                    "title": self.item.title,
+                    "poster": self.item.image,
+                    "entry_key": str(self.movie.id),
+                    "instance_id": self.movie.id,
+                },
+                "user": self.user,
+                "request": request,
+            },
+            request=request,
+        )
+
+        self.assertIn(f'"instance_id": "{self.movie.id}"', markup)
+        self.assertIn('"standard_modal": "1"', markup)
 
     def test_track_modal_keeps_tracked_tmdb_show_deletable_when_provider_returns_404(
         self,
@@ -1082,7 +1116,13 @@ class TrackModalViewTests(TestCase):
             response.context["episode_plays_form"]["distribution_mode"].value(),
             "air_date",
         )
-        self.assertContains(response, "Air date", count=2)
+        self.assertContains(response, "Release Date", count=6)
+        self.assertEqual(
+            response.context["episode_plays_domain"]["seasonEpisodeMap"]["1"][0][
+                "runtime_minutes"
+            ],
+            24,
+        )
 
     @patch("app.views.metadata_resolution.resolve_detail_metadata")
     @patch("app.providers.services.get_media_metadata")

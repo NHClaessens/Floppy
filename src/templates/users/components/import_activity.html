@@ -218,7 +218,7 @@
           </div>
           <form action="{% url 'bulk_delete_by_import_source' row.media_type row.source %}"
                 method="post"
-                onsubmit="return confirm('Permanently delete all {{ row.media_type }} items imported from this source? This cannot be undone.');">
+                onsubmit="return confirm('Permanently delete all {{ row.media_type }} items imported from this source?{% if row.media_type == 'music' %} Artists and albums left with no tracks are removed from your library too.{% endif %} This cannot be undone.');">
             {% csrf_token %}
             <button class="text-xs text-red-400 hover:text-red-300 transition-colors cursor-pointer">Delete all</button>
           </form>

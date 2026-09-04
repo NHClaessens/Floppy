@@ -863,6 +863,146 @@ def _create_verified_backup(db_path: str, fingerprint: str) -> Path:
         os.close(recovery_descriptor)
 
 
+def create_live_database_snapshot(
+    db_path: str,
+    dest_dir: Path,
+    *,
+    max_keep: int,
+    timeout_seconds: float,
+) -> Path | None:
+    """Write a verified SQLite snapshot from a live, concurrently-written database.
+
+    Unlike _create_verified_backup, the caller holds no write lock here: other
+    processes (gunicorn, other Celery workers) may be writing to db_path at the
+    same time. WAL mode's MVCC is what makes this safe -- the backup's read
+    snapshot never blocks, and is never blocked by, a concurrent writer; that
+    is what the online backup API is for. This is deliberately a separate,
+    self-contained function rather than a refactor of _create_verified_backup:
+    that function is hardened for the pre-Django bootstrap context (no
+    concurrent writers, caller holds the write lock), and is proven there.
+    Duplicating its staging/publish logic here is a smaller risk than
+    reshaping it. Every failure is caught and reported as None; a bad day for
+    backups must never be a bad day for the worker that calls this.
+    """
+    try:
+        return _write_live_snapshot(
+            Path(db_path).resolve(),
+            dest_dir,
+            max_keep=max_keep,
+            timeout_seconds=timeout_seconds,
+        )
+    except (OSError, sqlite3.DatabaseError, ValueError) as error:
+        _log(f"[db-snapshot] Could not write a database snapshot: {error}")
+        return None
+
+
+def _write_live_snapshot(
+    database_path: Path,
+    dest_dir: Path,
+    *,
+    max_keep: int,
+    timeout_seconds: float,
+) -> Path:
+    with suppress(FileExistsError):
+        dest_dir.mkdir(mode=0o700, parents=True)
+    directory_flags = (
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        dest_descriptor = os.open(dest_dir, directory_flags)
+    except OSError as error:
+        message = f"destination directory is not a safe real directory: {error}"
+        raise OSError(message) from error
+    dest_stat = os.fstat(dest_descriptor)
+    try:
+        if not stat.S_ISDIR(dest_stat.st_mode):
+            message = "destination directory is not a safe real directory"
+            raise OSError(message)
+        os.fchmod(dest_descriptor, 0o700)
+        _check_disk_space(dest_dir, database_path)
+
+        timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+        final_name = f"{database_path.stem}-{timestamp}-{secrets.token_hex(4)}.sqlite3"
+        staging_name = f".{database_path.stem}-{secrets.token_hex(16)}.sqlite3.tmp"
+        staging_descriptor = os.open(
+            staging_name,
+            os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+            dir_fd=dest_descriptor,
+        )
+        os.close(staging_descriptor)
+        staging_path = Path(f"/proc/self/fd/{dest_descriptor}/{staging_name}")
+
+        source = None
+        destination = None
+        published = False
+        succeeded = False
+        try:
+            source = sqlite3.connect(
+                f"{database_path.as_uri()}?mode=ro",
+                uri=True,
+                timeout=timeout_seconds,
+            )
+            destination = sqlite3.connect(staging_path, timeout=timeout_seconds)
+            source.backup(destination)
+            result = destination.execute("PRAGMA quick_check").fetchone()
+            if not result or result[0] != "ok":
+                message = "snapshot quick_check did not return 'ok'"
+                raise sqlite3.DatabaseError(message)
+            destination.close()
+            destination = None
+            source.close()
+            source = None
+
+            staging_check = os.open(
+                staging_name,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=dest_descriptor,
+            )
+            try:
+                if not stat.S_ISREG(os.fstat(staging_check).st_mode):
+                    message = "snapshot staging path is not a regular file"
+                    raise OSError(message)
+                os.fsync(staging_check)
+            finally:
+                os.close(staging_check)
+
+            current_stat = dest_dir.stat(follow_symlinks=False)
+            if (current_stat.st_dev, current_stat.st_ino) != (
+                dest_stat.st_dev,
+                dest_stat.st_ino,
+            ):
+                message = "destination directory changed during snapshot"
+                raise OSError(message)
+            os.link(
+                staging_name,
+                final_name,
+                src_dir_fd=dest_descriptor,
+                dst_dir_fd=dest_descriptor,
+                follow_symlinks=False,
+            )
+            published = True
+            os.unlink(staging_name, dir_fd=dest_descriptor)
+            os.fsync(dest_descriptor)
+            succeeded = True
+            # Prune after the new copy is in place, never before -- see the
+            # matching comment on the _create_verified_backup call site.
+            _prune_recovery_backups(dest_dir, max_keep=max_keep)
+            return dest_dir / final_name
+        finally:
+            if destination is not None:
+                destination.close()
+            if source is not None:
+                source.close()
+            with suppress(FileNotFoundError):
+                os.unlink(staging_name, dir_fd=dest_descriptor)
+            if published and not succeeded:
+                with suppress(FileNotFoundError):
+                    os.unlink(final_name, dir_fd=dest_descriptor)
+    finally:
+        os.close(dest_descriptor)
+
+
 def _quote_identifier(identifier: str) -> str:
     escaped = identifier.replace('"', '""')
     return f'"{escaped}"'

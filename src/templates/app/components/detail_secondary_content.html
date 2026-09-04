@@ -52,7 +52,8 @@
                       </button>
 
                       <div x-show="trackOpen"
-                           @mousedown.self="trackOpen = false"
+                      @mousedown.self="trackOpen = false"
+                           x-cloak
                            @keydown.escape.window="trackOpen = false"
                            class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                         <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -73,7 +74,7 @@
                           Progress: {{ user_media.completed_episode_count }}{% if media.max_progress %} / {{ media.max_progress }}{% endif %}
                         {% else %}
                           Progress: {{ user_media.formatted_progress }}
-                          {% if media.media_type != MediaTypes.GAME.value %}
+                          {% if media.media_type != MediaTypes.GAME.value and not user_media.progress_is_percentage and user_media.progress_unit != 'minutes' %}
                             {{ media_type|long_unit|lower }}{{ user_media.progress|pluralize }}
                           {% endif %}
                         {% endif %}
@@ -248,9 +249,9 @@
 
             {# Collection Modal #}
             <div x-show="collectionOpen"
+            @mousedown.self="if (!$event.target.closest('[data-cf-dropdown-menu]')) collectionOpen = false"
                  @keydown.escape.window="collectionOpen = false"
-                 class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-                 @mousedown.self="if (!$event.target.closest('[data-cf-dropdown-menu]')) collectionOpen = false">
+                 class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
               <div class="w-152 modal-max-height overflow-y-auto px-4 md:px-0 relative z-60">
                 <div id="{% component_id 'collection' media %}"></div>
               </div>
@@ -329,8 +330,6 @@
     {% if media_type != MediaTypes.PODCAST.value %}
       {% if show_notes|default:False or media.related or media.cast or media.crew or media_type == MediaTypes.GAME.value or media.episodes %}
         <div class="w-full md:w-3/4">
-        {# Rendered even with no notes yet: the empty section is the anchor the #}
-        {# post-save OOB swap replaces, so it must pre-exist in the DOM. #}
         {% if show_notes|default:False %}
           {% include "app/components/detail_notes_section.html" %}
         {% endif %}

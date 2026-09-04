@@ -592,6 +592,10 @@ class RecoveryPageTests(SimpleTestCase):
         self.assertIn("Floppy cannot read the database file.", page)
         self.assertIn("Physical corruption detected", page)
         self.assertIn("sqlite-recovery", page)
+        # #1053: a CSV export cannot replace this file, and sqlite-recovery/
+        # only ever holds relationship-repair backups, not this failure mode.
+        self.assertIn("database snapshot", page)
+        self.assertIn("CSV export", page)
         self.assertNotIn("<form", page)
 
     def test_the_page_carries_the_floppy_mark_and_icon(self):

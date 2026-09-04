@@ -942,3 +942,42 @@ class CollectionSourceSyncTests(TestCase):
                 user=self.user, item=self.item, source="radarr", source_instance_id=first.id
             ).exists()
         )
+
+
+class SonarrSeriesTypeIsNotAnimeRoutingTests(TestCase):
+    """Sonarr's `seriesType` must not decide Floppy's anime routing.
+
+    It selects a release-parsing and episode-numbering mode for the downloader
+    - users set it on absolutely-numbered Western cartoons and leave it
+    `standard` on seasonally-numbered anime - so it says nothing about the
+    title's identity and carries no MAL mapping. Routing on it would be the
+    same class of heuristic error as routing on a Plex folder name.
+    """
+
+    def setUp(self):
+        """Create a user with the Anime library enabled."""
+        self.user = get_user_model().objects.create_user(
+            username="sonarr-series-type",
+            password="12345",
+        )
+
+    def test_series_type_anime_does_not_change_the_bucket(self):
+        """A row flagged `anime` by Sonarr still resolves to a plain TV item."""
+        importer = sonarr.SonarrImporter.__new__(sonarr.SonarrImporter)
+        importer.user = self.user
+
+        row = {
+            "tmdbId": 1396,
+            "tvdbId": 81189,
+            "title": "Absolutely Numbered Cartoon",
+            "seriesType": "anime",
+        }
+
+        self.assertIsNone(importer._find_series_item(row))
+
+    def test_sonarr_never_reads_series_type(self):
+        """Guard the decision itself: the field is deliberately unused."""
+        from pathlib import Path
+
+        source = Path(sonarr.__file__).read_text()
+        self.assertNotIn("seriesType", source)

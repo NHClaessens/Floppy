@@ -695,6 +695,13 @@ def _validate_dates(filtered_body):
     return filtered_body, None
 
 
+def apply_image_url(item, image_url):
+    """Set an item's image from a client-supplied URL, if it changed."""
+    if image_url and item.image != image_url:
+        item.image = image_url
+        item.save(update_fields=["image"])
+
+
 def validate_body(body, media_type):
     """Validate and filter the request body for media updates."""
     allowed_fields = MEDIA_MODIFIABLE_FIELDS.get(media_type, set())

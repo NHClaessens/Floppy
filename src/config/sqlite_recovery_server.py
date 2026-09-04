@@ -174,12 +174,30 @@ def _download_enabled() -> bool:
     return value in {"1", "true", "yes", "on"}
 
 
-def _backup_card() -> str:
+def _backup_card(*, for_corruption: bool = False) -> str:
     """Offer the copy Floppy already made, or the download if it is open."""
     if _download_enabled():
         action = (
             "<p><a class='button secondary' href='/backup'>"
             "Download database copy</a></p>"
+        )
+    elif for_corruption:
+        action = (
+            "<p class='note'>If scheduled database snapshots are enabled (the "
+            "default), Floppy has been writing verified copies to the "
+            "<code>database</code> folder under <code>BACKUP_DIR</code> on its "
+            "own schedule &mdash; check there first. A CSV export from "
+            "Settings &rarr; Export cannot replace this file; it only "
+            "recreates media, ratings, and lists, not accounts or integration "
+            "credentials.</p>"
+            "<p class='note'>Floppy also writes a verified copy to the "
+            "<code>sqlite-recovery</code> folder beside <code>db.sqlite3</code>, "
+            "but only while repairing broken relationships, not physical "
+            "corruption like this &mdash; that folder is unlikely to hold "
+            "anything useful for this incident.</p>"
+            f"<p class='note'>To download the file from this page instead, set "
+            f"<code>{_DOWNLOAD_ENV}=true</code> and start Floppy again. Keep it "
+            "off at other times, because this page has no sign-in.</p>"
         )
     else:
         action = (
@@ -396,13 +414,15 @@ def render_page(
         parts = [
             "<h1>Floppy cannot read the database file.</h1>",
             "<p>The file is damaged. Floppy changed nothing, because a write "
-            "can damage it more. Replace the file with a backup.</p>",
+            "can damage it more. Replace the file with a database snapshot or "
+            "your own copy of <code>db.sqlite3</code> &mdash; not a CSV "
+            "export.</p>",
             "<div class='card'><h2>What Floppy found</h2>"
             f"<ul>{corruption_reasons}</ul></div>",
             "<div class='card'><h2>Keep a copy of the damaged file</h2>"
             "<p>Keep the damaged file before you replace it. A repair tool can "
             "still read data from it.</p>"
-            + _backup_card()
+            + _backup_card(for_corruption=True)
             + "</div>",
             "<div class='card'><h2>How to restore</h2><ol>"
             "<li>Stop Floppy.</li>"

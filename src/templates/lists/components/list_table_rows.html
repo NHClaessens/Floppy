@@ -20,9 +20,9 @@
     <td class="px-4 py-3 text-sm text-[var(--color-text-secondary)]">
       {% with aggregated_progress=item.media|safe_attr:"aggregated_progress" %}
         {% if aggregated_progress is not None %}
-          {{ item.media.formatted_aggregated_progress }}{% if item.media.max_progress %} / {{ item.media.max_progress }}{% endif %}
+          {{ item.media.formatted_aggregated_progress }}{% if item.media.max_progress and not item.media.progress_is_percentage %} / {{ item.media.formatted_max_progress }}{% endif %}
         {% elif item.media.progress is not None %}
-          {{ item.media.formatted_progress|default:item.media.progress }}{% if item.media.max_progress %} / {{ item.media.max_progress }}{% endif %}
+          {{ item.media.formatted_progress|default:item.media.progress }}{% if item.media.max_progress and not item.media.progress_is_percentage %} / {{ item.media.formatted_max_progress }}{% endif %}
         {% else %}
           -
         {% endif %}

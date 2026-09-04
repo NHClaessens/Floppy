@@ -544,9 +544,20 @@ class FloppyApiTestCase(APITestCase):
         }
 
     def call_api(
-        self, method, url_name, args=(), params=None, payload=None, headers=None
+        self,
+        method,
+        url_name,
+        args=(),
+        params=None,
+        payload=None,
+        headers=None,
+        content_type="application/json",
     ):
-        """Call an API endpoint using a named URL and optional payload."""
+        """Call an API endpoint using a named URL and optional payload.
+
+        Pass ``content_type=None`` to let the test client encode the payload as
+        multipart/form-data instead of JSON.
+        """
         request_method = getattr(self.client, method.lower())
         request_kwargs = dict(headers or {})
 
@@ -556,6 +567,7 @@ class FloppyApiTestCase(APITestCase):
 
         if payload is not None:
             request_kwargs["data"] = payload
-            request_kwargs["content_type"] = "application/json"
+            if content_type is not None:
+                request_kwargs["content_type"] = content_type
 
         return request_method(url, **request_kwargs)

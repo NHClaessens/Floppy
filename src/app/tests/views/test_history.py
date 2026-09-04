@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import formats, timezone
 
 from app import history_cache
 from app.models import (
@@ -29,6 +29,8 @@ from app.models import (
     Music,
     Person,
     PersonGender,
+    Podcast,
+    PodcastShow,
     Season,
     Sources,
     Status,
@@ -162,6 +164,372 @@ class HistoryModalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, ">9.5<", html=False)
+
+
+class SessionHistoryModalTests(TestCase):
+    """Test the in-place, day-grouped session history fragment."""
+
+    def setUp(self):
+        """Create a user and log in with provider work disabled."""
+        _start_model_metadata_patches(self)
+        self.credentials = {"username": "session-history", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        self.client.login(**self.credentials)
+        self.base_time = timezone.now().replace(second=0, microsecond=0)
+
+    def _url(self, **params):
+        return reverse("activity_sessions_modal"), params
+
+    def _create_item(
+        self,
+        media_type,
+        media_id,
+        title,
+        source=Sources.MANUAL.value,
+        **extra,
+    ):
+        return Item.objects.create(
+            media_id=media_id,
+            source=source,
+            media_type=media_type,
+            title=title,
+            image="http://example.com/poster.jpg",
+            runtime_minutes=42,
+            **extra,
+        )
+
+    def test_modal_accepts_each_detail_filter_shape(self):
+        """Each detail-page querystring shape returns the modal fragment."""
+        movie_item = self._create_item(MediaTypes.MOVIE.value, "movie", "Movie")
+        Movie.objects.create(
+            item=movie_item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            end_date=self.base_time,
+        )
+
+        tv_item = self._create_item(MediaTypes.TV.value, "show", "Show")
+        tv = TV.objects.create(item=tv_item, user=self.user)
+        season_item = self._create_item(
+            MediaTypes.SEASON.value,
+            "show",
+            "Season",
+            season_number=1,
+        )
+        season = Season.objects.create(item=season_item, related_tv=tv, user=self.user)
+        episode_item = self._create_item(
+            MediaTypes.EPISODE.value,
+            "show",
+            "Episode",
+            season_number=1,
+            episode_number=1,
+        )
+        Episode.objects.create(
+            item=episode_item,
+            related_season=season,
+            end_date=self.base_time,
+        )
+
+        game_item = self._create_item(MediaTypes.GAME.value, "game", "Game")
+        Game.objects.create(
+            item=game_item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            progress=30,
+            start_date=self.base_time - timedelta(minutes=30),
+            end_date=self.base_time,
+        )
+
+        show = PodcastShow.objects.create(
+            podcast_uuid="session-history-show",
+            title="Podcast Show",
+        )
+        podcast_item = self._create_item(
+            MediaTypes.PODCAST.value,
+            "podcast-episode",
+            "Podcast Episode",
+        )
+        Podcast.objects.create(
+            item=podcast_item,
+            user=self.user,
+            show=show,
+            status=Status.COMPLETED.value,
+            progress=20,
+            end_date=self.base_time,
+        )
+
+        artist = Artist.objects.create(name="Session Artist")
+        album = Album.objects.create(title="Session Album", artist=artist)
+        track = Track.objects.create(album=album, title="Session Track", duration_ms=180000)
+        music_item = self._create_item(MediaTypes.MUSIC.value, "music-track", "Track")
+        Music.objects.create(
+            item=music_item,
+            user=self.user,
+            album=album,
+            artist=artist,
+            track=track,
+            status=Status.COMPLETED.value,
+            progress=1,
+            end_date=self.base_time,
+        )
+
+        book_item = self._create_item(MediaTypes.BOOK.value, "book", "Book")
+        Book.objects.create(
+            item=book_item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            end_date=self.base_time,
+        )
+
+        cases = (
+            {
+                "media_type": MediaTypes.MOVIE.value,
+                "media_id": "movie",
+                "source": Sources.MANUAL.value,
+            },
+            {
+                "media_type": MediaTypes.TV.value,
+                "media_id": "show",
+                "source": Sources.MANUAL.value,
+            },
+            {
+                "media_type": MediaTypes.TV.value,
+                "media_id": "show",
+                "source": Sources.MANUAL.value,
+                "season_number": 1,
+            },
+            {
+                "media_type": MediaTypes.GAME.value,
+                "media_id": "game",
+                "source": Sources.MANUAL.value,
+                "logging_style": "sessions",
+            },
+            {"media_type": MediaTypes.PODCAST.value, "podcast_show": show.id},
+            {"album": album.id},
+            {
+                "media_type": MediaTypes.BOOK.value,
+                "media_id": "book",
+                "source": Sources.MANUAL.value,
+            },
+        )
+        for params in cases:
+            with self.subTest(params=params):
+                response = self.client.get(*self._url(**params))
+                self.assertEqual(response.status_code, 200)
+                self.assertTemplateUsed(
+                    response,
+                    "app/components/session_history_modal.html",
+                )
+
+    def test_movie_repeat_rows_include_notes_scores_and_all_markers(self):
+        """Repeated movie instances remain separate rows across their days."""
+        item = self._create_item(MediaTypes.MOVIE.value, "repeat-movie", "Repeat Movie")
+        first = Movie.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            score=7,
+            notes="First viewing note",
+            end_date=self.base_time - timedelta(days=1),
+        )
+        second = Movie.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            score=8,
+            notes="Second viewing note",
+            end_date=self.base_time,
+        )
+
+        response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.MOVIE.value,
+                media_id=item.media_id,
+                source=item.source,
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        days = response.context["history_days"]
+        self.assertEqual([len(day["entries"]) for day in days], [1, 1])
+        self.assertEqual(
+            response.context["marker_days"],
+            sorted(day["date"].isoformat() for day in days),
+        )
+        body = response.content.decode()
+        self.assertIn("First viewing note", body)
+        self.assertIn("Second viewing note", body)
+        self.assertIn(">7<", body)
+        self.assertIn(">8<", body)
+        self.assertIn(f'"instance_id": "{first.id}"', body)
+        self.assertIn(f'"instance_id": "{second.id}"', body)
+
+    def test_episode_game_notes_and_long_note_snippet_render(self):
+        """Rows show current notes/scores and truncate long plain-text notes."""
+        item = self._create_item(MediaTypes.GAME.value, "noted-game", "Noted Game")
+        Game.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            progress=45,
+            score=9.5,
+            notes="x" * 200,
+            start_date=self.base_time - timedelta(minutes=45),
+            end_date=self.base_time,
+        )
+        response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.GAME.value,
+                media_id=item.media_id,
+                source=item.source,
+                logging_style="sessions",
+            ),
+        )
+        self.assertContains(response, ">9.5<", html=False)
+        self.assertContains(response, "Show more", html=False)
+        self.assertContains(response, "…", html=False)
+        self.assertContains(response, 'x-show="noteExpanded"', html=False)
+
+    def test_session_history_stats_cover_filtered_gaps_streaks_and_weekdays(self):
+        """Stats describe only the filtered item's dated activity."""
+        item = self._create_item(MediaTypes.MOVIE.value, "stats-movie", "Stats Movie")
+        other_item = self._create_item(
+            MediaTypes.MOVIE.value,
+            "stats-other-movie",
+            "Other Movie",
+        )
+        local_today = timezone.localtime(self.base_time).date()
+        monday = local_today - timedelta(days=local_today.weekday() + 14)
+        active_dates = (monday, monday + timedelta(days=1), monday + timedelta(days=3), monday + timedelta(days=7))
+        for active_date in active_dates:
+            days_ago = (local_today - active_date).days
+            Movie.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.COMPLETED.value,
+                end_date=self.base_time - timedelta(days=days_ago),
+            )
+        Movie.objects.create(
+            item=other_item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            end_date=self.base_time,
+        )
+
+        response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.MOVIE.value,
+                media_id=item.media_id,
+                source=item.source,
+            ),
+        )
+
+        stats = {stat["label"]: stat["value"] for stat in response.context["session_history_stats"]}
+        self.assertEqual(stats["Active days"], "4")
+        self.assertEqual(stats["Activity entries"], "4")
+        self.assertEqual(stats["Tracked time"], "2h 48min")
+        self.assertEqual(stats["Average per active day"], "42min")
+        self.assertEqual(stats["Average gap"], "2.3 days")
+        self.assertEqual(stats["Longest streak"], "2 days")
+        self.assertEqual(stats["Most active weekday"], formats.date_format(monday, "l"))
+        self.assertContains(response, "At a glance", html=False)
+        self.assertContains(response, "data-calendar-component", html=False)
+        self.assertContains(response, "showMonthsView", html=False)
+        self.assertContains(response, "showYearsView", html=False)
+        self.assertContains(response, "calendarDayIsInteractive", html=False)
+
+    def test_session_history_stats_ignore_undated_entries_for_calendar_metrics(self):
+        """Undated rows count as activity but do not create calendar dates."""
+        item = self._create_item(MediaTypes.BOOK.value, "stats-book", "Stats Book")
+        dated = Book.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            end_date=self.base_time,
+        )
+        Book.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+
+        response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.BOOK.value,
+                media_id=item.media_id,
+                source=item.source,
+            ),
+        )
+
+        stats = {stat["label"]: stat["value"] for stat in response.context["session_history_stats"]}
+        self.assertEqual(stats["Active days"], "1")
+        self.assertEqual(stats["Activity entries"], "2")
+        self.assertEqual(stats["Tracked time"], "0min")
+        self.assertEqual(stats["Average per active day"], "0min")
+        self.assertEqual(stats["Average gap"], "—")
+        self.assertEqual(stats["Longest streak"], "1 day")
+        self.assertEqual(
+            stats["Most active weekday"],
+            formats.date_format(dated.end_date, "l"),
+        )
+
+    def test_undated_history_is_grouped_and_other_users_are_excluded(self):
+        """Single-item filters include the unknown-date group but stay user-scoped."""
+        item = self._create_item(MediaTypes.BOOK.value, "undated-book", "Undated Book")
+        Book.objects.create(item=item, user=self.user, status=Status.COMPLETED.value)
+
+        response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.BOOK.value,
+                media_id=item.media_id,
+                source=item.source,
+            ),
+        )
+        self.assertContains(response, "Unknown date", html=False)
+        self.assertIsNone(response.context["history_days"][-1]["date"])
+
+        other_item = self._create_item(MediaTypes.BOOK.value, "other-book", "Other Book")
+        other_user = get_user_model().objects.create_user(
+            username="session-history-other",
+            password="12345",
+        )
+        Book.objects.create(
+            item=other_item,
+            user=other_user,
+            status=Status.COMPLETED.value,
+            end_date=self.base_time,
+        )
+        other_response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.BOOK.value,
+                media_id=other_item.media_id,
+                source=other_item.source,
+            ),
+        )
+        self.assertFalse(other_response.context["history_days"])
+
+    @patch("app.history_views.SESSION_HISTORY_MAX_DAYS", 1)
+    def test_history_cap_shows_full_history_link(self):
+        """The marker set uses all days while rendering only the capped prefix."""
+        item = self._create_item(MediaTypes.BOOK.value, "capped-book", "Capped Book")
+        for days_ago in (0, 1):
+            Book.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.COMPLETED.value,
+                end_date=self.base_time - timedelta(days=days_ago),
+            )
+        response = self.client.get(
+            *self._url(
+                media_type=MediaTypes.BOOK.value,
+                media_id=item.media_id,
+                source=item.source,
+            ),
+        )
+        self.assertEqual(len(response.context["history_days"]), 1)
+        self.assertEqual(len(response.context["marker_days"]), 2)
+        self.assertEqual(len(response.context["visible_marker_days"]), 1)
+        self.assertContains(response, "View all activity history", html=False)
 
 
 class DeleteHistoryRecordViewTests(TestCase):
@@ -415,6 +783,48 @@ class HistoryMonthViewTests(TestCase):
         self.assertFalse(response.context["history_refreshing"])
         self.assertNotContains(response, "checkCacheStatus", html=False)
         self.assertNotContains(response, "/api/cache-status/", html=False)
+
+    def test_history_passes_media_type_from_query_into_context(self):
+        response = self.client.get(
+            reverse("history"),
+            {"media_type": MediaTypes.MOVIE.value},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["media_type"], MediaTypes.MOVIE.value)
+
+    def test_history_drops_invalid_media_type_from_query(self):
+        response = self.client.get(
+            reverse("history"),
+            {"media_type": "not-a-media-type"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.context["media_type"])
+
+    def test_history_keeps_a_non_movie_media_type_in_the_search_bar(self):
+        """A game's history link must not leave the search bar on TV shows.
+
+        Regression for the history button on a game detail page, which links to
+        ?media_type=game&...&logging_style=sessions. Without the media type in
+        context the bar falls back to last_search_type, which defaults to TV.
+        """
+        response = self.client.get(
+            reverse("history"),
+            {
+                "media_type": MediaTypes.GAME.value,
+                "media_id": "1877",
+                "source": "igdb",
+                "logging_style": "sessions",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["media_type"], MediaTypes.GAME.value)
+        # base.html renders the navbar's current type into selectedType; the
+        # dropdown list below it always contains every type, so assert on the
+        # selection itself rather than on the presence of "tv" anywhere.
+        self.assertContains(
+            response,
+            "selectedType: { display: 'Games', value: 'game' }",
+        )
 
     def test_media_type_month_view_uses_cached_month_days(self):
         response = self.client.get(

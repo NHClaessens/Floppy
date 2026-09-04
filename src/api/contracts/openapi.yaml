@@ -1325,13 +1325,13 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/MediaUpdateRequest'
+              $ref: '#/components/schemas/TrackedMediaUpdateRequest'
           application/x-www-form-urlencoded:
             schema:
-              $ref: '#/components/schemas/MediaUpdateRequest'
+              $ref: '#/components/schemas/TrackedMediaUpdateRequest'
           multipart/form-data:
             schema:
-              $ref: '#/components/schemas/MediaUpdateRequest'
+              $ref: '#/components/schemas/TrackedMediaUpdateRequest'
       security:
       - bearerAuth: []
       - ApiKeyAuth: []
@@ -3598,6 +3598,38 @@ components:
       - start_date
       - status
       - tracked
+    TrackedMediaUpdateRequest:
+      type: object
+      description: Tracked-media PATCH fields, including the shared item's artwork
+        URL.
+      properties:
+        score:
+          type: number
+          format: double
+          nullable: true
+        status:
+          oneOf:
+          - type: integer
+          - type: string
+          nullable: true
+        progress:
+          type: number
+          format: double
+          nullable: true
+        start_date:
+          type: string
+          description: ISO 8601 date or date-time accepted by this deployment.
+          nullable: true
+        end_date:
+          type: string
+          description: ISO 8601 date or date-time accepted by this deployment.
+          nullable: true
+        notes:
+          type: string
+          nullable: true
+        image_url:
+          type: string
+          format: uri
   securitySchemes:
     ApiKeyAuth:
       type: apiKey

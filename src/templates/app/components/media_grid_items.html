@@ -40,15 +40,15 @@
       {% with aggregated_progress=media|safe_attr:"aggregated_progress" %}
         {% if aggregated_progress %}
           <p class="mt-2 text-sm font-semibold text-[var(--color-text)]">
-            {{ media.formatted_aggregated_progress }}{% if media.max_progress %} / {{ media.max_progress }}{% endif %}
-            {% if media.item.media_type != MediaTypes.GAME.value and media.item.media_type != MediaTypes.MOVIE.value %}
+            {{ media.formatted_aggregated_progress }}{% if media.max_progress and not media.progress_is_percentage %} / {{ media.formatted_max_progress }}{% endif %}
+            {% if media.item.media_type != MediaTypes.GAME.value and media.item.media_type != MediaTypes.MOVIE.value and not media.progress_is_percentage and media.progress_unit != 'minutes' %}
               {{ media.item.media_type|long_unit }}{% if media.max_progress %}{{ media.max_progress|pluralize }}{% else %}{{ aggregated_progress|pluralize }}{% endif %}
             {% endif %}
           </p>
         {% elif media.progress %}
           <p class="mt-2 text-sm font-semibold text-[var(--color-text)]">
-            {{ media.formatted_progress }}{% if media.max_progress %} / {{ media.max_progress }}{% endif %}
-            {% if media.item.media_type != MediaTypes.GAME.value and media.item.media_type != MediaTypes.MOVIE.value %}
+            {{ media.formatted_progress }}{% if media.max_progress and not media.progress_is_percentage %} / {{ media.formatted_max_progress }}{% endif %}
+            {% if media.item.media_type != MediaTypes.GAME.value and media.item.media_type != MediaTypes.MOVIE.value and not media.progress_is_percentage and media.progress_unit != 'minutes' %}
               {{ media.item.media_type|long_unit }}{% if media.max_progress %}{{ media.max_progress|pluralize }}{% else %}{{ media.progress|pluralize }}{% endif %}
             {% endif %}
           </p>

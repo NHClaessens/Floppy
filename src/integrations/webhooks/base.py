@@ -14,6 +14,12 @@ from integrations.webhooks import anime_mappings
 
 logger = logging.getLogger(__name__)
 
+# `_handle_anime` matched an anime mapping but the episode falls outside the
+# mapped MAL entry (absolute numbering, or a cour boundary). The show is still
+# anime, so callers must not fall through to a plain TV row: doing so tracks it
+# in both libraries at once (discussion #967).
+ANIME_EPISODE_REFUSED = object()
+
 
 class BaseWebhookProcessor:
     """Base class for webhook processors."""
@@ -297,23 +303,13 @@ class BaseWebhookProcessor:
 
         tvdb_id = tv_metadata.get("tvdb_id") if tv_metadata else None
 
-        grouped_anime_match = None
-        if user.anime_enabled:
-            from app.services import grouped_anime
+        from app.services import metadata_resolution as _metadata_resolution
 
-            classifier_kwargs = {}
-            if getattr(self, "_grouped_anime_mapping_loaded", False):
-                if self._grouped_anime_snapshot is not None:
-                    classifier_kwargs["snapshot"] = self._grouped_anime_snapshot
-                else:
-                    # Mapping load failures are fail-closed for grouping.  The
-                    # normal TV webhook path still records progress below.
-                    classifier_kwargs = None
-            if classifier_kwargs is not None:
-                grouped_anime_match = grouped_anime.classify_tv_metadata(
-                    tv_metadata,
-                    **classifier_kwargs,
-                )
+        prefers_grouped_anime = _metadata_resolution.prefers_grouped_anime(user)
+
+        grouped_anime_match = None
+        if user.anime_enabled and prefers_grouped_anime:
+            grouped_anime_match = self._classify_grouped_anime(tv_metadata)
             if grouped_anime_match is not None and grouped_anime_match.is_grouped_anime:
                 logger.info(
                     "Detected grouped anime via exact Anime-IDs match: TMDB %s",
@@ -330,6 +326,7 @@ class BaseWebhookProcessor:
                 )
 
         if user.anime_enabled:
+            anime_route_refused = False
             existing_tv_item = self._find_existing_tracked_tv_item(
                 user,
                 ids,
@@ -349,6 +346,7 @@ class BaseWebhookProcessor:
                     episode_number,
                     payload,
                     user,
+                    library_media_type=existing_tv_item.library_media_type or None,
                 )
 
             link_sources = [
@@ -380,8 +378,41 @@ class BaseWebhookProcessor:
                     mal_id,
                     mapped_episode,
                 )
-                if self._handle_anime(mal_id, mapped_episode, payload, user):
+                anime_outcome = self._handle_anime(
+                    mal_id,
+                    mapped_episode,
+                    payload,
+                    user,
+                )
+                if anime_outcome is ANIME_EPISODE_REFUSED:
+                    # A later mapping may cover this episode (next cour), so
+                    # keep looking; remember the refusal in case none do.
+                    anime_route_refused = True
+                    continue
+                if anime_outcome:
                     return None
+
+            # The AniBridge mapping is keyed by TVDB show. When TMDB carries no
+            # TVDB external id, resolve one rather than skipping the lookup:
+            # otherwise a TMDB-only anime routes to the flat library only when
+            # some other user on this instance happened to watch it first and
+            # seeded the shared provider-link cache, and the shape is sticky.
+            mapping_tvdb_id = tvdb_id
+            if not mapping_tvdb_id and app.providers.tvdb.enabled():
+                try:
+                    mapping_tvdb_id = (
+                        app.providers.tmdb.resolve_tvdb_id_for_tmdb_show(
+                            media_id,
+                            tv_metadata,
+                        )
+                    )
+                except Exception as exc:  # pragma: no cover - defensive guard
+                    logger.warning(
+                        "Failed TVDB id resolution for show %s: %s",
+                        media_id,
+                        exception_summary(exc),
+                    )
+                    mapping_tvdb_id = None
 
             mapping_data = anime_mappings.fetch_mapping_data()
             mapping_sources = [
@@ -389,7 +420,7 @@ class BaseWebhookProcessor:
                     "TVDB",
                     *anime_mappings.get_mal_id_from_tvdb(
                         mapping_data,
-                        tvdb_id,
+                        mapping_tvdb_id,
                         season_number,
                         episode_number,
                     ),
@@ -404,7 +435,18 @@ class BaseWebhookProcessor:
                     mal_id,
                     mapped_episode,
                 )
-                if self._handle_anime(mal_id, mapped_episode, payload, user):
+                anime_outcome = self._handle_anime(
+                    mal_id,
+                    mapped_episode,
+                    payload,
+                    user,
+                )
+                if anime_outcome is ANIME_EPISODE_REFUSED:
+                    # A later mapping may cover this episode (next cour), so
+                    # keep looking; remember the refusal in case none do.
+                    anime_route_refused = True
+                    continue
+                if anime_outcome:
                     return None
 
             if self._try_route_tvdb_anime(
@@ -413,8 +455,74 @@ class BaseWebhookProcessor:
                 media_id,
                 episode_number,
                 tv_metadata,
-                tvdb_id,
+                # Reuse the id resolved above rather than resolving twice.
+                mapping_tvdb_id or tvdb_id,
             ):
+                return None
+
+            anime_home = self._find_existing_anime_home(user, media_id, tvdb_id)
+            if anime_home is not None:
+                home_kind, home_item = anime_home
+                if home_kind == "grouped":
+                    logger.info(
+                        "Routing episode to existing grouped-anime tracking: %s",
+                        home_item.title,
+                    )
+                    return self._handle_tv_episode(
+                        media_id,
+                        season_number,
+                        episode_number,
+                        payload,
+                        user,
+                        library_media_type=MediaTypes.ANIME.value,
+                    )
+                logger.warning(
+                    "Dropping episode for TMDB %s S%sE%s: this show is tracked "
+                    "in the Anime library as MAL %s, but no MAL entry covers "
+                    "this episode. Not creating a TV-library row.",
+                    media_id,
+                    season_number,
+                    episode_number,
+                    home_item.media_id,
+                )
+                return None
+
+            if not prefers_grouped_anime:
+                # The user prefers flat MAL rows, but no MAL entry took this
+                # episode. Keeping it in the Anime library matters more than
+                # keeping the preferred shape, so fall back to grouping rather
+                # than letting the show leak into TV Shows.
+                grouped_anime_match = self._classify_grouped_anime(tv_metadata)
+                if (
+                    grouped_anime_match is not None
+                    and grouped_anime_match.is_grouped_anime
+                ):
+                    logger.info(
+                        "No MAL entry covered TMDB %s S%sE%s; storing it as "
+                        "grouped anime rather than in the TV library",
+                        media_id,
+                        season_number,
+                        episode_number,
+                    )
+                    return self._handle_tv_episode(
+                        media_id,
+                        season_number,
+                        episode_number,
+                        payload,
+                        user,
+                        library_media_type=MediaTypes.ANIME.value,
+                        grouped_anime_match=grouped_anime_match,
+                    )
+
+            if anime_route_refused:
+                logger.warning(
+                    "Dropping episode for TMDB %s S%sE%s: an anime mapping "
+                    "matched this show but no MAL entry covers this episode. "
+                    "Not creating a TV-library row.",
+                    media_id,
+                    season_number,
+                    episode_number,
+                )
                 return None
 
         logger.info(
@@ -423,12 +531,21 @@ class BaseWebhookProcessor:
             season_number,
             episode_number,
         )
+        # Record a decisive "not anime" verdict as the `tv` bucket. An empty
+        # bucket means nobody decided - typically the Anime-IDs snapshot failed
+        # to load - and stays eligible for later reclassification. Conflating
+        # the two lets the classifier silently overrule a settled verdict.
+        classified_not_anime = (
+            grouped_anime_match is not None
+            and not grouped_anime_match.is_grouped_anime
+        )
         return self._handle_tv_episode(
             media_id,
             season_number,
             episode_number,
             payload,
             user,
+            library_media_type=MediaTypes.TV.value if classified_not_anime else None,
         )
 
     def _has_existing_tv_tracking(self, media_id, tvdb_id=None):
@@ -456,6 +573,34 @@ class BaseWebhookProcessor:
                 provider_media_type=MediaTypes.TV.value,
                 provider_media_id=str(tvdb_id),
             ).exists()
+        )
+
+    def _classify_grouped_anime(self, tv_metadata):
+        """Return the grouped-anime verdict for a show, or None when unknown.
+
+        Returns None both when the show is not anime and when the Anime-IDs
+        snapshot could not be loaded; grouping is fail-closed on load failure
+        so the ordinary TV path still records progress.
+        """
+        from app.services import grouped_anime
+
+        snapshot = grouped_anime.UNSET
+        if getattr(self, "_grouped_anime_mapping_loaded", False):
+            snapshot = self._grouped_anime_snapshot
+        return grouped_anime.classify(tv_metadata, snapshot=snapshot)
+
+    def _find_existing_anime_home(self, user, tmdb_media_id, tvdb_id=None):
+        """Return the user's existing Anime-library home for this show.
+
+        See `metadata_resolution.find_existing_anime_home`; kept as a method so
+        `PlexImporter` can keep calling it through its processor.
+        """
+        from app.services import metadata_resolution as _metadata_resolution
+
+        return _metadata_resolution.find_existing_anime_home(
+            user,
+            tmdb_id=tmdb_media_id,
+            tvdb_id=tvdb_id,
         )
 
     def _find_existing_tracked_tv_item(
@@ -1469,6 +1614,7 @@ class BaseWebhookProcessor:
             user,
             external_ids,
             media_id,
+            preferred_library_media_type=library_media_type or None,
         )
         if existing_tv_item:
             tv_item = existing_tv_item
@@ -1531,16 +1677,27 @@ class BaseWebhookProcessor:
                 return None
 
         if not existing_tv_item:
-            tv_item, _ = app.models.Item.objects.get_or_create(
+            from integrations.imports import helpers as import_helpers
+
+            # Item uniqueness includes `library_media_type`, so a plain
+            # get_or_create on (media_id, source, media_type) raises
+            # MultipleObjectsReturned as soon as this show exists in two
+            # buckets. Prefer the requested bucket, else reuse the oldest row.
+            tv_item = import_helpers.find_item_across_buckets(
+                preferred_bucket=library_media_type or None,
                 media_id=item_media_id,
                 source=item_source,
                 media_type=MediaTypes.TV.value,
-                defaults={
-                    "title": item_tv_metadata["title"],
-                    "image": item_tv_metadata["image"],
-                    "library_media_type": library_media_type or "",
-                },
             )
+            if tv_item is None:
+                tv_item = app.models.Item.objects.create(
+                    media_id=item_media_id,
+                    source=item_source,
+                    media_type=MediaTypes.TV.value,
+                    title=item_tv_metadata["title"],
+                    image=item_tv_metadata["image"],
+                    library_media_type=library_media_type or "",
+                )
 
         if (
             library_media_type == MediaTypes.ANIME.value
@@ -1789,7 +1946,7 @@ class BaseWebhookProcessor:
                 episode_number,
                 max_progress,
             )
-            return False
+            return ANIME_EPISODE_REFUSED
 
         anime_item, _ = app.models.Item.objects.get_or_create(
             media_id=media_id,

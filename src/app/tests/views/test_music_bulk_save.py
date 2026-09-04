@@ -70,7 +70,9 @@ class MusicBulkSaveViewTests(TestCase):
         self.assertTrue(response.context["episode_plays_tab_available"])
         self.assertEqual(response.context["episode_plays_tab_label"], "Track Plays")
         self.assertContains(response, "Track Plays")
-        self.assertContains(response, "Release date")
+        self.assertContains(response, "Release Date")
+        self.assertContains(response, "Start Now", count=4)
+        self.assertContains(response, "Just Finished", count=4)
 
     def test_album_bulk_save_creates_music_entries_and_trackers(self):
         artist = Artist.objects.create(name="Bulk Artist")

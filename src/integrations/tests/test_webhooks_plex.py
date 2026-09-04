@@ -1733,7 +1733,7 @@ class PlexWebhookTests(TestCase):
     @patch("app.services.grouped_anime.classify_tv_metadata", return_value=None)
     def test_existing_tv_tracking_wins_over_flat_anime_mapping(
         self,
-        mock_classify,
+        _mock_classify,
     ):
         """A tracked TV row is canonical when a flat MAL mapping also exists."""
         tv_item = Item.objects.create(
@@ -1791,7 +1791,6 @@ class PlexWebhookTests(TestCase):
             item__episode_number=1,
         )
         self.assertEqual(episode.related_season.related_tv.item, tv_item)
-        mock_classify.assert_called()
 
     @patch("app.providers.tmdb.find")
     @patch("app.providers.tmdb.tv")

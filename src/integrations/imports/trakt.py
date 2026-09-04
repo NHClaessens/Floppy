@@ -14,7 +14,7 @@ import app
 from app import helpers as app_helpers
 from app.models import MediaTypes, Sources, Status
 from app.providers import services, tvdb
-from app.services import item_merge
+from app.services import grouped_anime, item_merge
 from integrations import import_progress
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -265,6 +265,20 @@ class TraktMetadataResolverMixin:
                 raise MediaImportError(msg) from error
             raise
 
+    def _anime_bucket_for_show(self, tmdb_id, tv_metadata):
+        """Return the library bucket for a show, or None to leave it in TV.
+
+        Returns the sentinel string "skip" when the show's Anime home is a flat
+        MAL row: this importer only resolves TMDB identities and cannot write to
+        one, so importing it as TV would track the same show in both libraries.
+        """
+        route = self.anime_router.route_for_show(tv_metadata, tmdb_id=tmdb_id)
+        if route == "grouped":
+            return MediaTypes.ANIME.value
+        if route == "flat":
+            return "skip"
+        return None
+
     def _get_or_create_item(
         self,
         media_type,
@@ -272,6 +286,7 @@ class TraktMetadataResolverMixin:
         metadata,
         season_number=None,
         episode_number=None,
+        library_media_type=None,
     ):
         """Get or create an item in the database.
 
@@ -295,7 +310,14 @@ class TraktMetadataResolverMixin:
         if episode_number is not None:
             item_kwargs["episode_number"] = episode_number
 
-        desired_bucket = metadata.get("library_media_type") or media_type
+        # Trakt resolves everything through TMDB, whose metadata never carries a
+        # bucket, so the caller passes the show's anime route down to the season
+        # and episode rows.
+        desired_bucket = (
+            library_media_type
+            or metadata.get("library_media_type")
+            or media_type
+        )
 
         existing = list(app.models.Item.objects.filter(**item_kwargs))
         if existing:
@@ -378,6 +400,12 @@ class TraktImporter(TraktMetadataResolverMixin):
         user_identifier = "me" if self.is_oauth_import else username
         self.user_base_url = f"{TRAKT_API_BASE_URL}/users/{user_identifier}"
         self.warnings = []
+
+        # One anime router for the whole run. Rows are buffered and flushed at
+        # the end, so a database lookup alone cannot see a home opened earlier
+        # in this same import.
+        self.anime_router = grouped_anime.AnimeRouteResolver(user)
+        self.skipped_flat_anime = set()
 
         # Track existing media to handle "new" mode correctly
         self.existing_media = helpers.get_existing_media(user)
@@ -854,8 +882,24 @@ class TraktImporter(TraktMetadataResolverMixin):
             None,
         )
 
+        anime_bucket = self._anime_bucket_for_show(tmdb_id, tv_metadata)
+        if anime_bucket == "skip":
+            if tmdb_id not in self.skipped_flat_anime:
+                self.skipped_flat_anime.add(tmdb_id)
+                self.warnings.append(
+                    f"{tv_metadata['title']}: tracked as anime on "
+                    f"{Sources.MAL.label}; skipped so it is not also imported "
+                    "into TV",
+                )
+            return
+
         # Create or get TV show
-        tv_item = self._get_or_create_item(MediaTypes.TV.value, tmdb_id, tv_metadata)
+        tv_item = self._get_or_create_item(
+            MediaTypes.TV.value,
+            tmdb_id,
+            tv_metadata,
+            library_media_type=anime_bucket,
+        )
         tv_key = f"{tmdb_id}"
 
         if tv_key not in self.media_instances[MediaTypes.TV.value]:
@@ -897,6 +941,7 @@ class TraktImporter(TraktMetadataResolverMixin):
             tmdb_id,
             season_metadata,
             season_number,
+            library_media_type=anime_bucket,
         )
 
         season_key = f"{tmdb_id}:{season_number}"
@@ -939,6 +984,7 @@ class TraktImporter(TraktMetadataResolverMixin):
             episode_metadata,
             season_number,
             episode_number,
+            library_media_type=anime_bucket,
         )
 
         ep_key = f"{tmdb_id}:{season_number}:{episode_number}"
@@ -1153,7 +1199,17 @@ class TraktImporter(TraktMetadataResolverMixin):
         tv_metadata = self._get_metadata(MediaTypes.TV.value, tmdb_id, show["title"])
         if not tv_metadata:
             return
-        tv_item = self._get_or_create_item(MediaTypes.TV.value, tmdb_id, tv_metadata)
+
+        anime_bucket = self._anime_bucket_for_show(tmdb_id, tv_metadata)
+        if anime_bucket == "skip":
+            return
+
+        tv_item = self._get_or_create_item(
+            MediaTypes.TV.value,
+            tmdb_id,
+            tv_metadata,
+            library_media_type=anime_bucket,
+        )
 
         for season_entry in entry.get("seasons", []):
             season_number = season_entry["number"]
@@ -1170,6 +1226,7 @@ class TraktImporter(TraktMetadataResolverMixin):
                 tmdb_id,
                 season_metadata,
                 season_number,
+                library_media_type=anime_bucket,
             )
 
             for episode_entry in season_entry.get("episodes", []):
@@ -1201,6 +1258,7 @@ class TraktImporter(TraktMetadataResolverMixin):
                     episode_metadata,
                     season_number,
                     episode_number,
+                    library_media_type=anime_bucket,
                 )
                 trakt_collection.upsert_collection_entry(
                     self.user,

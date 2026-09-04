@@ -32,7 +32,8 @@
               </button>
 
               <div x-show="trackOpen"
-                   @mousedown.self="trackOpen = false"
+              @mousedown.self="trackOpen = false"
+                   x-cloak
                    @keydown.escape.window="trackOpen = false"
                    class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                 <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -81,7 +82,8 @@
                   </div>
 
                   <div x-show="editTrackOpen"
-                       @mousedown.self="editTrackOpen = false"
+                  @mousedown.self="editTrackOpen = false"
+                       x-cloak
                        @keydown.escape.window="editTrackOpen = false"
                        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -92,7 +94,7 @@
                   </div>
 
                   <div x-show="createTrackOpen"
-                       @mousedown.self="createTrackOpen = false"
+                  @mousedown.self="createTrackOpen = false"
                        @keydown.escape.window="createTrackOpen = false"
                        class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -205,9 +207,10 @@
               </div>
 
               <div x-show="tagsOpen"
+              @mousedown.self="tagsOpen = false"
+                   x-cloak
                    @keydown.escape.window="tagsOpen = false"
-                   class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-                   @mousedown.self="tagsOpen = false">
+                   class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                 <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
                   <div id="{% component_id 'tags' media %}"></div>
                 </div>
@@ -224,9 +227,10 @@
                       @click="listsOpen = true">{% include "app/icons/list-add.svg" with classes="w-4 h-4" %}</button>
 
               <div x-show="listsOpen"
+              @mousedown.self="listsOpen = false"
+                   x-cloak
                    @keydown.escape.window="listsOpen = false"
-                   class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-                   @mousedown.self="listsOpen = false">
+                   class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                 <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
                   <div id="{% component_id 'lists' media %}"></div>
                 </div>

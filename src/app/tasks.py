@@ -108,7 +108,12 @@ def repair_celery_broker_bindings():
 # existing callers (import paths, test patches on "app.tasks.*", apps.py
 # dynamic imports) continue to work without any call-site changes.
 # ---------------------------------------------------------------------------
+from app.tasks_anime_library_repair import (  # noqa: E402
+    convert_anime_library_shape_task,
+    repair_duplicated_anime_libraries_task,
+)
 from app.tasks_backfill_state import (  # noqa: E402
+    EXTERNAL_IDS_BACKFILL_VERSION,
     GENRE_BACKFILL_VERSION,
     METADATA_BACKFILL_BASE_DELAY_SECONDS,
     METADATA_BACKFILL_MAX_ATTEMPTS,
@@ -140,6 +145,7 @@ from app.tasks_credits import (  # noqa: E402
     populate_credits_backfill_queue,
     populate_credits_data_for_items,
 )
+from app.tasks_db_backup import write_database_snapshot  # noqa: E402
 from app.tasks_discover import (  # noqa: E402
     refresh_discover_profiles,
     refresh_discover_rows,
@@ -151,6 +157,15 @@ from app.tasks_discover import (  # noqa: E402
 from app.tasks_episode import (  # noqa: E402
     populate_episode_runtime_data,
     populate_episode_runtime_queue,
+)
+from app.tasks_external_ids import (  # noqa: E402
+    enqueue_due_external_ids_backfill_retries,
+    enqueue_external_ids_backfill_items,
+    ensure_external_ids_backfill_reconcile,
+    is_external_ids_backfill_reconcile_complete,
+    populate_external_ids_backfill_queue,
+    populate_external_ids_for_items,
+    reconcile_external_ids_backfill,
 )
 from app.tasks_genre import (  # noqa: E402
     GENRE_BACKFILL_ITEMS_QUEUE_KEY,
@@ -194,6 +209,12 @@ from app.tasks_music import (  # noqa: E402
     populate_album_tracks_batch,
     prefetch_album_covers_batch,
     prefetch_artist_images_batch,
+)
+from app.tasks_podcast import (  # noqa: E402
+    PODCAST_WEBSITE_BACKFILL_VERSION,
+    backfill_podcast_show_websites,
+    ensure_podcast_website_backfill_reconcile,
+    reconcile_podcast_website_backfill,
 )
 from app.tasks_providers import (  # noqa: E402
     WATCH_PROVIDERS_BACKFILL_ITEMS_QUEUE_KEY,
@@ -1122,6 +1143,7 @@ __all__ = [
     "CREDITS_BACKFILL_ITEMS_SCHEDULED_KEY",
     "CREDITS_BACKFILL_QUEUE_TTL",
     "CREDITS_BACKFILL_SOURCES",
+    "EXTERNAL_IDS_BACKFILL_VERSION",
     "GENRE_BACKFILL_ITEMS_QUEUE_KEY",
     "GENRE_BACKFILL_ITEMS_SCHEDULED_KEY",
     "GENRE_BACKFILL_QUEUE_TTL",
@@ -1135,6 +1157,7 @@ __all__ = [
     "METADATA_BACKFILL_BASE_DELAY_SECONDS",
     "METADATA_BACKFILL_MAX_ATTEMPTS",
     "METADATA_BACKFILL_MAX_DELAY_SECONDS",
+    "PODCAST_WEBSITE_BACKFILL_VERSION",
     "RUNTIME_BACKFILL_EPISODES_LOCK_PREFIX",
     "RUNTIME_BACKFILL_EPISODES_LOCK_TTL",
     "RUNTIME_BACKFILL_EPISODES_QUEUE_KEY",
@@ -1166,17 +1189,24 @@ __all__ = [
     "_populate_runtime_for_items",
     "_provider_items_queryset",
     "_schedule_metadata_statistics_refresh",
+    "backfill_podcast_show_websites",
     "bulk_episode_plays_task",
     "bulk_music_plays_task",
+    "convert_anime_library_shape_task",
     "count_igdb_rating_backfill_items",
+    "enqueue_due_external_ids_backfill_retries",
     "enqueue_due_provider_backfill_retries",
+    "enqueue_external_ids_backfill_items",
     "enqueue_igdb_rating_backfill_items",
     "enqueue_provider_backfill_items",
     "enrich_albums_task",
     "enrich_music_library_task",
+    "ensure_external_ids_backfill_reconcile",
     "ensure_genre_backfill_reconcile",
+    "ensure_podcast_website_backfill_reconcile",
     "ensure_provider_backfill_reconcile",
     "fast_runtime_backfill_task",
+    "is_external_ids_backfill_reconcile_complete",
     "is_genre_backfill_reconcile_complete",
     "is_provider_backfill_reconcile_complete",
     "migrate_tv_shows_to_preferred_provider_task",
@@ -1185,6 +1215,8 @@ __all__ = [
     "populate_credits_data_for_items",
     "populate_episode_runtime_data",
     "populate_episode_runtime_queue",
+    "populate_external_ids_backfill_queue",
+    "populate_external_ids_for_items",
     "populate_genre_backfill_queue",
     "populate_genre_data_for_items",
     "populate_igdb_rating_backfill_queue",
@@ -1200,13 +1232,17 @@ __all__ = [
     "populate_trakt_popularity_data_for_items",
     "prefetch_album_covers_batch",
     "prefetch_artist_images_batch",
+    "reconcile_external_ids_backfill",
     "reconcile_genre_backfill",
     "reconcile_igdb_rating_backfill",
+    "reconcile_podcast_website_backfill",
     "reconcile_provider_backfill",
     "reconcile_trakt_popularity",
     "refresh_discover_rows",
+    "repair_duplicated_anime_libraries_task",
     "sync_mal_ratings_from_api",
     "warm_discover_api_cache",
     "warm_discover_startup_tabs",
     "warm_history_day_cache_coverage",
+    "write_database_snapshot",
 ]

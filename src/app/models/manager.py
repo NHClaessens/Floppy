@@ -1708,7 +1708,7 @@ class MediaManager(models.Manager):
 
         if media_type == MediaTypes.BOOK.value:
             for media in media_list:
-                media.max_progress = media.item.number_of_pages or None
+                media.max_progress = media.item.book_max_progress
             return
 
         if media_type in {

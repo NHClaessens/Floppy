@@ -1,9 +1,69 @@
-# Grouped anime from Stremio
+# Grouped anime
 
 Floppy stores TV-shaped anime as grouped anime: the parent remains an `Item`
 with `media_type="tv"`, while the parent, seasons, and episodes use
 `library_media_type="anime"`. This preserves Floppy's TV season/episode
 history model and keeps the title in the Anime library.
+
+## Which shape the Anime library uses
+
+The Anime library's storage shape follows each user's **Anime Provider**:
+
+- **TMDB or TVDB** (the default) stores anime as grouped anime - a TV-shaped
+  row with a real season and episode tree, exactly like TV Shows.
+- **MyAnimeList** stores flat `Anime` rows, one per cour, with progress but no
+  per-episode history.
+
+The shape is decided once, when a show is first tracked, and then stays put.
+Changing the Anime Provider only affects newly added shows: MAL identity is per
+cour while TMDB/TVDB identity is per show, so the mapping is N:1 and cannot be
+re-derived in bulk without guessing at or dropping history. When the preference
+changes and existing anime is in the other shape, Floppy offers a conversion
+instead of performing one, and leaves anything it cannot convert safely alone.
+
+## Where a scrobble lands
+
+Routing is sticky. Once a show has a home in the Anime library - in either
+shape - every later episode goes there, whether or not the Anime-IDs snapshot
+happens to load on that request and whether or not the per-season mapping
+covers that episode. An episode that no MAL entry can accept is dropped with a
+warning rather than opening a row in TV Shows.
+
+Before this rule existed, a show could land in Anime on one episode and in TV
+Shows on the next and accrue progress in both. The scheduled **Repair
+duplicated anime libraries** task folds any such pairs back into one row; a
+pair it cannot resolve safely is reported and left untouched.
+
+`anime_library_mode` is a display setting on top of this. It decides which
+library surfaces grouped anime - Anime, TV Shows, or both - and never changes
+where a scrobble is stored.
+
+## Which paths follow this rule
+
+Every path that can create a show now shares one decision, so a title lands in
+the same library whichever way it arrived. The shared pieces are
+`metadata_resolution.prefers_grouped_anime`,
+`metadata_resolution.find_existing_anime_home` and `grouped_anime.classify`;
+importers compose them through `grouped_anime.AnimeRouteResolver`, which caches
+per run because importers buffer their rows and flush at the end.
+
+| Path | Follows the rule |
+|---|---|
+| Webhooks (Plex, Jellyfin, Emby, Kodi, Stremio) | Yes |
+| Trakt import | Yes, decided once per show and inherited by season and episode rows |
+| Plex import | Yes. A section named "Anime" still routes a title the classifier has no verdict on, but cannot override a positive "not animation" verdict |
+| Stremio import | Yes |
+| Simkl import | Yes. Anime always lands in the Anime library; the old per-import destination option is gone |
+| Sonarr | No, deliberately. Its `seriesType` is a downloader release-parsing mode, not a claim about the title |
+| MyAnimeList, AniList, Kitsu | No, deliberately. These are MAL-identity-native and carry no TMDB/TVDB identity to key the lookup on |
+| Yamtrack CSV | No, deliberately. A CSV import is a restore; the exported bucket is honoured verbatim |
+
+A show whose Anime home is a flat MAL row is skipped by importers that can only
+resolve TMDB identities, rather than being imported as TV: importing it would
+track the same show in both libraries.
+
+To move existing shows between shapes, use the per-show Move action or the
+"Convert anime library shape" task, both of which ask first.
 
 ## Classification policy
 

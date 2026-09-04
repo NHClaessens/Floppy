@@ -1249,3 +1249,181 @@ class FindTrackedSeasonTests(TestCase):
         )
 
         self.assertEqual(resolved.pk, anime_season.pk)
+
+
+class FindExistingAnimeHomeTests(TestCase):
+    """Sticky anime routing, shared by webhooks and importers.
+
+    `ItemProviderLink` is global by design - it caches a content fact, not user
+    state - so the link lookup is unscoped while the tracking lookup must not
+    be. Getting that boundary wrong routes one user's import by another user's
+    library.
+    """
+
+    def setUp(self):
+        """Create two users and one TMDB-identified show."""
+        self.user = get_user_model().objects.create_user(
+            username="anime-home-user",
+            password="password",
+        )
+        self.other = get_user_model().objects.create_user(
+            username="anime-home-other",
+            password="password",
+        )
+
+    def _grouped_item(self):
+        return Item.objects.create(
+            media_id="209867",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Frieren: Beyond Journey's End",
+            image="",
+        )
+
+    def _flat_item(self):
+        item = Item.objects.create(
+            media_id="52991",
+            source=Sources.MAL.value,
+            media_type=MediaTypes.ANIME.value,
+            title="Frieren: Beyond Journey's End",
+            image="",
+        )
+        ItemProviderLink.objects.create(
+            item=item,
+            provider=Sources.TMDB.value,
+            provider_media_type=MediaTypes.TV.value,
+            provider_media_id="209867",
+            episode_offset=0,
+        )
+        return item
+
+    def test_returns_none_without_any_identity(self):
+        """No TMDB or TVDB id means there is nothing to match on."""
+        self.assertIsNone(
+            metadata_resolution.find_existing_anime_home(self.user),
+        )
+
+    def test_finds_a_grouped_home(self):
+        """A tracked anime-bucket TV row is a grouped home."""
+        item = self._grouped_item()
+        TV.objects.create(item=item, user=self.user, status=Status.IN_PROGRESS.value)
+
+        self.assertEqual(
+            metadata_resolution.find_existing_anime_home(self.user, tmdb_id="209867"),
+            ("grouped", item),
+        )
+
+    def test_finds_a_flat_home_through_its_provider_link(self):
+        """A tracked MAL row linked to this show is a flat home."""
+        from app.models import Anime
+
+        item = self._flat_item()
+        Anime.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            progress=1,
+        )
+
+        self.assertEqual(
+            metadata_resolution.find_existing_anime_home(self.user, tmdb_id="209867"),
+            ("flat", item),
+        )
+
+    def test_grouped_wins_when_both_shapes_exist(self):
+        """A grouped home is the TV-shaped one; prefer it over a flat row."""
+        from app.models import Anime
+
+        grouped = self._grouped_item()
+        TV.objects.create(
+            item=grouped,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        flat = self._flat_item()
+        Anime.objects.create(
+            item=flat,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            progress=1,
+        )
+
+        self.assertEqual(
+            metadata_resolution.find_existing_anime_home(self.user, tmdb_id="209867"),
+            ("grouped", grouped),
+        )
+
+    def test_another_users_library_does_not_route_this_user(self):
+        """Tracking is per user even though the link table is shared."""
+        item = self._grouped_item()
+        TV.objects.create(item=item, user=self.other, status=Status.IN_PROGRESS.value)
+
+        self.assertIsNone(
+            metadata_resolution.find_existing_anime_home(self.user, tmdb_id="209867"),
+        )
+
+    def test_an_untracked_item_is_not_a_home(self):
+        """An Item nobody tracks is not anybody's library."""
+        self._grouped_item()
+
+        self.assertIsNone(
+            metadata_resolution.find_existing_anime_home(self.user, tmdb_id="209867"),
+        )
+
+    def test_matches_on_tvdb_identity_too(self):
+        """A TVDB-sourced grouped row is found by its TVDB id."""
+        item = Item.objects.create(
+            media_id="424536",
+            source=Sources.TVDB.value,
+            media_type=MediaTypes.TV.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Frieren: Beyond Journey's End",
+            image="",
+        )
+        TV.objects.create(item=item, user=self.user, status=Status.IN_PROGRESS.value)
+
+        self.assertEqual(
+            metadata_resolution.find_existing_anime_home(
+                self.user,
+                tvdb_id="424536",
+            ),
+            ("grouped", item),
+        )
+
+
+class PrefersGroupedAnimeTests(TestCase):
+    """Storage shape follows the user's Anime Provider."""
+
+    def setUp(self):
+        """Create a user with anime enabled."""
+        self.user = get_user_model().objects.create_user(
+            username="prefers-grouped-user",
+            password="password",
+        )
+
+    def test_provider_decides_the_shape(self):
+        """TMDB and TVDB mean grouped rows; MAL means flat rows."""
+        cases = [
+            (Sources.TMDB.value, True),
+            (Sources.TVDB.value, True),
+            (Sources.MAL.value, False),
+        ]
+        for provider, expected in cases:
+            with self.subTest(provider=provider):
+                self.user.anime_metadata_source_default = provider
+                self.user.save(update_fields=["anime_metadata_source_default"])
+                self.assertIs(
+                    metadata_resolution.prefers_grouped_anime(self.user),
+                    expected,
+                )
+
+    def test_disabled_anime_library_never_prefers_grouped(self):
+        """With the Anime library off there is no grouped anime to prefer."""
+        self.user.anime_enabled = False
+        self.user.anime_metadata_source_default = Sources.TMDB.value
+        self.user.save(
+            update_fields=["anime_enabled", "anime_metadata_source_default"],
+        )
+
+        self.assertFalse(metadata_resolution.prefers_grouped_anime(self.user))

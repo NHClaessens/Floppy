@@ -104,7 +104,8 @@
         </button>
 
         <div x-show="trackOpen"
-             @mousedown.self="trackOpen = false"
+        @mousedown.self="trackOpen = false"
+             x-cloak
              @keydown.escape.window="trackOpen = false"
              class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -208,9 +209,10 @@
           </div>
 
           <div x-show="tagsOpen"
+          @mousedown.self="tagsOpen = false"
+               x-cloak
                @keydown.escape.window="tagsOpen = false"
-               class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-               @mousedown.self="tagsOpen = false">
+               class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
               <div id="{% component_id 'tags' media %}"></div>
             </div>
@@ -227,9 +229,10 @@
                   @click="listsOpen = true">{% include "app/icons/list-add.svg" with classes="w-4 h-4" %}</button>
 
           <div x-show="listsOpen"
+          @mousedown.self="listsOpen = false"
+               x-cloak
                @keydown.escape.window="listsOpen = false"
-               class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-               @mousedown.self="listsOpen = false">
+               class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
               <div id="{% component_id 'lists' media %}"></div>
             </div>
@@ -268,6 +271,22 @@
         {% endfor %}
       </div>
     </div>
+  </div>
+</div>
+
+<div x-data="{ sessionHistoryOpen: false }"
+     @open-session-history.window="sessionHistoryOpen = true; $nextTick(() => $el.querySelector('[data-session-history-close]')?.focus())"
+     @keydown.escape.window="if (!$event.target.closest('[data-session-history-track-modal]')) sessionHistoryOpen = false">
+  <div x-show="sessionHistoryOpen"
+       x-cloak
+       class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 md:p-6"
+       role="dialog"
+       aria-modal="true"
+       aria-label="Activity history"
+       @click.self="sessionHistoryOpen = false">
+    <div id="session-history-modal-host"
+         class="flex max-h-full w-full items-center justify-center"
+         @click.stop></div>
   </div>
 </div>
 

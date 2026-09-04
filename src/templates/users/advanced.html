@@ -453,6 +453,12 @@
                   <strong x-text="selectedMediaLabel.toLowerCase()"></strong>
                   entry in your account. This removes its progress, ratings, notes, and history.
                 </p>
+                <p x-show="selectedMediaType === 'music'"
+                   x-cloak
+                   class="text-sm text-[var(--color-text-secondary)] mb-3">
+                  For music this covers your whole library page: the followed artists and albums as
+                  well as the individual tracks and their play counts.
+                </p>
                 <label class="flex items-center justify-between p-3 mb-3 bg-[var(--color-panel)] rounded-md cursor-pointer">
                   <span class="text-sm text-[var(--color-text-secondary)] pr-3">
                     Also delete cached metadata (posters, cast/crew, and for music, artists &amp; albums)

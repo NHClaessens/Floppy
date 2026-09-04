@@ -276,6 +276,33 @@ def update_episode_references(episodes, user):
             )
 
 
+def update_podcast_references(podcasts):
+    """Link imported Podcast rows to an existing PodcastEpisode/PodcastShow.
+
+    CSV-imported Podcast rows only carry an Item (media_id=episode_uuid,
+    source=show.source); if that episode's show is already tracked locally,
+    look it up here so the show's episode list can find this play (see
+    issue #1048) instead of leaving show/episode unset.
+    """
+    media_ids = {podcast.item.media_id for podcast in podcasts if podcast.item.media_id}
+    if not media_ids:
+        return
+
+    existing_episodes = {
+        (episode.episode_uuid, episode.show.source): episode
+        for episode in app.models.PodcastEpisode.objects.select_related(
+            "show",
+        ).filter(episode_uuid__in=media_ids)
+    }
+
+    for podcast in podcasts:
+        key = (podcast.item.media_id, podcast.item.source)
+        episode = existing_episodes.get(key)
+        if episode:
+            podcast.episode = episode
+            podcast.show = episode.show
+
+
 def _ordered_media_types(bulk_media_list):
     """Return media types in creation order with dependency types first."""
     ordered_types = []
@@ -490,6 +517,9 @@ def bulk_create_media(bulk_media_list, user):
                 "Updating references for episodes to existing TV seasons",
             )
             update_episode_references(bulk_media, user)
+        elif media_type == MediaTypes.PODCAST.value:
+            logger.info("Updating references for podcasts to existing episodes")
+            update_podcast_references(bulk_media)
 
         def create_media(bulk_media=bulk_media, model=model):
             return bulk_create_with_history(

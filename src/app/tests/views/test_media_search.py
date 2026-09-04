@@ -66,6 +66,39 @@ class MediaSearchViewTests(TestCase):
         )
 
     @patch("app.providers.services.search")
+    def test_search_result_track_modal_is_cloaked(self, mock_search):
+        """The track modal must not flash before Alpine hides it.
+
+        media_card_list.html's overlay is a full-screen
+        `fixed inset-0 bg-black/50` div; without x-cloak it renders visible
+        until Alpine boots and applies x-show="trackOpen".
+        """
+        mock_search.return_value = {
+            "page": 1,
+            "total_results": 1,
+            "total_pages": 1,
+            "results": [
+                {
+                    "media_id": "238",
+                    "title": "Test Movie",
+                    "media_type": MediaTypes.MOVIE.value,
+                    "source": Sources.TMDB.value,
+                    "image": "http://example.com/image.jpg",
+                },
+            ],
+        }
+
+        response = self.client.get(
+            reverse("search") + "?media_type=movie&q=test",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertRegex(
+            response.content.decode(),
+            r'x-show="trackOpen"[^>]*\sx-cloak\b',
+        )
+
+    @patch("app.providers.services.search")
     def test_podcast_local_result_keeps_show_source(self, mock_search):
         """Local podcast search results must not be mislabeled as Pocket Casts."""
         mock_search.return_value = {

@@ -14,6 +14,7 @@ import app
 from app.log_safety import exception_summary, presence_map
 from app.models import MediaTypes, Sources, Status
 from app.providers import services
+from app.services import grouped_anime
 from app.services.music import prefetch_album_covers
 
 # Suppress InsecureRequestWarning (Plex local connections often use self-signed certs)
@@ -25,9 +26,9 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 import contextlib
 
-from integrations import episode_remap, import_progress
+from integrations import episode_remap, import_progress, plex_audiobook_sync
 from integrations import plex as plex_api
-from integrations.imports import helpers
+from integrations.imports import helpers, plex_audiobooks
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
 from integrations.webhooks import anime_mappings
 from integrations.webhooks.plex import PlexWebhookProcessor
@@ -116,8 +117,25 @@ class PlexHistoryImporter:
         # Store ratings from library items to apply during bulk media creation
         self._library_ratings: dict[tuple[str, str], float] = {}
         self._anime_import_keys: set[tuple[str, int]] = set()
+        # One anime router for the whole run; see AnimeRouteResolver.
+        self.anime_router = grouped_anime.AnimeRouteResolver(self.user)
         self._current_section_uri: str = ""
         self._current_section_anime_hint = False
+        self._current_section_content_kind = plex_audiobooks.CONTENT_KIND_AUTO
+        self._current_section_audiobook_hint = False
+        self._current_section_machine_id: str | None = None
+        # (machine id, album rating key) -> audiobook verdict, so an album is
+        # fetched and scored once per run no matter how many chapters appear in
+        # history. Rating keys are only unique within a server, so an "all
+        # libraries" import across two servers would otherwise let one album
+        # inherit another's classification.
+        self._audiobook_album_verdicts: dict[tuple[str | None, str], bool] = {}
+        # (machine id, album rating key) already upserted this run, so the
+        # other chapters of the same book fall through instead of re-fetching
+        # it -- server-scoped for the same reason as the verdict cache.
+        self._audiobook_albums_seen: set[tuple[str | None, str]] = set()
+        self._audiobook_detected_count = 0
+        self._audiobook_skipped_disabled = 0
         self._current_server_owned = True
         # Scores captured before overwrite-mode deletion, reapplied on rebuild
         self._preserved_scores: dict[tuple, float] = {}
@@ -214,6 +232,7 @@ class PlexHistoryImporter:
             result_counts[MediaTypes.MUSIC.value] = self.counts[MediaTypes.MUSIC.value]
         if MediaTypes.MUSIC.value in result_counts:
             result_counts["music_unique_tracks"] = len(self._unique_music_tracks)
+        self._report_audiobook_results(result_counts)
 
         result_counts.update(self.summary_counts)
 
@@ -230,6 +249,29 @@ class PlexHistoryImporter:
 
         deduped_warnings = "\n".join(dict.fromkeys(self.warnings))
         return result_counts, deduped_warnings
+
+    def _report_audiobook_results(self, result_counts: dict):
+        """Fold audiobook counts into the summary and explain what was routed.
+
+        An over-eager heuristic is only debuggable if the summary says how many
+        albums it claimed, so detected and forced albums are reported apart.
+        """
+        imported = self.counts[MediaTypes.BOOK.value]
+        if imported:
+            result_counts[MediaTypes.BOOK.value] = (
+                result_counts.get(MediaTypes.BOOK.value, 0) + imported
+            )
+        if self._audiobook_detected_count:
+            self.warnings.append(
+                f"Detected {self._audiobook_detected_count} audiobook(s) in a Plex "
+                "music library and tracked them as books. Set the library's "
+                "content type to Music if that is wrong.",
+            )
+        if self._audiobook_skipped_disabled:
+            self.warnings.append(
+                f"Skipped {self._audiobook_skipped_disabled} Plex audiobook(s): "
+                "book tracking is disabled. Enable Books to import them.",
+            )
 
     def _ensure_account_id(self):
         """Fetch and persist the Plex account id if missing."""
@@ -377,6 +419,14 @@ class PlexHistoryImporter:
         self._current_section_anime_hint = "anime" in (
             (section.get("title") or "").lower()
         )
+        self._current_section_machine_id = section.get("machine_identifier")
+        self._current_section_content_kind = self.account.content_kind(
+            section.get("machine_identifier"),
+            section.get("id"),
+        )
+        self._current_section_audiobook_hint = plex_audiobooks.is_music_section(
+            section,
+        ) and plex_audiobooks.section_audiobook_hint(section)
         self._current_server_owned = self._is_server_owned(
             section.get("machine_identifier"),
         )
@@ -569,7 +619,10 @@ class PlexHistoryImporter:
             media_type = MediaTypes.MOVIE.value
 
         if media_type == MediaTypes.MUSIC.value:
-            self._process_music_entry(metadata)
+            if self._should_import_as_audiobook(metadata):
+                self._process_audiobook_entry(metadata)
+            else:
+                self._process_music_entry(metadata)
             return
 
         if media_type not in (MediaTypes.MOVIE.value, MediaTypes.TV.value):
@@ -641,6 +694,119 @@ class PlexHistoryImporter:
             # try recording as a movie. This handles cases like Anime Specials (Movies)
             # that are in TV libraries but lack standard S/E numbering.
             self._record_movie_entry(metadata, ids)
+
+    def _album_key(self, metadata: dict):
+        """Return the Plex rating key of the album a track belongs to."""
+        return metadata.get("parentRatingKey") or metadata.get("parentKey")
+
+    def _fetch_album(self, album_key: str):
+        """Return (album metadata, tracks) for a Plex album, or (None, [])."""
+        token = self._current_section_token or self.account.plex_token
+        uri = self._current_section_uri
+        if not uri:
+            return None, []
+        try:
+            album = plex_api.fetch_metadata(token, uri, album_key)
+            tracks = plex_api.fetch_children(token, uri, album_key)
+        except plex_api.PlexClientError as exc:
+            logger.debug(
+                "Could not fetch Plex album %s: %s",
+                album_key,
+                exception_summary(exc),
+            )
+            return None, []
+        return album, tracks
+
+    def _album_cache_key(self, album_key) -> tuple[str | None, str]:
+        """Return a server-scoped cache key for an album rating key."""
+        return (
+            self._current_section_machine_id,
+            str(album_key).rsplit("/", 1)[-1],
+        )
+
+    def _should_import_as_audiobook(self, metadata: dict) -> bool:
+        """Return whether a music history entry belongs to an audiobook.
+
+        A library the user flagged as audiobooks routes everything; "auto"
+        scores each album once and caches the verdict for its other chapters.
+        """
+        if self._current_section_content_kind == plex_audiobooks.CONTENT_KIND_MUSIC:
+            return False
+
+        album_key = self._album_key(metadata)
+        if not album_key:
+            return self._current_section_content_kind == (
+                plex_audiobooks.CONTENT_KIND_AUDIOBOOK
+            )
+
+        cache_key = self._album_cache_key(album_key)
+        if cache_key in self._audiobook_album_verdicts:
+            return self._audiobook_album_verdicts[cache_key]
+
+        if self._current_section_content_kind == (
+            plex_audiobooks.CONTENT_KIND_AUDIOBOOK
+        ):
+            self._audiobook_album_verdicts[cache_key] = True
+            return True
+
+        album, tracks = self._fetch_album(cache_key[1])
+        verdict = bool(album) and plex_audiobooks.is_audiobook_album(
+            album,
+            tracks,
+            section_hint=self._current_section_audiobook_hint,
+        )
+        self._audiobook_album_verdicts[cache_key] = verdict
+        return verdict
+
+    def _process_audiobook_entry(self, metadata: dict):
+        """Track a Plex album of chapters as a single audiobook.
+
+        Chapters arrive one history row at a time, but the book is the unit of
+        tracking, so the album is fetched and upserted once per run and later
+        chapters of the same album fall through.
+        """
+        album_key = self._album_key(metadata)
+        if not album_key:
+            self._track_unknown_type(metadata)
+            return
+        cache_key = self._album_cache_key(album_key)
+        album_key = cache_key[1]
+
+        if cache_key in self._audiobook_albums_seen:
+            return
+        self._audiobook_albums_seen.add(cache_key)
+
+        if not getattr(self.user, "book_enabled", False):
+            # The reporter's "nothing imported": silently dropping these is
+            # exactly the failure this feature exists to fix, so it is counted
+            # and surfaced as a warning instead.
+            self._audiobook_skipped_disabled += 1
+            return
+
+        album, tracks = self._fetch_album(album_key)
+        if not album:
+            self.warnings.append(
+                f"Could not read Plex audiobook metadata for album {album_key}.",
+            )
+            return
+
+        book = plex_audiobook_sync.upsert_plex_audiobook(
+            self.user,
+            album,
+            tracks,
+            machine_identifier=self._current_section_machine_id,
+            account_id=self.account.id,
+        )
+        if book is None:
+            return
+
+        if self._current_section_content_kind != (
+            plex_audiobooks.CONTENT_KIND_AUDIOBOOK
+        ):
+            # Only auto-detected albums are worth calling out; a library the
+            # user flagged themselves needs no explanation.
+            self._audiobook_detected_count += 1
+        self.counts[MediaTypes.BOOK.value] += 1
 
     def _process_music_entry(self, metadata: dict):
         """Replay music history entries through the webhook processor."""
@@ -1375,6 +1541,42 @@ class PlexHistoryImporter:
             return str(response["movie_results"][0]["id"])
         return None
 
+    def _anime_library_bucket(self, record, tv_metadata, tmdb_id=None):
+        """Return ANIME when this show belongs in the Anime library, else None.
+
+        A Plex section named "Anime" is a title substring, not evidence about
+        the title, so it cannot outrank the classifier: a show the classifier
+        positively rejects as non-animation stays in TV even inside such a
+        section. Where the classifier has no verdict at all - an unmapped
+        title, a title with no MAL identity, an ambiguous multi-cour mapping,
+        or an unavailable snapshot - the section name is the only signal
+        available and still routes the show to Anime.
+        """
+        if not getattr(self.user, "anime_enabled", False):
+            return None
+
+        route = self.anime_router.route_for_show(
+            tv_metadata or {},
+            tmdb_id=tmdb_id,
+            tvdb_id=(tv_metadata or {}).get("tvdb_id"),
+        )
+        if route == "grouped":
+            return MediaTypes.ANIME.value
+        if route == "flat":
+            # The flat path owns this show; it is not a grouped TV row.
+            return None
+
+        if not record.get("anime_section"):
+            return None
+
+        verdict = self.anime_router.verdict(tv_metadata or {}, tmdb_id=tmdb_id)
+        if (
+            verdict is not None
+            and verdict.reason == "tmdb_metadata_is_not_tagged_animation"
+        ):
+            return None
+        return MediaTypes.ANIME.value
+
     def _try_import_episode_record_as_anime(
         self,
         record: dict,
@@ -1400,6 +1602,19 @@ class PlexHistoryImporter:
         # The episode-level Guid tvdb id is an episode id, useless for
         # tvdb_show mappings — only use show-level TVDB ids here.
         tvdb_id = record.get("tvdb_show_id") or tv_metadata.get("tvdb_id")
+
+        # A show that belongs in the grouped shape must not be opened as a flat
+        # MAL row: the ordinary TV path buckets it as anime instead. Without
+        # this a TMDB-preferring user still gets flat rows out of Plex.
+        if (
+            self.anime_router.route_for_show(
+                tv_metadata,
+                tmdb_id=tmdb_id,
+                tvdb_id=tvdb_id,
+            )
+            == "grouped"
+        ):
+            return False
 
         anime_section = bool(record.get("anime_section"))
         if not anime_section and self._has_existing_non_anime_tv_tracking(
@@ -1879,13 +2094,10 @@ class PlexHistoryImporter:
                 record["season_number"],
             )
             tv_key = f"{item_source}:{item_media_id}"
-            # Shows from an anime library that lack a MAL mapping still belong
-            # in the anime view; the item classification drives list routing.
-            anime_class = (
-                MediaTypes.ANIME.value
-                if record.get("anime_section")
-                and getattr(self.user, "anime_enabled", False)
-                else None
+            anime_class = self._anime_library_bucket(
+                record,
+                tv_metadata,
+                actual_tmdb_id,
             )
 
             if tv_key in self.media_instances[MediaTypes.TV.value]:

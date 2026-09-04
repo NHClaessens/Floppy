@@ -17,6 +17,7 @@
       </button>
 
       <div x-show="listsOpen"
+           x-cloak
            @keydown.escape.window="listsOpen = false"
            class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
            @mousedown.self="listsOpen = false">

@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase, tag
@@ -24,6 +25,8 @@ from app.models import (
     MediaTypes,
     Movie,
     Podcast,
+    PodcastEpisode,
+    PodcastShow,
     Season,
     Sources,
     Status,
@@ -731,3 +734,98 @@ class ImportYamtrackCollectionRoundTrip(TestCase):
             sorted(movie_entries.values_list("media_type", flat=True)),
             ["4K Blu-ray", "DVD"],
         )
+
+
+class ImportYamtrackDoesNotReclassify(TestCase):
+    """A Yamtrack CSV import is a restore, not a routing decision.
+
+    The export carries the bucket each row was in, so re-deciding it here would
+    silently change a library the user is trying to put back exactly as it was.
+    """
+
+    def setUp(self):
+        """Create a user whose Anime Provider would otherwise imply grouping."""
+        self.user = get_user_model().objects.create_user(
+            username="yamtrack-restore",
+            password="12345",
+        )
+        self.user.anime_metadata_source_default = Sources.TMDB.value
+        self.user.save()
+
+    def test_csv_bucket_wins_and_the_classifier_never_runs(self):
+        """An explicit exported bucket is restored verbatim."""
+        csv_content = (
+            '"media_id","source","media_type","library_media_type","title",'
+            '"image","season_number","episode_number","score","progress",'
+            '"status","start_date","end_date","notes","progressed_at"\n'
+            '"1396","tmdb","tv","tv","Anime Show","","","","8","1",'
+            '"In progress","","","",""\n'
+        )
+
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+        ) as mock_classify:
+            yamtrack.importer(
+                BytesIO(csv_content.encode()),
+                self.user,
+                "new",
+            )
+
+        mock_classify.assert_not_called()
+        self.assertFalse(
+            Item.objects.filter(
+                library_media_type=MediaTypes.ANIME.value,
+            ).exists(),
+        )
+
+
+class ImportYamtrackPodcastReferences(TestCase):
+    """A CSV-imported podcast row links to an already-added show (issue #1048)."""
+
+    def setUp(self):
+        """Create a user and an already-synced podcast show/episode."""
+        self.user = get_user_model().objects.create_user(
+            username="podcast-csv-import",
+            password="12345",
+        )
+        self.show = PodcastShow.objects.create(
+            podcast_uuid="itunes:12345",
+            source=Sources.POCKETCASTS.value,
+            title="Test Podcast",
+        )
+        self.episode = PodcastEpisode.objects.create(
+            show=self.show,
+            episode_uuid="episode-uuid-1",
+            title="Episode One",
+        )
+
+    def _csv_row(self, media_id, source):
+        return (
+            '"media_id","source","media_type","library_media_type","title",'
+            '"image","season_number","episode_number","score","progress",'
+            '"status","start_date","end_date","notes","progressed_at"\n'
+            f'"{media_id}","{source}","podcast","","Episode One",'
+            '"https://image.url","","","","30","Completed","","","",""\n'
+        )
+
+    def test_matching_episode_is_linked(self):
+        """A row whose Item identity matches an existing PodcastEpisode links it."""
+        csv_content = self._csv_row(self.episode.episode_uuid, self.show.source)
+
+        yamtrack.importer(BytesIO(csv_content.encode()), self.user, "new")
+
+        podcast = Podcast.objects.get(user=self.user)
+        self.assertEqual(podcast.show, self.show)
+        self.assertEqual(podcast.episode, self.episode)
+        self.assertEqual(podcast.status, Status.COMPLETED.value)
+
+    def test_unmatched_episode_imports_unlinked(self):
+        """A row with no locally-known show still imports without error."""
+        csv_content = self._csv_row("unknown-episode-uuid", Sources.POCKETCASTS.value)
+
+        yamtrack.importer(BytesIO(csv_content.encode()), self.user, "new")
+
+        podcast = Podcast.objects.get(user=self.user)
+        self.assertIsNone(podcast.show)
+        self.assertIsNone(podcast.episode)
+        self.assertEqual(podcast.status, Status.COMPLETED.value)

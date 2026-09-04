@@ -2,14 +2,21 @@
 if (!window.__floppyDateTimePickerBound) {
   window.__floppyDateTimePickerBound = true;
   document.addEventListener("alpine:init", () => {
-  Alpine.data("dateTimePicker", (config) => ({
+  Alpine.data("dateTimePicker", (config) => {
+    const calendar = window.floppyCalendarState({
+      ...config,
+      calendarMode: "date-picker",
+    });
+    return {
+    ...calendar,
     fieldName: config.fieldName,
     trackTime: Boolean(config.trackTime),
     use12Hour: Boolean(config.use12Hour),
-    weekStartsMonday: config.weekStart !== "sunday",
+    defaultNow: Boolean(config.defaultNow),
     suggestionLabel: config.suggestionLabel || "",
     suggestionDate: config.suggestionDate || "",
     suggestionRuntimeMinutes: config.suggestionRuntimeMinutes || "",
+    runtimeMinutes: config.runtimeMinutes || "",
     copyFrom: config.copyFrom || "",
     copyAvailable: false,
 
@@ -17,18 +24,12 @@ if (!window.__floppyDateTimePickerBound) {
     open: false,
     isMobile: false,
     popoverStyle: "",
-    pickerView: "days", // "days" | "months" | "years"
-    viewYear: 0,
-    viewMonth: 0,
-    focusYear: 0,
-    focusMonth: 0,
-    focusDay: 1,
-    yearInput: "",
     hour24: 0,
     minute: 0,
     second: 0,
 
     init() {
+      calendar.init.call(this);
       // Read the live DOM value rather than trusting the server-rendered config:
       // mediaForm's status-change auto-fill runs (and may mutate this field)
       // before this component initializes, since it lives in a parent x-init.
@@ -38,6 +39,9 @@ if (!window.__floppyDateTimePickerBound) {
         this.$refs.hiddenInput.value = this.value;
       }
       this.syncFromValue();
+      if (this.defaultNow && !this.value) {
+        this.applyNow();
+      }
       this.mediaQuery = window.matchMedia("(max-width: 39.99rem)");
       this.isMobile = this.mediaQuery.matches;
       this.mediaQueryHandler = (event) => {
@@ -72,7 +76,9 @@ if (!window.__floppyDateTimePickerBound) {
     },
 
     positionPopover() {
-      if (!this.$refs.trigger) {
+      const trigger = this.$refs.trigger;
+      const pickerToggle = this.$refs.pickerToggle;
+      if (!trigger && !pickerToggle) {
         this.popoverStyle = "";
         return;
       }
@@ -94,7 +100,11 @@ if (!window.__floppyDateTimePickerBound) {
       const margin = 8;
       const minHeight = 200;
 
-      const rect = this.$refs.trigger.getBoundingClientRect();
+      const triggerRect = trigger?.getBoundingClientRect();
+      const rect =
+        triggerRect?.width && triggerRect.height
+          ? triggerRect
+          : pickerToggle.getBoundingClientRect();
       const panelWidth = 352;
       let left = rect.left;
       if (left + panelWidth > viewportWidth - margin) {
@@ -179,35 +189,6 @@ if (!window.__floppyDateTimePickerBound) {
       return this.partsFor(this.value);
     },
 
-    // Parses any value in this field's own format, not just the current one,
-    // so the copy-from-the-other-field path can reuse it.
-    partsFor(value) {
-      if (!value) {
-        return null;
-      }
-
-      // Django renders bound DateTimeField values with a space separator,
-      // while values selected in this picker use the HTML datetime-local
-      // format with a `T` separator.
-      const [datePart, timePart] = value.trim().split(/[T ]/, 2);
-      const [y, m, d] = datePart.split("-").map(Number);
-      if ([y, m, d].some(Number.isNaN)) {
-        return null;
-      }
-
-      let h = 0;
-      let min = 0;
-      let s = 0;
-      if (timePart) {
-        const segments = timePart.split(":").map(Number);
-        h = segments[0] || 0;
-        min = segments[1] || 0;
-        s = segments[2] || 0;
-      }
-
-      return { y, m, d, h, min, s };
-    },
-
     formatValueFromParts(y, m, d, h, min, s) {
       const datePart = `${y}-${this.pad(m)}-${this.pad(d)}`;
       if (!this.trackTime) {
@@ -241,71 +222,6 @@ if (!window.__floppyDateTimePickerBound) {
       }
     },
 
-    monthLabel() {
-      return new Date(this.viewYear, this.viewMonth, 1).toLocaleDateString(
-        undefined,
-        { month: "long", year: "numeric" },
-      );
-    },
-
-    weekdayLabels() {
-      return this.weekStartsMonday
-        ? ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
-        : ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
-    },
-
-    makeCell(day, inMonth, monthOffset) {
-      let year = this.viewYear;
-      let month = this.viewMonth + monthOffset;
-      if (month < 0) {
-        month = 11;
-        year -= 1;
-      } else if (month > 11) {
-        month = 0;
-        year += 1;
-      }
-      return { day, inMonth, month, year };
-    },
-
-    cellKey(cell) {
-      return `${cell.year}-${cell.month}-${cell.day}`;
-    },
-
-    // Always renders a fixed 6-row (42-cell) grid, filled with faded/clickable
-    // leading and trailing days from the adjacent months, so the popover's
-    // height never changes when navigating between months.
-    calendarWeeks() {
-      const first = new Date(this.viewYear, this.viewMonth, 1);
-      const startOffset = this.weekStartsMonday
-        ? (first.getDay() + 6) % 7
-        : first.getDay();
-      const daysInMonth = new Date(
-        this.viewYear,
-        this.viewMonth + 1,
-        0,
-      ).getDate();
-      const daysInPrevMonth = new Date(this.viewYear, this.viewMonth, 0).getDate();
-
-      const cells = [];
-      for (let i = startOffset; i > 0; i -= 1) {
-        cells.push(this.makeCell(daysInPrevMonth - i + 1, false, -1));
-      }
-      for (let day = 1; day <= daysInMonth; day += 1) {
-        cells.push(this.makeCell(day, true, 0));
-      }
-      let nextDay = 1;
-      while (cells.length < 42) {
-        cells.push(this.makeCell(nextDay, false, 1));
-        nextDay += 1;
-      }
-
-      const weeks = [];
-      for (let i = 0; i < cells.length; i += 7) {
-        weeks.push(cells.slice(i, i + 7));
-      }
-      return weeks;
-    },
-
     isSelectedDay(cell) {
       const parts = this.parts();
       return Boolean(
@@ -317,18 +233,6 @@ if (!window.__floppyDateTimePickerBound) {
       );
     },
 
-    isToday(cell) {
-      if (!cell) {
-        return false;
-      }
-      const now = new Date();
-      return (
-        cell.year === now.getFullYear() &&
-        cell.month === now.getMonth() &&
-        cell.day === now.getDate()
-      );
-    },
-
     isFocusedDay(cell) {
       return Boolean(
         cell &&
@@ -336,79 +240,6 @@ if (!window.__floppyDateTimePickerBound) {
           cell.month === this.focusMonth &&
           cell.year === this.focusYear,
       );
-    },
-
-    gotoPrevMonth() {
-      this.viewMonth -= 1;
-      if (this.viewMonth < 0) {
-        this.viewMonth = 11;
-        this.viewYear -= 1;
-      }
-    },
-
-    gotoNextMonth() {
-      this.viewMonth += 1;
-      if (this.viewMonth > 11) {
-        this.viewMonth = 0;
-        this.viewYear += 1;
-      }
-    },
-
-    showMonthsView() {
-      this.pickerView = "months";
-    },
-
-    showYearsView() {
-      this.yearInput = String(this.viewYear);
-      this.pickerView = "years";
-    },
-
-    showDaysView() {
-      this.pickerView = "days";
-    },
-
-    gotoMonth(monthIndex) {
-      this.viewMonth = monthIndex;
-      this.pickerView = "days";
-    },
-
-    gotoPrevYear() {
-      this.viewYear -= 1;
-      this.yearInput = String(this.viewYear);
-    },
-
-    gotoNextYear() {
-      this.viewYear += 1;
-      this.yearInput = String(this.viewYear);
-    },
-
-    onYearInput(event) {
-      const digits = event.target.value.replace(/\D/g, "").slice(0, 4);
-      this.yearInput = digits;
-      if (digits.length === 4) {
-        this.viewYear = Number(digits);
-      }
-    },
-
-    applyYearInput() {
-      const year = Number(this.yearInput);
-      if (Number.isInteger(year) && year >= 1000 && year <= 9999) {
-        this.viewYear = year;
-      } else {
-        this.yearInput = String(this.viewYear);
-      }
-      this.pickerView = "months";
-    },
-
-    monthShortLabel(monthIndex) {
-      return new Date(this.viewYear, monthIndex, 1).toLocaleDateString(undefined, {
-        month: "short",
-      });
-    },
-
-    yearRange() {
-      const start = Math.floor(this.viewYear / 20) * 20;
-      return Array.from({ length: 20 }, (_, i) => start + i);
     },
 
     selectDay(cell) {
@@ -426,6 +257,18 @@ if (!window.__floppyDateTimePickerBound) {
       this.commit(
         this.formatValueFromParts(cell.year, cell.month + 1, cell.day, h, min, s),
       );
+    },
+
+    calendarDayIsSelected(cell) {
+      return this.isSelectedDay(cell);
+    },
+
+    calendarDayTabIndex(cell) {
+      return this.isFocusedDay(cell) ? 0 : -1;
+    },
+
+    selectCalendarDay(cell) {
+      this.selectDay(cell);
     },
 
     applyTimeChange() {
@@ -495,17 +338,138 @@ if (!window.__floppyDateTimePickerBound) {
     },
 
     applyNow() {
-      const now = new Date();
-      this.commit(
-        this.formatValueFromParts(
-          now.getFullYear(),
-          now.getMonth() + 1,
-          now.getDate(),
-          now.getHours(),
-          now.getMinutes(),
-          now.getSeconds(),
-        ),
+      this.commit(this.formatValueFromDate(new Date()));
+    },
+
+    formatValueFromDate(date) {
+      return this.formatValueFromParts(
+        date.getFullYear(),
+        date.getMonth() + 1,
+        date.getDate(),
+        date.getHours(),
+        date.getMinutes(),
+        date.getSeconds(),
       );
+    },
+
+    resolvedRuntimeMinutes() {
+      const runtimeMinutes = Number.parseInt(this.runtimeMinutes, 10);
+      return Number.isFinite(runtimeMinutes) && runtimeMinutes > 0
+        ? runtimeMinutes
+        : null;
+    },
+
+    setStatusForPreset(status) {
+      const form = this.$refs.hiddenInput.closest("form");
+      const statusField = form?.querySelector('[name="status"]');
+      if (!statusField || statusField.value === status) {
+        return;
+      }
+
+      let mediaForm = null;
+      if (window.Alpine) {
+        try {
+          mediaForm = Alpine.$data(form);
+        } catch {
+          // Ignore Alpine lookup failures and still update the status field.
+        }
+      }
+
+      if (mediaForm && "suppressStatusDateAutofill" in mediaForm) {
+        mediaForm.suppressStatusDateAutofill = true;
+      }
+      try {
+        statusField.value = status;
+        statusField.dispatchEvent(new Event("change", { bubbles: true }));
+      } finally {
+        if (mediaForm && "suppressStatusDateAutofill" in mediaForm) {
+          mediaForm.suppressStatusDateAutofill = false;
+        }
+      }
+    },
+
+    commitPairedValue(newValue) {
+      const pairedFieldName =
+        this.fieldName === "start_date"
+          ? "end_date"
+          : this.fieldName === "end_date"
+            ? "start_date"
+            : "";
+      if (!pairedFieldName) {
+        return;
+      }
+
+      const form = this.$refs.hiddenInput.closest("form");
+      const pairedInput = form?.querySelector(`[name="${pairedFieldName}"]`);
+      if (!pairedInput || pairedInput === this.$refs.hiddenInput) {
+        return;
+      }
+
+      if (window.Alpine) {
+        try {
+          const picker = Alpine.$data(pairedInput.closest("[x-data]"));
+          if (picker?.commit) {
+            picker.commit(newValue);
+            return;
+          }
+        } catch {
+          // Fall through to updating the paired hidden input directly.
+        }
+      }
+
+      pairedInput.value = newValue;
+      window.trackModalClearAutoFilledField?.(form, pairedFieldName);
+      window.trackModalDispatchInputEvents?.(pairedInput);
+    },
+
+    applyQuickAction(action) {
+      if (action === "start-now") {
+        this.setStatusForPreset("In progress");
+        const now = new Date();
+        const nowValue = this.formatValueFromDate(now);
+        const runtimeMinutes = this.resolvedRuntimeMinutes();
+        const endValue = this.formatValueFromDate(
+          new Date(now.getTime() + (runtimeMinutes || 0) * 60000),
+        );
+        if (this.fieldName === "start_date") {
+          this.commit(nowValue);
+          this.commitPairedValue(endValue);
+        } else if (this.fieldName === "end_date") {
+          this.commit(endValue);
+          this.commitPairedValue(nowValue);
+        } else {
+          this.commit(nowValue);
+        }
+        return;
+      }
+
+      if (action === "just-finished") {
+        this.setStatusForPreset("Completed");
+        const now = new Date();
+        const nowValue = this.formatValueFromDate(now);
+        const runtimeMinutes = this.resolvedRuntimeMinutes();
+        const startValue = this.formatValueFromDate(
+          new Date(now.getTime() - (runtimeMinutes || 0) * 60000),
+        );
+        if (this.fieldName === "start_date") {
+          this.commit(startValue);
+          this.commitPairedValue(nowValue);
+        } else if (this.fieldName === "end_date") {
+          this.commit(nowValue);
+          this.commitPairedValue(startValue);
+        } else {
+          this.commit(nowValue);
+        }
+        return;
+      }
+
+      if (action === "release-date") {
+        if (!this.resolvedSuggestionDate()) {
+          return;
+        }
+        this.setStatusForPreset("Completed");
+        this.applySuggestion();
+      }
     },
 
     resolvedSuggestionDate() {
@@ -549,11 +513,11 @@ if (!window.__floppyDateTimePickerBound) {
         return;
       }
       // No backfill on this path. The runtime-based auto-fill recomputes
-      // start_date from end_date, which would immediately overwrite a copy
-      // into start_date with end minus the runtime. commit() already marks
+      // start_date from end_date, which would immediately overwrite a copy into
+      // start_date with end minus the runtime. commit() already marks
       // start_date as manually set when that is the field being written, and
       // backfillStartDateIfNeeded honours that flag, so a copy into start_date
-      // also survives later edits to end_date. A copy into end_date leaves the
+      // survives later edits to end_date too. A copy into end_date leaves the
       // flag alone: the user has not touched start_date, so the auto-fill must
       // stay armed for it.
       this.commit(
@@ -568,8 +532,32 @@ if (!window.__floppyDateTimePickerBound) {
       );
     },
 
+    partsFor(value) {
+      if (!value) {
+        return null;
+      }
+      const [datePart, timePart] = value.trim().split(/[T ]/, 2);
+      const [y, m, d] = datePart.split("-").map(Number);
+      if ([y, m, d].some(Number.isNaN)) {
+        return null;
+      }
+      let h = 0;
+      let min = 0;
+      let s = 0;
+      if (timePart) {
+        const segments = timePart.split(":").map(Number);
+        h = segments[0] || 0;
+        min = segments[1] || 0;
+        s = segments[2] || 0;
+      }
+      return { y, m, d, h, min, s };
+    },
+
     backfillStartDateIfNeeded() {
-      const runtimeMinutes = Number.parseInt(this.suggestionRuntimeMinutes, 10);
+      const runtimeMinutes = Number.parseInt(
+        this.suggestionRuntimeMinutes || this.runtimeMinutes,
+        10,
+      );
       if (
         this.fieldName !== "end_date" ||
         !Number.isFinite(runtimeMinutes) ||
@@ -671,13 +659,32 @@ if (!window.__floppyDateTimePickerBound) {
       this.closePicker();
     },
 
+    // Escape steps back through the picker before it reaches the modal:
+    // years -> months -> days -> close the picker -> (next press) close the
+    // modal. Bound with .capture on window so this runs before the modal's own
+    // window listener; stopPropagation then keeps the event from ever reaching
+    // it, which is what stopped a single press from closing everything.
+    onEscape(event) {
+      if (!this.open) {
+        return;
+      }
+
+      if (this.pickerView === "years") {
+        this.showMonthsView();
+      } else if (this.pickerView === "months") {
+        this.showDaysView();
+      } else {
+        this.closePicker();
+      }
+
+      event.stopPropagation();
+      event.preventDefault();
+    },
+
     openPicker() {
       this.open = true;
-      this.pickerView = "days";
-      // Recomputed per open rather than watched: the copy button only exists
-      // while the picker is open, and opening one picker closes the other, so
-      // the source field cannot change underneath it.
       this.copyAvailable = Boolean(this.copySourceValue());
+      this.pickerView = "days";
       this.positionPopover();
       this.$nextTick(() => {
         this.positionPopover();
@@ -694,7 +701,10 @@ if (!window.__floppyDateTimePickerBound) {
         return;
       }
       this.open = false;
-      this.$refs.trigger?.focus();
+      (this.$refs.trigger?.offsetParent
+        ? this.$refs.trigger
+        : this.$refs.pickerToggle
+      )?.focus();
     },
 
     togglePicker() {
@@ -705,74 +715,14 @@ if (!window.__floppyDateTimePickerBound) {
       }
     },
 
-    focusCell(cellKey) {
+    focusCalendarCell(cellKey) {
       this.$refs.panel
         ?.querySelector(`[data-day-cell="${cellKey}"]`)
         ?.focus();
     },
 
-    onDayKeydown(event, cell) {
-      if (!cell) {
-        return;
-      }
-
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        this.selectDay(cell);
-        return;
-      }
-
-      if (event.key === "Escape") {
-        this.closePicker();
-        return;
-      }
-
-      const target = new Date(this.focusYear, this.focusMonth, this.focusDay);
-      const weekdayOffset = this.weekStartsMonday
-        ? (target.getDay() + 6) % 7
-        : target.getDay();
-
-      switch (event.key) {
-        case "ArrowLeft":
-          target.setDate(target.getDate() - 1);
-          break;
-        case "ArrowRight":
-          target.setDate(target.getDate() + 1);
-          break;
-        case "ArrowUp":
-          target.setDate(target.getDate() - 7);
-          break;
-        case "ArrowDown":
-          target.setDate(target.getDate() + 7);
-          break;
-        case "Home":
-          target.setDate(target.getDate() - weekdayOffset);
-          break;
-        case "End":
-          target.setDate(target.getDate() + (6 - weekdayOffset));
-          break;
-        case "PageUp":
-          target.setMonth(target.getMonth() - 1);
-          break;
-        case "PageDown":
-          target.setMonth(target.getMonth() + 1);
-          break;
-        default:
-          return;
-      }
-
-      event.preventDefault();
-      this.focusYear = target.getFullYear();
-      this.focusMonth = target.getMonth();
-      this.focusDay = target.getDate();
-      this.viewYear = this.focusYear;
-      this.viewMonth = this.focusMonth;
-      const focusedKey = this.cellKey({
-        year: this.focusYear,
-        month: this.focusMonth,
-        day: this.focusDay,
-      });
-      this.$nextTick(() => this.focusCell(focusedKey));
+    closeCalendar() {
+      this.closePicker();
     },
 
     trapFocus(event) {
@@ -800,6 +750,7 @@ if (!window.__floppyDateTimePickerBound) {
         first.focus();
       }
     },
-  }));
+    };
+  });
   });
 }

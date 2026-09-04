@@ -145,6 +145,55 @@ def _audiobookshelf_book(media_id):
     }
 
 
+def _plex_book(media_id):
+    """Return local metadata for an audiobook imported from a Plex library.
+
+    Plex albums detected as audiobooks get a synthetic media_id derived from the
+    server + album rating key, so resolve them from the local Item rather than
+    an external book provider that has never heard of them.
+    """
+    from app.models import Item
+
+    item = Item.objects.filter(
+        media_id=media_id,
+        source=Sources.PLEX.value,
+        media_type=MediaTypes.BOOK.value,
+    ).first()
+
+    title = item.title if item else ""
+    image = item.image if item and item.image else settings.IMG_NONE
+    runtime_minutes = item.runtime_minutes if item else None
+    authors = item.authors if item else []
+    genres = item.genres if item else []
+    publishers = item.publishers if item else ""
+    publish_date = (
+        item.release_datetime.date().isoformat()
+        if item and item.release_datetime
+        else None
+    )
+    format_name = item.format if item and item.format else "audiobook"
+
+    return {
+        "media_id": str(media_id),
+        "source": Sources.PLEX.value,
+        "media_type": MediaTypes.BOOK.value,
+        "title": title,
+        "image": image,
+        "max_progress": runtime_minutes,
+        "synopsis": item.synopsis if item else "",
+        "genres": genres,
+        "related": {},
+        "details": {
+            "author": authors,
+            "isbn": [],
+            "publisher": publishers,
+            "publish_date": publish_date,
+            "format": format_name,
+            "runtime_minutes": runtime_minutes,
+        },
+    }
+
+
 def _storyteller_book(media_id):
     """Return local metadata for a Storyteller book item.
 
@@ -754,6 +803,56 @@ def _stored_item_metadata(item):
     )
 
 
+def _podcast_external_links(show, episode=None):
+    """Return the website links a podcast detail page can offer as chips.
+
+    Feeds carry a channel <link> and, on some hosts, a per-item <link>; both
+    are optional, so this returns only what the feed actually provided.
+    """
+    links = {}
+    episode_website_url = getattr(episode, "website_url", "") if episode else ""
+    if episode_website_url:
+        links["Episode website"] = episode_website_url
+    if show is not None and show.website_url:
+        links["Show website"] = show.website_url
+    return links
+
+
+def _podcast_show_metadata(show):
+    """Build generic media-detail metadata for a catalogued podcast show.
+
+    Podcast routes address a show by its podcast_uuid and an episode by its
+    episode_uuid, and only the episode form used to resolve -- so anything
+    reaching a show through get_media_metadata (the manual provider sync, the
+    media detail API) got "podcast episode not found" (issue #1014).
+    """
+    return _ensure_title_fields(
+        {
+            "media_id": show.podcast_uuid,
+            "source": show.source,
+            "media_type": MediaTypes.PODCAST.value,
+            "max_progress": None,
+            "title": show.title,
+            "image": show.image or settings.IMG_NONE,
+            "synopsis": show.description,
+            "genres": show.genres or [],
+            "related": {},
+            "details": {
+                "show_id": show.id,
+                "show_uuid": show.podcast_uuid,
+                "show_title": show.title,
+                "author": show.author,
+                "description": show.description,
+                "language": show.language,
+                "rss_feed_url": show.rss_feed_url,
+                "website_url": show.website_url,
+                "show_website_url": show.website_url,
+            },
+            "external_links": _podcast_external_links(show),
+        },
+    )
+
+
 def _podcast_episode_metadata(episode):
     """Build generic media-detail metadata for a catalogued podcast episode."""
     show = episode.show
@@ -782,7 +881,10 @@ def _podcast_episode_metadata(episode):
                 "season_number": episode.season_number,
                 "episode_type": episode.episode_type,
                 "file_type": episode.file_type,
+                "website_url": episode.website_url,
+                "show_website_url": show.website_url,
             },
+            "external_links": _podcast_external_links(show, episode),
         },
     )
 
@@ -804,6 +906,7 @@ def _podcast_item_metadata(item, *, show=None, episode=None):
                 "author": show.author,
                 "description": show.description,
                 "language": show.language,
+                "show_website_url": show.website_url,
             },
         )
 
@@ -817,17 +920,24 @@ def _podcast_item_metadata(item, *, show=None, episode=None):
                 "season_number": episode.season_number,
                 "episode_type": episode.episode_type,
                 "file_type": episode.file_type,
+                "website_url": episode.website_url,
             },
         )
         if episode.title:
             metadata["title"] = episode.title
 
+    metadata["external_links"] = _podcast_external_links(show, episode)
     return _ensure_title_fields(metadata)
 
 
 def _resolve_podcast_metadata(media_id, source, user=None):
-    """Resolve a podcast episode from the local catalog or tracked cache."""
-    from app.models import Podcast, PodcastEpisode
+    """Resolve a podcast episode or show from the local catalog or tracked cache.
+
+    Podcast routes carry an episode_uuid or a show's podcast_uuid in the same
+    media_id slot, so both have to resolve here; only the episode form used to,
+    which is why syncing a show 404'd (issue #1014).
+    """
+    from app.models import Podcast, PodcastEpisode, PodcastShow
 
     tracked = None
     if user is not None and getattr(user, "is_authenticated", False):
@@ -861,9 +971,18 @@ def _resolve_podcast_metadata(media_id, source, user=None):
         .order_by("pk")
         .first()
     )
-    if episode is None:
-        raise_not_found_error(source, media_id, "podcast episode")
-    return _podcast_episode_metadata(episode)
+    if episode is not None:
+        return _podcast_episode_metadata(episode)
+
+    show = PodcastShow.objects.filter(
+        podcast_uuid=media_id,
+        source=source,
+    ).first()
+    if show is not None:
+        return _podcast_show_metadata(show)
+
+    raise_not_found_error(source, media_id, "podcast episode")
+    return None  # unreachable: raise_not_found_error always raises
 
 
 def get_media_metadata(
@@ -1015,6 +1134,8 @@ def get_media_metadata(
             if source == Sources.AUDIOBOOKSHELF.value
             else _storyteller_book(media_id)
             if source == Sources.STORYTELLER.value
+            else _plex_book(media_id)
+            if source == Sources.PLEX.value
             else openlibrary.book(media_id)
         ),
         MediaTypes.COMIC.value: lambda: comicvine.comic(media_id),

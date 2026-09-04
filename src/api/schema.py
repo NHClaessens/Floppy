@@ -2,7 +2,12 @@ from drf_spectacular.extensions import (
     OpenApiAuthenticationExtension,
     OpenApiSerializerFieldExtension,
 )
-from drf_spectacular.renderers import OpenApiJsonRenderer, OpenApiYamlRenderer
+from drf_spectacular.renderers import (
+    OpenApiJsonRenderer,
+    OpenApiJsonRenderer2,
+    OpenApiYamlRenderer,
+    OpenApiYamlRenderer2,
+)
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from drf_spectacular.views import SpectacularAPIView
 
@@ -23,7 +28,13 @@ class OpenApiTextYamlRenderer(OpenApiYamlRenderer):
 class LiveSchemaView(SpectacularAPIView):
     """Serve the dynamic OpenAPI schema with text/yaml and inline display headers."""
 
-    renderer_classes = [OpenApiTextYamlRenderer, OpenApiYamlRenderer, OpenApiJsonRenderer]
+    renderer_classes = [
+        OpenApiTextYamlRenderer,
+        OpenApiYamlRenderer,
+        OpenApiYamlRenderer2,
+        OpenApiJsonRenderer,
+        OpenApiJsonRenderer2,
+    ]
 
     def get(self, request, *args, **kwargs):
         """Serve dynamic OpenAPI schema with text/yaml content-type and inline disposition."""

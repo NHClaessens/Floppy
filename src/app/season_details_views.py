@@ -987,6 +987,7 @@ def season_details(
         "media": season_metadata,
         "tv": tv_with_seasons_metadata,
         "media_type": MediaTypes.SEASON.value,
+        "season_number": season_number,
         "parent_media_type": parent_media_type,
         "user_medias": user_medias,
         "current_instance": current_instance,

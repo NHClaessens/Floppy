@@ -406,6 +406,9 @@ def enrich_items_with_user_data(
     return enriched_items
 
 
+MIN_VALID_RELEASE_YEAR = 1900
+
+
 def extract_release_datetime(metadata):
     """Extract release datetime from metadata dict."""
     from datetime import datetime
@@ -424,7 +427,10 @@ def extract_release_datetime(metadata):
         year = metadata.get("details", {}).get("year") or metadata.get("year")
         if year:
             try:
-                return datetime(int(year), 1, 1, tzinfo=ZoneInfo("UTC"))
+                parsed_year = int(year)
+                if parsed_year < MIN_VALID_RELEASE_YEAR:
+                    return None
+                return datetime(parsed_year, 1, 1, tzinfo=ZoneInfo("UTC"))
             except (ValueError, TypeError):
                 return None
         return None
@@ -443,6 +449,8 @@ def extract_release_datetime(metadata):
     for fmt, length in format_lengths.items():
         try:
             dt = datetime.strptime(date_str[:length], fmt)  # noqa: DTZ007  # date-only value; no timezone applies
+            if dt.year < MIN_VALID_RELEASE_YEAR:
+                continue
             return dt.replace(tzinfo=ZoneInfo("UTC"))
         except (ValueError, TypeError):
             continue

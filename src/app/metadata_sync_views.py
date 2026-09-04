@@ -34,7 +34,7 @@ from app.models import (
     MetadataProviderPreference,
     Sources,
 )
-from app.providers import hardcover, services, tmdb, tvdb
+from app.providers import hardcover, services, tmdb
 from app.services import (
     anime_migration,
     bulk_episode_tracking,
@@ -1051,7 +1051,8 @@ def _flat_anime_preview_season_numbers(
         if isinstance(grouped_series_metadata, dict)
         else {}
     )
-    seasons = related.get("seasons") if isinstance(related, dict) else []
+    # "seasons" can be present but null, which used to crash the details page.
+    seasons = (related.get("seasons") or []) if isinstance(related, dict) else []
     target_total = grouped_preview_target.get("episode_total")
     try:
         target_total = int(target_total) if target_total is not None else None
@@ -1594,10 +1595,14 @@ def enrich_synced_item(
                 route_media_type,
                 source=preferred_provider,
             )
-            preferred_cache_key = (
-                f"{preferred_provider}_{preferred_tracking_type}_{preferred_media_id}"
+            cache.delete_many(
+                metadata_utils.provider_metadata_cache_keys(
+                    preferred_provider,
+                    preferred_tracking_type,
+                    preferred_media_id,
+                    season_number=season_number,
+                ),
             )
-            cache.delete(preferred_cache_key)
             try:
                 preferred_metadata = services.get_media_metadata(
                     metadata_resolution.provider_route_media_type(
@@ -1663,6 +1668,28 @@ def enrich_synced_item(
     return warnings, preferred_provider_synced
 
 
+def _sync_podcast_show_from_rss(media_id, source):
+    """Re-read a podcast show's RSS feed. Returns the show, or None if not one.
+
+    Podcast shows have no upstream metadata provider to sync against -- the
+    feed is the provider -- and they have no Item row of their own, since
+    Items are per-episode. So this runs the feed reconcile and returns before
+    the generic Item create/update path, which would otherwise mint a bogus
+    show-level Item.
+    """
+    from app.fork_services_podcast import refresh_show_from_rss
+    from app.models import PodcastShow
+
+    show = PodcastShow.objects.filter(
+        podcast_uuid=media_id,
+        source=source,
+    ).first()
+    if show is None:
+        return None
+    refresh_show_from_rss(show)
+    return show
+
+
 @require_POST
 def sync_metadata(request, source, media_type, media_id, season_number=None):
     """Refresh the metadata for a media item."""
@@ -1697,32 +1724,37 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             headers={"HX-Redirect": request.POST.get("next", "/")},
         )
 
+    if media_type == MediaTypes.PODCAST.value:
+        try:
+            synced_show = _sync_podcast_show_from_rss(media_id, source)
+        except Exception as exc:
+            logger.warning(
+                "podcast_show_rss_sync_failed media_id=%s source=%s error=%s",
+                media_id,
+                source,
+                exception_summary(exc),
+            )
+            messages.error(
+                request,
+                "Could not read the podcast's RSS feed right now.",
+            )
+            return _sync_redirect_response()
+        if synced_show is not None:
+            messages.success(request, "Metadata synced successfully.")
+            return _sync_redirect_response()
+
     tracking_media_type = metadata_resolution.get_tracking_media_type(
         media_type,
         source=source,
     )
-    tvdb_cache_keys = None
-    if source == Sources.TVDB.value:
-        routed_media_type = (
-            MediaTypes.ANIME.value
-            if media_type == MediaTypes.ANIME.value
-            else MediaTypes.TV.value
-        )
-        if media_type == MediaTypes.SEASON.value:
-            cache_key = tvdb._season_cache_key(
-                media_id,
-                season_number,
-                routed_media_type,
-            )
-        else:
-            cache_key = tvdb._cache_key(routed_media_type, media_id)
-        tvdb_cache_keys = tvdb.metadata_cache_keys(media_id, season_number)
-    elif media_type == MediaTypes.SEASON.value and source == Sources.TMDB.value:
-        cache_key = tmdb._season_cache_key(media_id, season_number)
-    else:
-        cache_key = f"{source}_{tracking_media_type}_{media_id}"
-        if media_type == MediaTypes.SEASON.value:
-            cache_key += f"_{season_number}"
+    provider_cache_keys = metadata_utils.provider_metadata_cache_keys(
+        source,
+        tracking_media_type,
+        media_id,
+        season_number=season_number,
+        route_media_type=media_type,
+    )
+    cache_key = provider_cache_keys[0]
 
     cached_metadata = cache.get(cache_key)
     ttl = cache.ttl(cache_key)
@@ -1733,11 +1765,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
         messages.error(request, msg)
         logger.error(msg)
     else:
-        deleted = (
-            cache.delete_many(tvdb_cache_keys)
-            if tvdb_cache_keys
-            else cache.delete(cache_key)
-        )
+        deleted = cache.delete_many(provider_cache_keys)
         logger.debug("%s - Old cache deleted: %s", cache_key, deleted)
 
         try:

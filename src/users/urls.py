@@ -80,6 +80,11 @@ urlpatterns = [
         name="toggle_obfuscate_episodes",
     ),
     path("settings/preferences", views.preferences, name="preferences"),
+    path(
+        "settings/preferences/convert-anime-library",
+        views.convert_anime_library,
+        name="convert_anime_library",
+    ),
     path("settings/integrations", views.integrations, name="integrations"),
     path("settings/rss", views.rss_settings, name="rss_settings"),
     path("settings/import", views.import_data, name="import_data"),

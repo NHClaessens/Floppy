@@ -1,5 +1,6 @@
 import calendar as cal
 import logging
+from collections import defaultdict
 from datetime import UTC, date, timedelta
 
 import icalendar
@@ -7,15 +8,16 @@ from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required
 from django.core.exceptions import ObjectDoesNotExist
+from django.db.models import Q
 from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from app.models import MediaTypes, PodcastEpisode
+from app.models import Item, MediaTypes, PodcastEpisode, Status
 from events import tasks
-from events.models import Event
+from events.models import INACTIVE_TRACKING_STATUSES, Event
 from users.models import User, WeekStartDayChoices
 
 logger = logging.getLogger(__name__)
@@ -101,8 +103,36 @@ def calendar(request):
         key=lambda media_type: MediaTypes(media_type).label,
     )
 
+    item_ids_by_type = defaultdict(list)
+    for release in releases:
+        item_ids_by_type[release.item.media_type].append(release.item_id)
+
+    status_by_item_id = {}
+    for media_type, item_ids in item_ids_by_type.items():
+        status_by_item_id.update(
+            Item.objects.filter(
+                id__in=item_ids,
+                **{f"{media_type}__user": request.user},
+            ).values_list("id", f"{media_type}__status"),
+        )
+
+    available_statuses_by_type = {}
+    for media_type, item_ids in item_ids_by_type.items():
+        statuses = {
+            status_by_item_id[item_id]
+            for item_id in item_ids
+            if status_by_item_id.get(item_id)
+        }
+        if statuses:
+            available_statuses_by_type[media_type] = sorted(
+                statuses,
+                key=lambda status: Status(status).label,
+            )
+
     release_dict = {}
     for release in releases:
+        release.status = status_by_item_id.get(release.item_id)
+
         if (
             release.item.media_type == MediaTypes.PODCAST.value
             and release.item.image in {"", settings.IMG_NONE}
@@ -135,6 +165,11 @@ def calendar(request):
             for media_type in MediaTypes
             if media_type != MediaTypes.EPISODE
         ],
+        "event_statuses": [
+            status.value
+            for status in Status
+            if status.value not in INACTIVE_TRACKING_STATUSES
+        ],
         "calendar": calendar_format,
         "month": month,
         "month_name": month_name,
@@ -147,6 +182,7 @@ def calendar(request):
         "today": today,
         "view_type": view_type,
         "available_media_types": available_media_types,
+        "available_statuses_by_type": available_statuses_by_type,
         "days_in_month": days_in_month,
         "selected_day": selected_day,
         "weekday_headers": weekday_headers,
@@ -199,6 +235,23 @@ def download_calendar(request, token: str):
 
         if valid_media_types:
             releases = releases.filter(item__media_type__in=valid_media_types)
+
+    selected_statuses = request.GET.getlist("status")
+    if selected_statuses:
+        valid_statuses = {
+            status for status in selected_statuses if status in {c.value for c in Status}
+        }
+
+        if valid_statuses:
+            status_query = Q()
+            for media_type in MediaTypes:
+                if media_type in (MediaTypes.TV, MediaTypes.EPISODE):
+                    continue
+                status_query |= Q(
+                    item__media_type=media_type.value,
+                    **{f"item__{media_type.value}__status__in": valid_statuses},
+                )
+            releases = releases.filter(status_query)
 
     # Create iCalendar object
     cal = icalendar.Calendar()

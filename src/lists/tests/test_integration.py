@@ -76,6 +76,14 @@ class IntegrationTest(StaticLiveServerTestCase):
         self.credentials = {"username": "test", "password": "12345"}
         self.user = get_user_model().objects.create_user(**self.credentials)
 
+        # The Anime library defaults to TMDB (users/0129), but this suite mocks
+        # the MAL provider and asserts on a MAL-sourced item (#lists-anime-437).
+        # Without pinning the provider the search goes to TMDB, which ordinary
+        # tests cannot reach, so it renders "No results found" and every
+        # card-level locator below times out.
+        self.user.anime_metadata_source_default = "mal"
+        self.user.save(update_fields=["anime_metadata_source_default"])
+
         # Search results and detail lookups mutate the returned dicts in place
         # (e.g. lists_modal's Item.objects.create consumes the metadata dict),
         # so hand back a fresh deep copy every call rather than a shared
@@ -104,6 +112,25 @@ class IntegrationTest(StaticLiveServerTestCase):
         )
         self.page.get_by_role("button", name="Sign in").click()
         expect(self.page.locator("#global-search")).to_be_visible()
+
+    def click_card_lists_action(self):
+        """Click a media card's Lists action button.
+
+        Dispatched rather than clicked through the pointer. Once the poster
+        image has loaded, the browsers CI runs put that image on top of the
+        card's action overlay at the button's coordinates, so a real click -
+        and even a hover - is rejected with "subtree intercepts pointer
+        events" and retried until the timeout. This suite is here to cover the
+        lists modal flow, not the overlay's hit-testing, so address the button
+        directly and keep the assertions below meaningful.
+        """
+        button = (
+            self.page.locator(".media-card-overlay")
+            .first.locator(".relative > button:nth-child(2)")
+            .first
+        )
+        button.scroll_into_view_if_needed()
+        button.dispatch_event("click")
 
     def search_and_submit(self, query):
         """Run a global search via the submit button.
@@ -134,7 +161,7 @@ class IntegrationTest(StaticLiveServerTestCase):
         self.page.get_by_role("button", name="TV Shows").click()
         self.page.locator("li").filter(has_text=re.compile(r"^Anime$")).click()
         self.search_and_submit("perfect blue")
-        self.page.locator(".absolute > .relative > button:nth-child(2)").first.click()
+        self.click_card_lists_action()
         expect(self.page.locator("#lists-anime-437")).to_contain_text(
             "You haven't created any lists yet.",
         )
@@ -154,7 +181,7 @@ class IntegrationTest(StaticLiveServerTestCase):
         self.page.get_by_role("button", name="TV Shows").click()
         self.page.locator("li").filter(has_text=re.compile(r"^Anime$")).click()
         self.search_and_submit("perfect blue")
-        self.page.locator(".absolute > .relative > button:nth-child(2)").first.click()
+        self.click_card_lists_action()
         expect(self.page.locator("#lists-anime-437")).to_contain_text("Lists test Add")
         self.page.get_by_role("button", name="Add item to test", exact=True).click()
         expect(self.page.locator("#lists-anime-437")).to_contain_text("Remove")

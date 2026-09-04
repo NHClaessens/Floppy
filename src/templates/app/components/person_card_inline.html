@@ -1,7 +1,12 @@
 {% load app_tags %}
 {% load user_tags %}
 <div class="w-32 shrink-0">
-  <div class="media-card bg-[var(--color-surface)] rounded-lg overflow-hidden shadow-lg relative search-result-card hover:ring-2 hover:ring-indigo-500 transition-all group{% if user.media_card_subtitle_display == 'always' %} media-card-subtitle-always{% endif %}">
+  <div class="media-card bg-[var(--color-surface)] rounded-lg overflow-hidden shadow-lg relative search-result-card hover:ring-2 hover:ring-indigo-500 transition-all group{% if user.media_card_subtitle_display == 'always' %} media-card-subtitle-always{% endif %}"
+       x-data="{ revealed: false, tapToReveal(e) { if (this.revealed) { if (e.target.closest('button, a, input, select, textarea')) { return; } const link = this.$root.querySelector('.media-card-overlay a[href]') || this.$root.querySelector('a.media-card-title[href]'); if (link) { e.preventDefault(); e.stopPropagation(); link.click(); } return; } if (!window.matchMedia('(pointer: coarse)').matches) { return; } if (this.$root.classList.contains('media-card-subtitle-always')) { return; } e.preventDefault(); e.stopPropagation(); this.revealed = true; window.dispatchEvent(new CustomEvent('media-card-revealed', { detail: this.$root })); } }"
+       @click.capture="tapToReveal($event)"
+       @media-card-revealed.window="if ($event.detail !== $root) revealed = false"
+       @click.window="if (revealed && !$root.contains($event.target)) revealed = false"
+       :class="revealed ? 'media-card-revealed' : ''">
     <div class="relative">
       {% if person.person_id and person.name %}
         <a href="{% url 'person_detail' source=media.source person_id=person.person_id name=person.name|slug %}">

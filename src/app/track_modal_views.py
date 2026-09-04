@@ -111,6 +111,7 @@ def _episode_domain_template_payload(domain):
                 "episode_title": episode["episode_title"],
                 "selector_label": episode.get("selector_label", ""),
                 "existing_play_count": episode["existing_play_count"],
+                "runtime_minutes": episode.get("runtime_minutes") or "",
                 "air_date": episode["air_date"].isoformat()
                 if episode["air_date"]
                 else "",
@@ -198,10 +199,7 @@ def _track_modal_release_date_shortcut(*candidates):
 
 
 def _track_modal_release_runtime_minutes(media_type, *candidates):
-    """Return a trusted runtime in minutes for release-date start-date backfill."""
-    if media_type != MediaTypes.MOVIE.value:
-        return ""
-
+    """Return a trusted runtime in minutes for date shortcuts."""
     for candidate in candidates:
         if not candidate:
             continue
@@ -352,8 +350,10 @@ def _render_standard_track_modal(
             MediaTypes.MANGA.value,
         ):
             if media_type == MediaTypes.BOOK.value:
-                if media.item.number_of_pages:
-                    max_progress = media.item.number_of_pages
+                if media.item.book_max_progress:
+                    max_progress = media.item.book_max_progress
+                elif media.item.format == "audiobook":
+                    max_progress = None
                 else:
                     try:
                         with services.interactive_request_scope():
@@ -720,7 +720,7 @@ def _render_standard_track_modal(
         base_metadata,
     )
     date_suggestion = _track_modal_date_suggestion(
-        "Air date" if media_type == MediaTypes.EPISODE.value else "Release Date",
+        "Release Date",
         release_date_shortcut,
         release_date_runtime_minutes,
     )
@@ -1072,6 +1072,7 @@ def track_modal(
                         if episode.duration
                         else None
                     )
+                    self.runtime_minutes = episode.duration // 60 if episode.duration else ""
                     self.musicbrainz_recording_id = None  # Not used for podcasts
                     self.id = episode.id
                     self.published = episode.published  # For "Published date" button

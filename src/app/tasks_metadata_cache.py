@@ -38,22 +38,19 @@ def _metadata_cache_keys_for_item(item: Item):
                 else None,
             ),
         )
-    if (
-        item.source == Sources.TMDB.value
-        and item.media_type == MediaTypes.SEASON.value
-        and item.season_number
-    ):
-        keys.add(
-            f"{item.source}_{item.media_type}_{item.media_id}_{item.season_number}"
-        )
-    if (
-        item.source == Sources.TMDB.value
-        and item.media_type == MediaTypes.EPISODE.value
-        and item.season_number
-        and item.episode_number
-    ):
-        keys.add(
-            f"{item.source}_{item.media_type}_{item.media_id}_{item.season_number}_{item.episode_number}",
+    if item.source == Sources.TMDB.value:
+        from app.providers import tmdb
+
+        # Built through the provider's own helpers because the movie and season
+        # keys carry a strategy version the hand-rolled key above doesn't have,
+        # so clearing by that shape alone would silently miss them (issue #1066).
+        keys.update(
+            tmdb.metadata_cache_keys(
+                item.media_id,
+                item.media_type,
+                season_number=item.season_number,
+                episode_number=item.episode_number,
+            ),
         )
     if (
         item.source == Sources.BGG.value

@@ -30,6 +30,7 @@ METADATA_BACKFILL_MAX_ATTEMPTS = 6
 GENRE_BACKFILL_VERSION = 4
 # Bumped when empty TMDB payloads stopped counting as a completed backfill.
 WATCH_PROVIDERS_BACKFILL_VERSION = 2
+EXTERNAL_IDS_BACKFILL_VERSION = 1
 
 
 def _apply_backfill_state_filters(queryset, field: str, *, for_reconcile: bool = False):

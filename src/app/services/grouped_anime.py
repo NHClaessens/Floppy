@@ -29,6 +29,11 @@ GROUPED_BUCKET = MediaTypes.ANIME.value
 GROUPED_PARENT_TYPES = {Sources.TMDB.value, Sources.TVDB.value}
 CLASSIFIER_CALL_COUNT = 0
 
+# Distinguishes "no snapshot supplied, load it lazily" from "a load was
+# attempted and failed". Collapsing these two into `None` turns the classifier
+# fail-open, which is how anime silently leaks into the TV library.
+UNSET = object()
+
 logger = logging.getLogger(__name__)
 
 
@@ -118,6 +123,112 @@ def _metadata_external_ids(metadata: dict[str, Any]) -> dict[str, str]:
         for key, value in external_ids.items()
         if value not in (None, "")
     }
+
+
+class AnimeRouteResolver:
+    """Decide which library an imported show belongs in, once per run.
+
+    Importers buffer their rows and flush at the end of a run, so a database
+    lookup cannot see a home created earlier in the same import. Without the
+    run cache below, one run can open both a grouped and a flat home for the
+    same show - manufacturing exactly the duplicates the repair task exists to
+    clean up.
+
+    `snapshot` follows `classify`: UNSET to load lazily, None when a load was
+    already attempted and failed, or a loaded snapshot to reuse.
+    """
+
+    def __init__(self, user, *, snapshot=UNSET):
+        """Start a routing run for one user."""
+        self.user = user
+        self.snapshot = snapshot
+        self._routes = {}
+        self._mal_routes = {}
+        self._verdicts = {}
+
+    def _cache_keys(self, tmdb_id, tvdb_id):
+        keys = []
+        if tmdb_id:
+            keys.append((Sources.TMDB.value, str(tmdb_id)))
+        if tvdb_id:
+            keys.append((Sources.TVDB.value, str(tvdb_id)))
+        return keys
+
+    def route_for_show(self, tv_metadata, *, tmdb_id, tvdb_id=None):
+        """Return "grouped", "flat", or None to leave the show in TV."""
+        if not getattr(self.user, "anime_enabled", False):
+            return None
+
+        keys = self._cache_keys(tmdb_id, tvdb_id)
+        for key in keys:
+            if key in self._routes:
+                return self._routes[key]
+
+        route = self._resolve(tv_metadata, tmdb_id, tvdb_id)
+        for key in keys:
+            self._routes[key] = route
+        return route
+
+    def _resolve(self, tv_metadata, tmdb_id, tvdb_id):
+        home = metadata_resolution.find_existing_anime_home(
+            self.user,
+            tmdb_id=tmdb_id,
+            tvdb_id=tvdb_id,
+        )
+        if home is not None:
+            return home[0]
+
+        if not metadata_resolution.prefers_grouped_anime(self.user):
+            # A MAL-preferring user's anime belongs in flat rows. Importers
+            # without a MAL identity treat this as "not mine to create".
+            return "flat" if self.verdict_is_anime(tv_metadata, tmdb_id=tmdb_id) else None
+
+        return "grouped" if self.verdict_is_anime(tv_metadata, tmdb_id=tmdb_id) else None
+
+    def verdict(self, tv_metadata, *, tmdb_id=None):
+        """Return the classifier verdict, computed at most once per show."""
+        key = str(tmdb_id) if tmdb_id else id(tv_metadata)
+        if key not in self._verdicts:
+            self._verdicts[key] = classify(tv_metadata, snapshot=self.snapshot)
+        return self._verdicts[key]
+
+    def verdict_is_anime(self, tv_metadata, *, tmdb_id=None):
+        """Return whether the classifier positively identifies this as anime."""
+        match = self.verdict(tv_metadata, tmdb_id=tmdb_id)
+        return match is not None and match.is_grouped_anime
+
+    def remember(self, route, *, tmdb_id=None, tvdb_id=None, mal_ids=()):
+        """Record a route decided elsewhere so the rest of the run agrees.
+
+        `mal_ids` comes from a grouped verdict (`GroupedAnimeMatch.mal_ids`) and
+        lets a later flat-identity entry in the same run recognise that this
+        show already has a home, before it opens a second one.
+        """
+        for key in self._cache_keys(tmdb_id, tvdb_id):
+            self._routes[key] = route
+        for mal_id in mal_ids or ():
+            self._mal_routes[str(mal_id)] = route
+
+    def route_for_mal_id(self, mal_id):
+        """Return the route already chosen this run for a MAL identity."""
+        return self._mal_routes.get(str(mal_id))
+
+
+def classify(tv_metadata, *, snapshot=UNSET):
+    """Return the grouped-anime verdict for a show, or None when unknown.
+
+    Returns None both when the show is not anime and when the Anime-IDs
+    snapshot could not be loaded: grouping is fail-closed on load failure, so
+    the ordinary TV path still records progress.
+
+    `snapshot` is UNSET to load lazily, None when a load was already attempted
+    and failed, or a loaded snapshot to use.
+    """
+    if snapshot is None:
+        return None
+    if snapshot is UNSET:
+        return classify_tv_metadata(tv_metadata)
+    return classify_tv_metadata(tv_metadata, snapshot=snapshot)
 
 
 def classify_tv_metadata(

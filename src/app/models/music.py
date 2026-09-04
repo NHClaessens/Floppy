@@ -306,6 +306,11 @@ class Track(models.Model):
         seconds = total_seconds % 60
         return f"{minutes}:{seconds:02d}"
 
+    @property
+    def runtime_minutes(self):
+        """Return the track duration in whole minutes for date shortcuts."""
+        return self.duration_ms // 60000 if self.duration_ms else ""
+
 
 class Music(Media):
     """Model for music tracks.

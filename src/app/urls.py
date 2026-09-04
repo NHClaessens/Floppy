@@ -271,6 +271,11 @@ urlpatterns = [
     ),
     path("history", views.history, name="history"),
     path(
+        "history/sessions",
+        views.activity_sessions_modal,
+        name="activity_sessions_modal",
+    ),
+    path(
         "history/day/<str:day_key>",
         views.history_day_fragment,
         name="history_day_fragment",

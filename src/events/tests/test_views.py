@@ -9,7 +9,7 @@ from django.urls import reverse
 from django.utils import timezone
 
 from app import models as app_models
-from app.models import TV, Item, MediaTypes, Movie, Season, Sources, Status
+from app.models import TV, Anime, Item, MediaTypes, Movie, Season, Sources, Status
 from events.models import Event, SentinelDatetime
 
 
@@ -313,6 +313,142 @@ class CalendarViewTests(TestCase):
         rendered = response.content.decode()
         self.assertIn("https://example.com/show-art.jpg", rendered)
 
+    @patch("events.models.Event.objects.get_user_events")
+    @patch.object(get_user_model(), "update_preference")
+    def test_calendar_shows_available_statuses_and_status_data_attribute(
+        self,
+        mock_update_preference,
+        mock_get_user_events,
+    ):
+        """Calendar context and markup should expose each release's tracked status."""
+        mock_update_preference.return_value = "grid"
+
+        movie_item = Item.objects.create(
+            media_id="movie-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Planned Movie",
+            image="https://example.com/movie.jpg",
+        )
+        Movie.objects.create(
+            item=movie_item,
+            user=self.user,
+            status=Status.PLANNING.value,
+        )
+
+        today = timezone.localdate()
+        event = Event(
+            item=movie_item,
+            datetime=timezone.make_aware(
+                timezone.datetime(today.year, today.month, 15, 12, 0),
+            ),
+        )
+        mock_get_user_events.return_value = [event]
+
+        response = self.client.get(reverse("calendar"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.context["available_statuses_by_type"],
+            {MediaTypes.MOVIE.value: [Status.PLANNING.value]},
+        )
+        self.assertIn(
+            f'data-release-status="{Status.PLANNING.value}"',
+            response.content.decode(),
+        )
+
+    @patch("events.models.Event.objects.get_user_events")
+    @patch.object(get_user_model(), "update_preference")
+    def test_calendar_scopes_available_statuses_per_media_type(
+        self,
+        mock_update_preference,
+        mock_get_user_events,
+    ):
+        """Statuses for one media type should not appear under another type."""
+        mock_update_preference.return_value = "grid"
+
+        movie_item = Item.objects.create(
+            media_id="movie-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Planned Movie",
+        )
+        Movie.objects.create(
+            item=movie_item,
+            user=self.user,
+            status=Status.PLANNING.value,
+        )
+        anime_item = Item.objects.create(
+            media_id="anime-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.ANIME.value,
+            title="Completed Anime",
+        )
+        Anime.objects.create(
+            item=anime_item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+        )
+
+        today = timezone.localdate()
+        mock_get_user_events.return_value = [
+            Event(
+                item=movie_item,
+                datetime=timezone.make_aware(
+                    timezone.datetime(today.year, today.month, 15, 12, 0),
+                ),
+            ),
+            Event(
+                item=anime_item,
+                datetime=timezone.make_aware(
+                    timezone.datetime(today.year, today.month, 16, 12, 0),
+                ),
+            ),
+        ]
+
+        response = self.client.get(reverse("calendar"))
+
+        self.assertEqual(
+            response.context["available_statuses_by_type"],
+            {
+                MediaTypes.MOVIE.value: [Status.PLANNING.value],
+                MediaTypes.ANIME.value: [Status.COMPLETED.value],
+            },
+        )
+
+    @patch("events.models.Event.objects.get_user_events")
+    @patch.object(get_user_model(), "update_preference")
+    def test_calendar_omits_media_type_without_resolvable_status(
+        self,
+        mock_update_preference,
+        mock_get_user_events,
+    ):
+        """Types with no tracked release status should have no status submenu."""
+        mock_update_preference.return_value = "grid"
+
+        movie_item = Item.objects.create(
+            media_id="untracked-movie-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Untracked Movie",
+        )
+        today = timezone.localdate()
+        mock_get_user_events.return_value = [
+            Event(
+                item=movie_item,
+                datetime=timezone.make_aware(
+                    timezone.datetime(today.year, today.month, 15, 12, 0),
+                ),
+            ),
+        ]
+
+        response = self.client.get(reverse("calendar"))
+
+        self.assertNotIn(
+            MediaTypes.MOVIE.value,
+            response.context["available_statuses_by_type"],
+        )
+
     @patch("events.tasks.reload_calendar.delay")
     def test_reload_calendar(self, mock_reload_task):
         """Test the reload_calendar view."""
@@ -428,6 +564,36 @@ class DownloadCalendarViewTests(TestCase):
         body = response.content.decode()
         self.assertIn("Export Season", body)
         self.assertNotIn("Export Movie", body)
+
+    def test_download_calendar_filters_selected_status(self):
+        """Only events whose own tracked status matches should be exported."""
+        export_events = Event.objects.filter(
+            id__in=[self.movie_event.id, self.season_event.id],
+        )
+        with patch(
+            "events.views.Event.objects.get_user_events",
+            return_value=export_events,
+        ):
+            planning_response = self.client.get(
+                reverse("download_calendar", kwargs={"token": self.user.token}),
+                {"status": [Status.PLANNING.value]},
+            )
+            in_progress_response = self.client.get(
+                reverse("download_calendar", kwargs={"token": self.user.token}),
+                {"status": [Status.IN_PROGRESS.value]},
+            )
+
+        self.assertEqual(planning_response.status_code, 200)
+        planning_body = planning_response.content.decode()
+        self.assertIn("Export Movie", planning_body)
+        self.assertIn("Export Season", planning_body)
+
+        # Neither item's own status is In Progress, even though the related
+        # TV show's status is - confirms per-item, not per-show, filtering.
+        self.assertEqual(in_progress_response.status_code, 200)
+        in_progress_body = in_progress_response.content.decode()
+        self.assertNotIn("Export Movie", in_progress_body)
+        self.assertNotIn("Export Season", in_progress_body)
 
     def test_download_calendar_invalid_token_returns_401(self):
         """Unknown export tokens should be rejected."""

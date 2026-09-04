@@ -143,6 +143,12 @@ class MediaUpdateRequestSerializer(serializers.Serializer):
     notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
 
+class TrackedMediaUpdateRequestSerializer(MediaUpdateRequestSerializer):
+    """Tracked-media PATCH fields, including the shared item's artwork URL."""
+
+    image_url = serializers.URLField(required=False, allow_blank=True)
+
+
 class NextEpisodeSerializer(serializers.Serializer):
     """The next released, unwatched TV-like episode."""
 

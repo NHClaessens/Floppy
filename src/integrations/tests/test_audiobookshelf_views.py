@@ -8,7 +8,7 @@ from django.urls import reverse
 from django_celery_beat.models import CrontabSchedule, IntervalSchedule, PeriodicTask
 
 from app import image_cache
-from integrations import audiobookshelf_cover
+from integrations import audiobookshelf_cover, views
 from integrations.imports import helpers
 from integrations.models import AudiobookshelfAccount
 
@@ -160,6 +160,21 @@ class AudiobookshelfCoverProxyTests(TestCase):
         upstream.iter_content = iter_content
         return upstream
 
+    def assertPlaceholder(self, response):  # noqa: N802 - unittest naming
+        """Assert the response is Floppy's own placeholder, not a broken image.
+
+        A 404 renders as the browser's broken-image glyph because nothing in
+        the templates has an onerror fallback for a URL that is itself valid,
+        which is what made #861 look like corruption rather than an offline
+        server. The short TTL lets the real cover reappear once ABS recovers.
+        """
+        placeholder_body, placeholder_type = views._placeholder_image_bytes()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, placeholder_body)
+        self.assertEqual(response["Content-Type"], placeholder_type)
+        self.assertEqual(response["Cache-Control"], "private, max-age=300")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+
     @patch("integrations.views.requests.get")
     def test_streams_cover_with_valid_token(self, mock_get):
         """A valid signed token fetches the upstream cover with the stored token."""
@@ -173,6 +188,8 @@ class AudiobookshelfCoverProxyTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.content, b"fake-image-bytes")
         self.assertEqual(response["Content-Type"], "image/webp")
+        self.assertEqual(response["Cache-Control"], "private, max-age=3600")
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
 
         mock_get.assert_called_once_with(
             f"{BASE_URL}/api/items/item-1/cover",
@@ -188,29 +205,41 @@ class AudiobookshelfCoverProxyTests(TestCase):
         )
         self.assertEqual(response.status_code, 404)
 
-    def test_returns_404_when_account_no_longer_exists(self):
-        """A signed token for a deleted account 404s instead of erroring."""
+    def test_serves_placeholder_when_account_no_longer_exists(self):
+        """A signed token for a deleted account degrades to the placeholder."""
         url = audiobookshelf_cover.build_cover_proxy_url(999_999, "item-1")
-        response = self.client.get(url)
-        self.assertEqual(response.status_code, 404)
+
+        with self.assertLogs("integrations.views", level="WARNING") as logs:
+            response = self.client.get(url)
+
+        self.assertPlaceholder(response)
+        self.assertIn("item-1", "\n".join(logs.output))
 
     @patch("integrations.views.requests.get")
-    def test_returns_404_on_upstream_error_status(self, mock_get):
-        """An ABS-side auth failure surfaces as a 404, not a broken image."""
+    def test_serves_placeholder_on_upstream_error_status(self, mock_get):
+        """An ABS-side auth failure degrades to the placeholder, and is logged.
+
+        Every failure below used to be a silent 404, which is exactly why the
+        #861 reports carried no usable evidence in Settings > Advanced.
+        """
         mock_get.return_value = self._mock_upstream(status_code=401)
 
-        response = self.client.get(self._cover_url())
+        with self.assertLogs("integrations.views", level="WARNING") as logs:
+            response = self.client.get(self._cover_url())
 
-        self.assertEqual(response.status_code, 404)
+        self.assertPlaceholder(response)
+        self.assertIn("status=401", "\n".join(logs.output))
 
     @patch("integrations.views.requests.get")
-    def test_returns_404_on_request_exception(self, mock_get):
-        """A network failure talking to ABS surfaces as a 404."""
+    def test_serves_placeholder_on_request_exception(self, mock_get):
+        """A network failure talking to ABS degrades to the placeholder."""
         mock_get.side_effect = requests.ConnectionError("boom")
 
-        response = self.client.get(self._cover_url())
+        with self.assertLogs("integrations.views", level="WARNING") as logs:
+            response = self.client.get(self._cover_url())
 
-        self.assertEqual(response.status_code, 404)
+        self.assertPlaceholder(response)
+        self.assertIn("request failed", "\n".join(logs.output))
 
     @patch("integrations.views.requests.get")
     def test_rejects_non_image_content_type(self, mock_get):
@@ -225,9 +254,11 @@ class AudiobookshelfCoverProxyTests(TestCase):
             headers={"Content-Type": "text/html"},
         )
 
-        response = self.client.get(self._cover_url())
+        with self.assertLogs("integrations.views", level="WARNING"):
+            response = self.client.get(self._cover_url())
 
-        self.assertEqual(response.status_code, 404)
+        self.assertPlaceholder(response)
+        self.assertNotIn(b"<script>", response.content)
 
     @patch("integrations.views.requests.get")
     def test_rejects_svg_content_type(self, mock_get):
@@ -237,9 +268,57 @@ class AudiobookshelfCoverProxyTests(TestCase):
             headers={"Content-Type": "image/svg+xml"},
         )
 
+        with self.assertLogs("integrations.views", level="WARNING"):
+            response = self.client.get(self._cover_url())
+
+        self.assertPlaceholder(response)
+        self.assertNotIn(b"onload", response.content)
+
+    @patch("integrations.views.requests.get")
+    def test_rejects_untyped_body_that_is_not_an_image(self, mock_get):
+        """An unlabelled body still has to prove it is a raster image.
+
+        Sniffing exists so a reverse proxy that strips or genericises the
+        content type doesn't cost the poster (#861) - but it must not become a
+        way to smuggle SVG or HTML past the allow-list.
+        """
+        mock_get.return_value = self._mock_upstream(
+            content=b"<svg onload='alert(1)'></svg>",
+            headers={"Content-Type": "application/octet-stream"},
+        )
+
+        with self.assertLogs("integrations.views", level="WARNING"):
+            response = self.client.get(self._cover_url())
+
+        self.assertPlaceholder(response)
+
+    @patch("integrations.views.requests.get")
+    def test_sniffs_untyped_jpeg_body(self, mock_get):
+        """A JPEG behind a generic content type is served as image/jpeg."""
+        jpeg = b"\xff\xd8\xff\xe0" + b"0" * 32
+        mock_get.return_value = self._mock_upstream(
+            content=jpeg,
+            headers={"Content-Type": "application/octet-stream"},
+        )
+
         response = self.client.get(self._cover_url())
 
-        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, jpeg)
+        self.assertEqual(response["Content-Type"], "image/jpeg")
+
+    @patch("integrations.views.requests.get")
+    def test_accepts_non_standard_jpeg_content_type(self, mock_get):
+        """Real ABS deployments emit image/jpg; rejecting it lost the poster."""
+        mock_get.return_value = self._mock_upstream(
+            content=b"fake-image-bytes",
+            headers={"Content-Type": "image/jpg"},
+        )
+
+        response = self.client.get(self._cover_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"fake-image-bytes")
 
     @patch("integrations.views.requests.get")
     def test_rejects_oversized_content_length(self, mock_get):
@@ -252,9 +331,10 @@ class AudiobookshelfCoverProxyTests(TestCase):
             },
         )
 
-        response = self.client.get(self._cover_url())
+        with self.assertLogs("integrations.views", level="WARNING"):
+            response = self.client.get(self._cover_url())
 
-        self.assertEqual(response.status_code, 404)
+        self.assertPlaceholder(response)
 
     @patch("integrations.views.requests.get")
     def test_rejects_stream_exceeding_max_bytes(self, mock_get):
@@ -269,6 +349,26 @@ class AudiobookshelfCoverProxyTests(TestCase):
             headers={"Content-Type": "image/jpeg"},
         )
 
-        response = self.client.get(self._cover_url())
+        with self.assertLogs("integrations.views", level="WARNING"):
+            response = self.client.get(self._cover_url())
 
-        self.assertEqual(response.status_code, 404)
+        self.assertPlaceholder(response)
+
+    def test_invalid_token_does_not_log_a_warning(self):
+        """Junk tokens stay below warning, and the token is never echoed.
+
+        The view is anonymous, so warning on an unsignable token would let
+        anyone flood the log and bury the real Audiobookshelf failures these
+        warnings exist to surface (#1069 review).
+        """
+        with self.assertLogs("integrations.views", level="DEBUG") as logs:
+            self.client.get(
+                reverse(
+                    "audiobookshelf_cover",
+                    kwargs={"token": "sneaky-token-value"},
+                ),
+            )
+
+        output = "\n".join(logs.output)
+        self.assertNotIn("sneaky-token-value", output)
+        self.assertNotIn("WARNING", output)

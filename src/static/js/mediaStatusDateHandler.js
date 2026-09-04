@@ -348,6 +348,7 @@ document.addEventListener("alpine:init", () => {
       start_date: false,
       end_date: false,
     },
+    suppressStatusDateAutofill: false,
     manualStartDate: false,
     // Track original values to detect intentionally empty dates
     original: {
@@ -523,6 +524,10 @@ document.addEventListener("alpine:init", () => {
       if (statusField) {
         statusField.addEventListener("change", (e) => {
           const status = e.target.value;
+
+          if (this.suppressStatusDateAutofill) {
+            return;
+          }
 
           // Clear previously auto-filled fields when status changes
           if (this.autoFilled.start_date && startDateField) {

@@ -9,6 +9,7 @@ from django.urls import reverse
 from app.models import (
     TV,
     Anime,
+    BasicMedia,
     Book,
     Episode,
     Item,
@@ -531,3 +532,83 @@ class ProgressEditBook(TestCase):
         updated_book = Book.objects.get(id=self.book.id)
         self.assertEqual(updated_book.progress, 48)
         self.assertIn("24%", response.content.decode())
+
+
+class ProgressEditAudiobook(TestCase):
+    """Audiobooks track minutes, so their total comes from runtime, not pages."""
+
+    def setUp(self):
+        """Prepare a 600-minute audiobook with no page count."""
+        self.credentials = {"username": "test", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        self.client.login(**self.credentials)
+
+        self.item = Item.objects.create(
+            media_id="1",
+            source=Sources.AUDIOBOOKSHELF.value,
+            media_type=MediaTypes.BOOK.value,
+            title="Dune",
+            image="http://example.com/image.jpg",
+            format="audiobook",
+            runtime_minutes=600,
+        )
+        self.book = Book.objects.create(
+            item=self.item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            progress=150,
+        )
+
+    def _post(self, operation):
+        return self.client.post(
+            reverse(
+                "progress_edit",
+                kwargs={
+                    "media_type": MediaTypes.BOOK.value,
+                    "instance_id": self.book.id,
+                },
+            ),
+            {"operation": operation},
+        )
+
+    def test_item_max_progress_uses_runtime(self):
+        """An audiobook's total is its runtime, not its (absent) page count."""
+        self.assertEqual(self.item.book_max_progress, 600)
+
+    def test_formatted_progress_is_percentage(self):
+        """The percentage preference is honoured for audiobooks."""
+        self.user.book_comic_manga_progress_percentage = True
+        self.user.save(update_fields=["book_comic_manga_progress_percentage"])
+
+        book = Book.objects.get(id=self.book.id)
+        BasicMedia.objects.annotate_max_progress([book], MediaTypes.BOOK.value)
+
+        self.assertEqual(book.max_progress, 600)
+        self.assertTrue(book.progress_is_percentage)
+        self.assertEqual(book.formatted_progress, "25%")
+
+    def test_formatted_progress_falls_back_to_listening_time(self):
+        """Without the preference, progress and total both render as h/min."""
+        book = Book.objects.get(id=self.book.id)
+        BasicMedia.objects.annotate_max_progress([book], MediaTypes.BOOK.value)
+
+        self.assertEqual(book.formatted_progress, "2h 30min")
+        self.assertEqual(book.formatted_max_progress, "10h 00min")
+
+    def test_progress_increase_by_percentage(self):
+        """With the percentage preference, one step is 1% of the runtime."""
+        self.user.book_comic_manga_progress_percentage = True
+        self.user.save(update_fields=["book_comic_manga_progress_percentage"])
+
+        self._post("increase")
+
+        self.assertEqual(Book.objects.get(id=self.book.id).progress, 156)
+
+    def test_progress_completes_at_runtime(self):
+        """Reaching the runtime completes the audiobook instead of overshooting."""
+        self.book.progress = 700
+        self.book.save()
+
+        updated_book = Book.objects.get(id=self.book.id)
+        self.assertEqual(updated_book.progress, 600)
+        self.assertEqual(updated_book.status, Status.COMPLETED.value)

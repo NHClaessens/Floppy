@@ -29,6 +29,7 @@ import app.providers.mal
 import app.providers.trakt
 from app.models import MediaTypes, Sources, Status
 from app.providers import services
+from app.services import grouped_anime
 from integrations import anime_mapping, import_progress
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
@@ -243,7 +244,7 @@ class StremioImporter:
             ],
         )
 
-        grouped_anime_snapshot = None
+        grouped_anime_snapshot = grouped_anime.UNSET
         if self.user.anime_enabled and series:
             try:
                 grouped_anime_snapshot = anime_mapping.load_mapping_snapshot()
@@ -251,6 +252,7 @@ class StremioImporter:
                 # A mapping outage must leave the item in its existing TV path;
                 # it must never make a normal Stremio import fail or guess from
                 # titles.  The next import retries the pinned snapshot.
+                grouped_anime_snapshot = None
                 self.warnings.append(
                     "Anime mapping unavailable; series were kept in TV",
                 )
@@ -259,6 +261,14 @@ class StremioImporter:
                     self.user.id,
                     error,
                 )
+
+        # One resolver for the whole run: rows are buffered and flushed at the
+        # end, so a database lookup alone cannot see a home opened earlier in
+        # this same import.
+        anime_router = grouped_anime.AnimeRouteResolver(
+            self.user,
+            snapshot=grouped_anime_snapshot,
+        )
 
         total = len(movies) + len(series) + len(anime)
         current = 0
@@ -279,7 +289,7 @@ class StremioImporter:
                 self._process_series(
                     entry,
                     cinemeta_videos.get(entry["_id"]),
-                    grouped_anime_snapshot,
+                    anime_router,
                 )
             except Exception as error:
                 msg = f"Error processing entry: {entry}"
@@ -289,7 +299,7 @@ class StremioImporter:
             current += 1
             import_progress.report(current, total, "Stremio")
             try:
-                self._process_anime(entry)
+                self._process_anime(entry, anime_router)
             except Exception as error:
                 msg = f"Error processing entry: {entry}"
                 raise MediaImportUnexpectedError(msg) from error
@@ -536,7 +546,7 @@ class StremioImporter:
         movie_instance._history_date = self._get_history_date(entry)
         self.bulk_media[MediaTypes.MOVIE.value].append(movie_instance)
 
-    def _process_series(self, entry, video_ids, grouped_anime_snapshot=None):
+    def _process_series(self, entry, video_ids, anime_router=None):
         """Process a single Stremio series entry."""
         entry_id = entry["_id"]
         name = entry.get("name", entry_id)
@@ -607,28 +617,42 @@ class StremioImporter:
 
         library_media_type = ""
         grouped_anime_match = None
-        if self.user.anime_enabled:
-            from app.services import grouped_anime
-
-            if grouped_anime_snapshot is not None:
-                grouped_anime_match = grouped_anime.classify_tv_metadata(
-                    metadata,
-                    snapshot=grouped_anime_snapshot,
+        if anime_router is not None:
+            route = anime_router.route_for_show(metadata, tmdb_id=tmdb_id)
+            if route == "flat":
+                # This show's home is a flat MAL row, which a TMDB-identified
+                # Stremio series cannot populate. Importing it as TV would
+                # track the same show in both libraries, so skip it and say so.
+                self.warnings.append(
+                    f"{name}: tracked as anime on {Sources.MAL.label}; skipped "
+                    "so it is not also imported into TV",
                 )
-            if (
-                grouped_anime_match is not None
-                and grouped_anime_match.is_grouped_anime
-            ):
+                return
+            if route == "grouped":
+                grouped_anime_match = grouped_anime.classify(
+                    metadata,
+                    snapshot=anime_router.snapshot,
+                )
                 library_media_type = MediaTypes.ANIME.value
-                if tv_instance is not None and not grouped_anime.promote_grouped_anime(
-                    tv_instance.item,
-                    grouped_anime_match,
+                if (
+                    tv_instance is not None
+                    and grouped_anime_match is not None
+                    and not grouped_anime.promote_grouped_anime(
+                        tv_instance.item,
+                        grouped_anime_match,
+                    )
                 ):
                     self.warnings.append(
                         f"{name}: exact anime match had a target-bucket collision; "
                         "kept in TV",
                     )
                     library_media_type = ""
+                if library_media_type:
+                    anime_router.remember(
+                        "grouped",
+                        tmdb_id=tmdb_id,
+                        mal_ids=getattr(grouped_anime_match, "mal_ids", ()),
+                    )
 
         if tv_instance is None:
             tv_item = helpers.find_item_across_buckets(
@@ -1014,7 +1038,7 @@ class StremioImporter:
         mal_id = (response.get("data") or {}).get("Media", {}).get("idMal")
         return int(mal_id) if mal_id else None
 
-    def _process_anime(self, entry):
+    def _process_anime(self, entry, anime_router=None):
         """Process a single Stremio anime entry (kitsu:/mal:/anilist: ids)."""
         entry_id = entry["_id"]
         name = entry.get("name", entry_id)
@@ -1024,6 +1048,16 @@ class StremioImporter:
         if mal_id is None:
             self.warnings.append(
                 f"{name}: couldn't find a match in {Sources.MAL.label}",
+            )
+            return
+
+        if anime_router is not None and (
+            anime_router.route_for_mal_id(mal_id) == "grouped"
+        ):
+            # A series entry earlier in this run already imported this show as
+            # grouped anime. Opening a flat row now would track it twice.
+            self.warnings.append(
+                f"{name}: already imported as grouped anime in this run",
             )
             return
 

@@ -1311,5 +1311,52 @@
       <!-- Save Button -->
       {% include "users/components/form_save_bar.html" with button_label="Save Preferences" %}
     </form>
+
+    {% if anime_shape_prompt_count %}
+      {# Switching the Anime Provider only decides the shape of newly added
+         shows. Ask before touching a library the user already has, rather than
+         starting a bulk conversion they did not expect. #}
+      <div x-data="{ open: true }"
+           x-cloak
+           x-show="open"
+           @keydown.escape.window="open = false"
+           class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+           role="dialog"
+           aria-modal="true"
+           aria-labelledby="anime-shape-title">
+        <div @click.outside="open = false"
+             class="w-full max-w-lg rounded-2xl border border-[var(--color-surface-border)] bg-[var(--color-page-bg)] p-6 shadow-2xl">
+          <h2 id="anime-shape-title"
+              class="text-lg font-semibold text-[var(--color-text)]">
+            Convert your existing anime?
+          </h2>
+          <p class="mt-2 text-sm text-[var(--color-text-muted)]">
+            New shows will use your new Anime Provider straight away. You have
+            {{ anime_shape_prompt_count }} show{{ anime_shape_prompt_count|pluralize }}
+            already tracked in the other format.
+          </p>
+          <p class="mt-2 text-sm text-[var(--color-text-muted)]">
+            Converting rebuilds them in the new format. Moving to MyAnimeList
+            drops per-episode history, and titles that cannot be converted
+            safely are left exactly as they are.
+          </p>
+
+          <div class="mt-6 flex flex-col gap-2 sm:flex-row sm:justify-end">
+            <button type="button"
+                    @click="open = false"
+                    class="inline-flex items-center justify-center rounded-lg border border-[var(--color-border)] px-4 py-2 text-sm font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-muted)] focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500">
+              Keep my library as it is
+            </button>
+            <form method="post" action="{% url 'convert_anime_library' %}">
+              {% csrf_token %}
+              <button type="submit"
+                      class="inline-flex w-full items-center justify-center rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-indigo-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 sm:w-auto">
+                Convert my existing anime
+              </button>
+            </form>
+          </div>
+        </div>
+      </div>
+    {% endif %}
   </div>
 {% endblock settings_content %}

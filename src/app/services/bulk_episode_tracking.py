@@ -549,6 +549,7 @@ def _build_domain_payload(
                 "episode_title": _episode_title_from_payload(episode, episode_number),
                 "air_date": air_date,
                 "release_datetime": air_date,
+                "runtime_minutes": episode.get("runtime_minutes") or episode.get("runtime") or "",
                 "existing_play_count": play_counts.get(
                     (season_number, episode_number),
                     0,

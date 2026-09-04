@@ -614,6 +614,157 @@ class ImportStremioTests(TestCase):
             MediaTypes.ANIME.value,
         )
 
+    def test_mal_preferring_user_skips_the_series_rather_than_importing_to_tv(self):
+        """A TMDB series cannot populate a flat MAL library, so skip it.
+
+        Importing it as TV instead would track the show in both libraries -
+        the duplicate this whole rule exists to prevent.
+        """
+        self.user.anime_metadata_source_default = Sources.MAL.value
+        self.user.save(update_fields=["anime_metadata_source_default"])
+
+        video_ids = ["tt0903747:1:1"]
+        library_items = [
+            {
+                "_id": "tt0903747",
+                "type": "series",
+                "name": "Anime Show",
+                "state": {
+                    "watched": encode_watched_bitfield(video_ids, set(video_ids)),
+                    "lastWatched": "2023-01-02T00:00:00Z",
+                },
+            },
+        ]
+        match = GroupedAnimeMatch(
+            decision="move",
+            reason="exact_external_id_and_animation_genre",
+            tmdb_id="1396",
+            mal_ids=("12345",),
+        )
+
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=match,
+        ):
+            _, warnings = self._run_import(
+                library_items,
+                cinemeta_videos={"tt0903747": video_ids},
+            )
+
+        self.assertIn("skipped", warnings)
+        self.assertFalse(
+            Item.objects.filter(
+                media_id="1396",
+                media_type=MediaTypes.TV.value,
+            ).exists(),
+        )
+        self.assertEqual(TV.objects.filter(user=self.user).count(), 0)
+
+    def test_existing_grouped_home_wins_when_the_snapshot_failed_to_load(self):
+        """Stickiness must survive a mapping outage, or the show splits in two."""
+        grouped_item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Anime Show",
+            image="",
+        )
+        # Already Completed, so the sync has no forward progress to write and
+        # cannot trip the completion fan-out.
+        TV.objects.create(
+            item=grouped_item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+        )
+
+        video_ids = ["tt0903747:1:1"]
+        library_items = [
+            {
+                "_id": "tt0903747",
+                "type": "series",
+                "name": "Anime Show",
+                "state": {
+                    "watched": encode_watched_bitfield(video_ids, set(video_ids)),
+                    "lastWatched": "2023-01-02T00:00:00Z",
+                },
+            },
+        ]
+
+        with patch(
+            "integrations.anime_mapping.load_mapping_snapshot",
+            side_effect=OSError("mapping unavailable"),
+        ), patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+        ) as mock_classify:
+            self._run_import(
+                library_items,
+                cinemeta_videos={"tt0903747": video_ids},
+            )
+
+        # The classifier never ran, yet the show stayed in the anime bucket.
+        mock_classify.assert_not_called()
+        grouped_item.refresh_from_db()
+        self.assertEqual(
+            grouped_item.library_media_type,
+            MediaTypes.ANIME.value,
+        )
+        self.assertEqual(
+            Item.objects.filter(
+                media_id="1396",
+                media_type=MediaTypes.TV.value,
+            ).count(),
+            1,
+        )
+
+    def test_one_run_does_not_open_both_a_grouped_and_a_flat_home(self):
+        """Rows are buffered until the end of a run, so the cache must carry it.
+
+        A series entry and a kitsu entry for the same show would otherwise each
+        create their own home and never see the other.
+        """
+        video_ids = ["tt0903747:1:1"]
+        library_items = [
+            {
+                "_id": "tt0903747",
+                "type": "series",
+                "name": "Anime Show",
+                "state": {
+                    "watched": encode_watched_bitfield(video_ids, set(video_ids)),
+                    "lastWatched": "2023-01-02T00:00:00Z",
+                },
+            },
+            {
+                "_id": "kitsu:12345",
+                "type": "series",
+                "name": "Anime Show",
+                "state": {"lastWatched": "2023-01-03T00:00:00Z"},
+            },
+        ]
+        match = GroupedAnimeMatch(
+            decision="move",
+            reason="exact_external_id_and_animation_genre",
+            tmdb_id="1396",
+            mal_ids=("12345",),
+        )
+
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=match,
+        ), patch.object(
+            stremio.StremioImporter,
+            "_resolve_mal_id",
+            return_value=12345,
+        ):
+            _, warnings = self._run_import(
+                library_items,
+                cinemeta_videos={"tt0903747": video_ids},
+            )
+
+        self.assertIn("already imported as grouped anime", warnings)
+        self.assertEqual(Anime.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(TV.objects.filter(user=self.user).count(), 1)
+
     def test_two_entries_promoted_to_same_grouped_anime_show_do_not_duplicate_season(
         self,
     ):

@@ -3,8 +3,10 @@
 import hashlib
 import logging
 import re
+import time
+import unicodedata
 from collections import defaultdict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any
 from urllib.parse import urljoin, urlparse
@@ -38,6 +40,16 @@ BOOK_METADATA_PROVIDER_ORDER = (
     Sources.OPENLIBRARY.value,
 )
 TITLE_MATCH_THRESHOLD = 0.72
+# How long a book whose provider enrichment came back thin is left alone before
+# the providers are tried again. Without this, any book the providers can't
+# match - a common case for non-English audiobooks, which carry an ASIN and no
+# ISBN - is flagged unhealthy by _needs_book_repair on *every* sync and
+# re-queries Hardcover/OpenLibrary forever (see #861).
+BOOK_REPAIR_COOLDOWN = timedelta(days=30)
+# Blank posters are the visible symptom of #861, so they get a much shorter
+# cooldown: an install upgrading past the cover fix heals within a day instead
+# of waiting a month.
+BOOK_COVER_REPAIR_COOLDOWN = timedelta(days=1)
 # (strptime format, characters to feed it) pairs, most specific first.
 PUBLISHED_DATE_FORMATS = (
     ("%Y-%m-%d", 10),
@@ -63,13 +75,29 @@ class AudiobookshelfClient:
         self.base_url = base_url.rstrip("/")
         self.token = token
 
-    def _request(self, path: str):
+    def _request(self, path: str, max_retries: int = 3, base_delay: float = 0.5):
+        """GET a path, retrying transient network failures.
+
+        A single dropped connection (TLS handshake timeout, reset, etc.) is
+        common on self-hosted setups and shouldn't be treated the same as a
+        real API error - retry it a few times before giving up (see #1047).
+        """
         url = f"{self.base_url}{path}"
-        response = requests.get(
-            url,
-            headers={"Authorization": f"Bearer {self.token}"},
-            timeout=20,
-        )
+        attempt = 0
+        while True:
+            try:
+                response = requests.get(
+                    url,
+                    headers={"Authorization": f"Bearer {self.token}"},
+                    timeout=20,
+                )
+            except requests.exceptions.RequestException:
+                attempt += 1
+                if attempt >= max_retries:
+                    raise
+                time.sleep(base_delay * attempt)
+                continue
+            break
         if response.status_code in (401, 403):
             msg = "Audiobookshelf token is invalid or expired"
             raise AudiobookshelfAuthError(msg)
@@ -248,21 +276,13 @@ class AudiobookshelfImporter:
         genres = self._extract_genres(metadata)
         series_name, series_position = self._extract_series_info(metadata)
 
-        image = self._normalize_cover_url(item_metadata.get("coverPath"))
-        # ABS returns coverPath as a server filesystem path (e.g. /metadata/items/.../cover.jpg)
-        # and the ABS cover endpoint requires a bearer token a plain <img src> can never
-        # attach, so any ABS-hosted cover is served through Floppy's own authenticated
-        # proxy instead of the raw ABS URL (see #861). This also keeps
-        # _should_prefer_provider_cover triggering enrichment with a valid fallback,
-        # since the proxy URL is relative and therefore not an absolute http(s) URL.
-        if image and self._is_own_abs_host(image):
-            image = audiobookshelf_cover.build_cover_proxy_url(
-                self.account.id,
-                library_item_id,
-            )
+        image = self._resolve_cover_image(library_item_id, item_metadata)
 
+        # Enrichment is still worth running for thin metadata even when the
+        # cover is already settled - it fills in authors, publisher, genres and
+        # the release date.
         should_enrich = (
-            self._should_prefer_provider_cover(image)
+            self._needs_cover_from_provider(image)
             or not authors_list
             or not publishers
             or not genres
@@ -277,7 +297,7 @@ class AudiobookshelfImporter:
             else None
         )
 
-        if self._should_prefer_provider_cover(image):
+        if self._needs_cover_from_provider(image):
             provider_image = (
                 provider_metadata.get("image")
                 if isinstance(provider_metadata, dict)
@@ -554,7 +574,7 @@ class AudiobookshelfImporter:
         kwargs = {"expanded": True} if expanded else {}
         try:
             return self.client.get_library_item(library_item_id, **kwargs)
-        except AudiobookshelfClientError:
+        except (AudiobookshelfClientError, requests.exceptions.RequestException):
             self.warnings.append(f"{library_item_id}: failed to fetch metadata")
             return None
 
@@ -676,7 +696,7 @@ class AudiobookshelfImporter:
             ).netloc.lower()
         ):
             return image_url
-        if item_metadata.get("coverPath") or image_url:
+        if self._abs_cover_value(item_metadata) or image_url:
             return audiobookshelf_cover.build_cover_proxy_url(
                 self.account.id,
                 library_item_id,
@@ -933,19 +953,44 @@ class AudiobookshelfImporter:
             return True
 
         image = item.image or ""
+        # A raw ABS-hosted URL can never load in the browser, so it is always
+        # worth re-repairing. This terminates by itself: the repair rewrites it
+        # into a proxy URL, which _is_stale_abs_cover then ignores.
+        if self._is_stale_abs_cover(image):
+            return True
+
+        if item.metadata_fetched_at is None:
+            return True
+        age = timezone.now() - item.metadata_fetched_at
+
+        # A blank poster is the user-visible symptom of #861, so rows written
+        # before the cover fix should heal on the next day's sync rather than
+        # waiting out the full metadata cooldown. It still needs *a* cooldown:
+        # when ABS genuinely has no artwork and no provider matches, the image
+        # stays IMG_NONE and would otherwise be re-repaired on every sync.
+        if (
+            not image or image == settings.IMG_NONE
+        ) and age >= BOOK_COVER_REPAIR_COOLDOWN:
+            return True
+
+        # Books the providers simply cannot match - non-English audiobooks
+        # carrying an ASIN and no ISBN, say - would otherwise be flagged
+        # unhealthy on every single sync and re-query Hardcover/OpenLibrary
+        # forever (#861). The cooldown makes that retry periodic instead.
+        if age < BOOK_REPAIR_COOLDOWN:
+            return False
+
         # A missing ISBN is not a defect for audiobooks: ABS carries an ASIN for
         # most audio editions and no ISBN at all, so requiring one here marked
         # those items unhealthy forever and re-repaired them on every sync.
         return any(
             (
-                self._is_stale_abs_cover(image),
                 not item.authors,
                 not item.publishers,
                 not item.genres,
                 item.release_datetime is None,
                 not item.original_title,
                 not item.localized_title,
-                item.metadata_fetched_at is None,
             ),
         )
 
@@ -956,15 +1001,21 @@ class AudiobookshelfImporter:
         still hold a raw ABS-hosted URL - even the previously "normalised"
         /api/items/.../cover form, which requires a bearer token a plain
         <img src> can never attach. Any such URL needs to be re-repaired into
-        the proxy form so the poster actually loads. Using this instead of
-        _should_prefer_provider_cover in the repair check avoids infinite
-        re-repair for items whose provider enrichment failed and are left with
-        the proxy fallback URL.
+        the proxy form so the poster actually loads. It deliberately says
+        nothing about blank or placeholder covers: _needs_book_repair handles
+        those under a cooldown, so an item ABS has no artwork for is not
+        re-repaired on every sync.
         """
         if not image_url or image_url == settings.IMG_NONE:
             return False
         if audiobookshelf_cover.is_cover_proxy_url(image_url):
-            return False
+            # A proxy URL only resolves while its signature verifies, and
+            # rotating SECRET_KEY invalidates every stored token at once.
+            # Nothing else would ever rewrite them, so an unverifiable token
+            # is stale rather than healthy. Re-signing it on repair makes this
+            # terminate on the next pass.
+            token = image_url.rsplit("/", 1)[-1]
+            return audiobookshelf_cover.resolve_cover_proxy_token(token) is None
         return self._is_own_abs_host(image_url)
 
     def _is_own_abs_host(self, image_url: str) -> bool:
@@ -1110,17 +1161,70 @@ class AudiobookshelfImporter:
             return f"{self.account.base_url.rstrip('/')}{cover}"
         return urljoin(f"{self.account.base_url.rstrip('/')}/", cover)
 
-    def _should_prefer_provider_cover(self, image_url):
-        """Return whether provider (Hardcover/OpenLibrary) art should be preferred.
+    def _abs_cover_value(self, item_metadata: dict[str, Any]):
+        """Return the raw cover value Audiobookshelf reports for an item.
 
-        True whenever we don't already have a real, directly-loadable image
-        URL: missing, the placeholder, or our own relative ABS cover proxy
-        URL, which is deliberately host-less and so falls into the "not an
-        absolute http(s) URL" branch below (see #861).
+        Depending on the ABS version the cover lives at the library item's top
+        level, under ``media``, or only as an image entry in ``libraryFiles``.
+        Reading just the top-level key made Floppy conclude the item had no
+        artwork at all and fall back to whatever a metadata provider happened
+        to return - or to the placeholder (see #861).
         """
-        if not image_url or image_url == settings.IMG_NONE:
-            return True
-        return urlparse(image_url).scheme not in {"http", "https"}
+        cover_value = item_metadata.get("coverPath")
+        if cover_value:
+            return cover_value
+
+        media_info = item_metadata.get("media")
+        if isinstance(media_info, dict) and media_info.get("coverPath"):
+            return media_info["coverPath"]
+
+        library_files = item_metadata.get("libraryFiles")
+        if isinstance(library_files, list):
+            for library_file in library_files:
+                if not isinstance(library_file, dict):
+                    continue
+                if library_file.get("fileType") != "image":
+                    continue
+                file_metadata = library_file.get("metadata")
+                path = (
+                    file_metadata.get("path")
+                    if isinstance(file_metadata, dict)
+                    else None
+                )
+                if path:
+                    return path
+        return ""
+
+    def _resolve_cover_image(self, library_item_id: str, item_metadata: dict[str, Any]):
+        """Return the cover URL for an ABS book, preferring the user's own art.
+
+        Audiobookshelf artwork is what the user curated, so it wins over
+        Hardcover/OpenLibrary art: a provider match carrying a dead or simply
+        wrong cover URL used to replace a perfectly good ABS cover (see #861).
+        The ABS ``/api/items/:id/cover`` endpoint requires a bearer token a
+        plain ``<img src>`` can never attach, so any ABS-hosted cover is served
+        through Floppy's own authenticated proxy rather than the raw ABS URL.
+        """
+        cover_value = self._abs_cover_value(item_metadata)
+        image = self._normalize_cover_url(cover_value)
+        # A coverPath on some other host is a remote cover the user configured
+        # in ABS; it is already directly loadable, so keep it as-is.
+        if image and not self._is_own_abs_host(image):
+            return image
+        if cover_value:
+            return audiobookshelf_cover.build_cover_proxy_url(
+                self.account.id,
+                library_item_id,
+            )
+        return ""
+
+    def _needs_cover_from_provider(self, image_url):
+        """Return whether provider art is needed because we have no cover.
+
+        Audiobookshelf art now wins outright (see #861), so provider artwork
+        is only used when ABS gave us nothing to show.
+        """
+        return not image_url or image_url == settings.IMG_NONE
 
     def _resolve_provider_metadata(
         self, title: str, authors: list[str], isbns: list[str]
@@ -1260,7 +1364,40 @@ class AudiobookshelfImporter:
         return SequenceMatcher(None, normalized_left, normalized_right).ratio()
 
     def _normalize_name(self, value):
-        normalized = re.sub(r"[^a-z0-9]+", " ", str(value or "").lower())
+        """Casefold and strip punctuation while keeping non-ASCII letters.
+
+        The old form was ``re.sub(r"[^a-z0-9]+", " ", value.lower())``, which
+        deleted every non-ASCII character: a Cyrillic or Japanese title
+        normalised to the empty string and so could never match a provider
+        result, and accented Latin titles were degraded below
+        TITLE_MATCH_THRESHOLD (see #861).
+
+        Accents are folded off Latin letters, so "Zeitbrüch" still matches
+        "Zeitbruch". They are *not* folded off other scripts, where a
+        combining mark changes the word rather than its spelling: stripping
+        them would collapse Japanese は/ば/ぱ and the Cyrillic ye/yo pair,
+        scoring different works as a perfect match and letting a provider
+        overwrite the item's metadata with another book's.
+        """
+        decomposed = unicodedata.normalize("NFKD", str(value or ""))
+        kept = []
+        base_is_ascii = False
+        for char in decomposed:
+            if unicodedata.combining(char):
+                # NFKD decomposes an accented Latin letter to an ASCII base
+                # plus its mark, so an ASCII base is exactly the case where
+                # dropping the mark is a spelling variant rather than a
+                # different character.
+                if not base_is_ascii:
+                    kept.append(char)
+                continue
+            base_is_ascii = char.isascii()
+            kept.append(char)
+        # Recompose so a mark kept above rejoins its base into a single
+        # alphanumeric character; left bare it would read as punctuation
+        # below and split the word in half.
+        recomposed = unicodedata.normalize("NFC", "".join(kept))
+        normalized = re.sub(r"[\W_]+", " ", recomposed.casefold())
         return re.sub(r"\s+", " ", normalized).strip()
 
     def _extract_provider_authors(self, provider_metadata: dict[str, Any] | None):

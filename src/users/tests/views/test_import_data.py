@@ -347,6 +347,11 @@ class ImportDataViewTests(TestCase):
                         "title": "Movies",
                         "server_name": "Living Room",
                         "type": "movie",
+                        # Added so the import form can offer (and pre-select)
+                        # audiobook routing for a music library.
+                        "is_music": False,
+                        "audiobook_hint": False,
+                        "content_kind": "auto",
                     },
                 ],
                 "error": "",

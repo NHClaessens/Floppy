@@ -19,6 +19,7 @@ from app.models import (
     Status,
 )
 from app.providers import services
+from app.services.grouped_anime import GroupedAnimeMatch
 from integrations import tasks
 from integrations.imports import helpers, plex
 from integrations.imports.plex import PlexHistoryImporter
@@ -2649,3 +2650,132 @@ class TestPlexImportCrossSourceDedup(TestCase):
             Episode.objects.filter(related_season=season_row).count(),
             2,
         )
+
+
+class TestPlexAnimeSectionHint(TestCase):
+    """A Plex section named "Anime" is a folder name, not evidence.
+
+    It may still route a title the classifier knows nothing about, but it must
+    not outrank a positive "this is not animation" verdict.
+    """
+
+    def setUp(self):
+        """Create a TMDB-preferring user with the Anime library enabled."""
+        User = get_user_model()
+        self.user = User.objects.create_user(username="plex-section-hint")
+        self.user.anime_metadata_source_default = Sources.TMDB.value
+        self.user.save()
+        self.account = PlexAccount.objects.create(
+            user=self.user,
+            plex_token="token",
+            plex_username="plex-section-hint",
+            plex_account_id="222",
+        )
+        self.tv_metadata = {"media_id": "1396", "title": "Show", "tvdb_id": None}
+
+    def _importer(self):
+        return PlexHistoryImporter(
+            user=self.user,
+            account=self.account,
+            mode="new",
+            library="machine::1",
+        )
+
+    def test_not_animation_verdict_beats_the_section_name(self):
+        """Western animation in an "Anime" section now stays in TV Shows."""
+        verdict = GroupedAnimeMatch(
+            decision="leave",
+            reason="tmdb_metadata_is_not_tagged_animation",
+            tmdb_id="1396",
+        )
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=verdict,
+        ):
+            bucket = self._importer()._anime_library_bucket(
+                {"anime_section": True},
+                self.tv_metadata,
+                "1396",
+            )
+
+        self.assertIsNone(bucket)
+
+    def test_section_name_still_routes_an_unmapped_title(self):
+        """With no verdict at all the folder name is the only signal there is."""
+        verdict = GroupedAnimeMatch(
+            decision="leave",
+            reason="no_exact_anime_ids_external_id_match",
+            tmdb_id="1396",
+        )
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=verdict,
+        ):
+            bucket = self._importer()._anime_library_bucket(
+                {"anime_section": True},
+                self.tv_metadata,
+                "1396",
+            )
+
+        self.assertEqual(bucket, MediaTypes.ANIME.value)
+
+    def test_section_name_routes_when_the_snapshot_is_unavailable(self):
+        """A mapping outage must not silently empty the Anime library."""
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=None,
+        ):
+            bucket = self._importer()._anime_library_bucket(
+                {"anime_section": True},
+                self.tv_metadata,
+                "1396",
+            )
+
+        self.assertEqual(bucket, MediaTypes.ANIME.value)
+
+    def test_classifier_match_routes_without_any_section_hint(self):
+        """A confirmed anime is grouped whatever the section is called."""
+        verdict = GroupedAnimeMatch(
+            decision="move",
+            reason="exact_external_id_and_animation_genre",
+            tmdb_id="1396",
+            mal_ids=("12345",),
+        )
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=verdict,
+        ):
+            bucket = self._importer()._anime_library_bucket(
+                {"anime_section": False},
+                self.tv_metadata,
+                "1396",
+            )
+
+        self.assertEqual(bucket, MediaTypes.ANIME.value)
+
+    def test_ordinary_tv_outside_an_anime_section_is_untouched(self):
+        """No verdict and no hint means the show is not anime."""
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=None,
+        ):
+            bucket = self._importer()._anime_library_bucket(
+                {"anime_section": False},
+                self.tv_metadata,
+                "1396",
+            )
+
+        self.assertIsNone(bucket)
+
+    def test_disabled_anime_library_never_buckets(self):
+        """With the Anime library off nothing routes there."""
+        self.user.anime_enabled = False
+        self.user.save(update_fields=["anime_enabled"])
+
+        bucket = self._importer()._anime_library_bucket(
+            {"anime_section": True},
+            self.tv_metadata,
+            "1396",
+        )
+
+        self.assertIsNone(bucket)

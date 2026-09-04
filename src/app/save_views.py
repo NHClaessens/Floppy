@@ -150,8 +150,8 @@ def media_save(request):
 
         if item:
             if media_type == MediaTypes.BOOK.value:
-                max_progress = item.number_of_pages
-                if not max_progress:
+                max_progress = item.book_max_progress
+                if not max_progress and item.format != "audiobook":
                     # Try to fetch from metadata
                     try:
                         metadata = services.get_media_metadata(

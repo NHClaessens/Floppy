@@ -20,6 +20,7 @@ from app.models import (
     Status,
 )
 from app.providers import services
+from app.services.grouped_anime import GroupedAnimeMatch
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError
 from integrations.imports.trakt import TraktImporter, importer
@@ -2653,3 +2654,152 @@ class ImportTraktPreferredProviderDedup(TestCase):
 
         mock_find_tvdb_counterpart.assert_not_called()
         self.assertEqual(item.source, Sources.TMDB.value)
+
+
+class ImportTraktAnimeRouting(TestCase):
+    """Trakt had no anime handling at all, so anime always landed in TV."""
+
+    def setUp(self):
+        """Create a TMDB-preferring user with the Anime library enabled."""
+        self.user = get_user_model().objects.create_user(
+            username="trakt-anime",
+            password="12345",
+        )
+        self.user.anime_metadata_source_default = Sources.TMDB.value
+        self.user.save()
+
+        self.match = GroupedAnimeMatch(
+            decision="move",
+            reason="exact_external_id_and_animation_genre",
+            tmdb_id="1396",
+            mal_ids=("12345",),
+        )
+        self.tv_metadata = {
+            "title": "Anime Show",
+            "image": "tv_image.jpg",
+            "last_episode_season": 1,
+            "max_progress": 1,
+            "episodes": [{"episode_number": 1, "title": "One", "image": ""}],
+        }
+
+    def _importer(self):
+        return TraktImporter("testuser", self.user, "new")
+
+    def test_classified_anime_buckets_the_whole_item_tree(self):
+        """Show, season and episode Items must all land in the anime bucket."""
+        importer_instance = self._importer()
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=self.match,
+        ):
+            bucket = importer_instance._anime_bucket_for_show("1396", self.tv_metadata)
+            tv_item = importer_instance._get_or_create_item(
+                MediaTypes.TV.value,
+                "1396",
+                self.tv_metadata,
+                library_media_type=bucket,
+            )
+            season_item = importer_instance._get_or_create_item(
+                MediaTypes.SEASON.value,
+                "1396",
+                self.tv_metadata,
+                1,
+                library_media_type=bucket,
+            )
+            episode_item = importer_instance._get_or_create_item(
+                MediaTypes.EPISODE.value,
+                "1396",
+                self.tv_metadata,
+                1,
+                1,
+                library_media_type=bucket,
+            )
+
+        for item in (tv_item, season_item, episode_item):
+            self.assertEqual(item.library_media_type, MediaTypes.ANIME.value)
+
+    def test_plain_tv_show_is_untouched(self):
+        """A show the classifier rejects keeps its ordinary TV bucket."""
+        importer_instance = self._importer()
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=None,
+        ):
+            bucket = importer_instance._anime_bucket_for_show("1396", self.tv_metadata)
+            tv_item = importer_instance._get_or_create_item(
+                MediaTypes.TV.value,
+                "1396",
+                self.tv_metadata,
+                library_media_type=bucket,
+            )
+
+        self.assertIsNone(bucket)
+        self.assertEqual(tv_item.library_media_type, MediaTypes.TV.value)
+
+    def test_sticks_to_an_existing_grouped_home(self):
+        """An existing anime home wins even when the classifier says nothing."""
+        grouped_item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            library_media_type=MediaTypes.ANIME.value,
+            title="Anime Show",
+            image="",
+        )
+        TV.objects.create(
+            item=grouped_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+
+        importer_instance = self._importer()
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=None,
+        ) as mock_classify:
+            bucket = importer_instance._anime_bucket_for_show("1396", self.tv_metadata)
+
+        self.assertEqual(bucket, MediaTypes.ANIME.value)
+        mock_classify.assert_not_called()
+
+    def test_flat_mal_home_is_skipped_rather_than_imported_to_tv(self):
+        """Trakt cannot write a MAL identity, so it must not import a TV twin."""
+        from app.models import Anime, ItemProviderLink
+
+        anime_item = Item.objects.create(
+            media_id="12345",
+            source=Sources.MAL.value,
+            media_type=MediaTypes.ANIME.value,
+            title="Anime Show",
+            image="",
+        )
+        ItemProviderLink.objects.create(
+            item=anime_item,
+            provider=Sources.TMDB.value,
+            provider_media_type=MediaTypes.TV.value,
+            provider_media_id="1396",
+            episode_offset=0,
+        )
+        Anime.objects.create(
+            item=anime_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            progress=1,
+        )
+
+        importer_instance = self._importer()
+        bucket = importer_instance._anime_bucket_for_show("1396", self.tv_metadata)
+
+        self.assertEqual(bucket, "skip")
+
+    def test_classifier_runs_once_per_show_not_once_per_episode(self):
+        """Episodes share one show-level verdict via the run cache."""
+        importer_instance = self._importer()
+        with patch(
+            "app.services.grouped_anime.classify_tv_metadata",
+            return_value=self.match,
+        ) as mock_classify:
+            for _ in range(5):
+                importer_instance._anime_bucket_for_show("1396", self.tv_metadata)
+
+        self.assertEqual(mock_classify.call_count, 1)

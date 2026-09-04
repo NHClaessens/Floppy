@@ -6,7 +6,11 @@
 
 <div class="media-card bg-[var(--color-surface)] rounded-lg overflow-hidden shadow-lg relative {{ card_class }}{% if user.media_card_subtitle_display == 'always' %} media-card-subtitle-always{% endif %}"
      data-media-type="{{ entry.media_type }}"
-     x-data="{ trackOpen: false, historyOpen: false, listsOpen: false }">
+     x-data="{ trackOpen: false, historyOpen: false, listsOpen: false, revealed: false, tapToReveal(e) { if (this.revealed) { if (e.target.closest('button, a, input, select, textarea')) { return; } const link = this.$root.querySelector('.media-card-overlay a[href]') || this.$root.querySelector('a.media-card-title[href]'); if (link) { e.preventDefault(); e.stopPropagation(); link.click(); } return; } if (!window.matchMedia('(pointer: coarse)').matches) { return; } e.preventDefault(); e.stopPropagation(); this.revealed = true; window.dispatchEvent(new CustomEvent('media-card-revealed', { detail: this.$root })); } }"
+     @click.capture="tapToReveal($event)"
+     @media-card-revealed.window="if ($event.detail !== $root) revealed = false"
+           @click.window="if (revealed && !$root.contains($event.target)) revealed = false"
+     :class="revealed ? 'media-card-revealed' : ''">
   <div class="media-card-visual relative">
     {% with entry.item|display_title:user as preferred_entry_title %}
     <a hx-boost="true"
@@ -49,7 +53,8 @@
 
     {# Hover overlay with history-specific buttons #}
     {% if entry.item and entry.item.media_type %}
-      <div class="media-card-overlay absolute inset-0 flex items-center justify-center opacity-0 hover-tap:opacity-100 transition-opacity duration-200{% if user.clickable_media_cards %} pointer-coarse:hidden{% endif %}">
+      <div class="media-card-overlay absolute inset-0 flex items-center justify-center transition-opacity duration-200{% if user.clickable_media_cards %} pointer-coarse:hidden{% endif %}"
+                :class="revealed ? 'opacity-100 pointer-events-auto media-card-overlay-revealed' : 'opacity-0 pointer-events-none'">
         {# Darkening background layer #}
         <div class="absolute inset-0 bg-black/50 z-0"></div>
         
@@ -224,7 +229,8 @@
   {% if entry.item and entry.item.media_type and history_mode != "release" %}
     {# Track Modal #}
     <div x-show="trackOpen"
-         @mousedown.self="trackOpen = false"
+    @mousedown.self="trackOpen = false"
+         x-cloak
          @keydown.escape.window="trackOpen = false"
          class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -235,9 +241,10 @@
 
     {# Lists Modal #}
     <div x-show="listsOpen"
+    @mousedown.self="listsOpen = false"
+         x-cloak
          @keydown.escape.window="listsOpen = false"
-         class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-         @mousedown.self="listsOpen = false">
+         class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
       <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
         <div id="{% component_id 'lists' entry.item entry.entry_key %}"></div>
       </div>

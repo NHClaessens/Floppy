@@ -22,6 +22,7 @@ from app.models import (
     MediaTypes,
     Movie,
     Music,
+    MusicReleasePreference,
     Season,
     Sources,
     Status,
@@ -513,6 +514,151 @@ class CacheClearButtonsTests(TestCase):
         self.assertRedirects(response, reverse("advanced"))
         self.assertTrue(Album.objects.filter(id=album.id).exists())
         self.assertTrue(Artist.objects.filter(id=artist.id).exists())
+
+    def _music_track(self, media_id, user, artist=None, album=None):
+        """Create one tracked Music row backed by its own Item."""
+        item = Item.objects.create(
+            media_id=media_id,
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.MUSIC.value,
+            title=f"Track {media_id}",
+        )
+        return Music.objects.create(
+            item=item,
+            user=user,
+            status=Status.COMPLETED.value,
+            artist=artist,
+            album=album,
+        )
+
+    def test_delete_music_removes_artist_and_album_trackers(self):
+        """A music wipe clears the artist/album rows the library page lists."""
+        artist = Artist.objects.create(name="Imported Artist")
+        album = Album.objects.create(title="Imported Album", artist=artist)
+        artist_tracker = ArtistTracker.objects.create(user=self.user, artist=artist)
+        album_tracker = AlbumTracker.objects.create(user=self.user, album=album)
+        preference = MusicReleasePreference.objects.create(
+            user=self.user,
+            album=album,
+            release_id="00000000-0000-0000-0000-000000000001",
+        )
+        music = self._music_track("wiped-track", self.user, artist, album)
+
+        response = self.client.post(
+            reverse("bulk_delete_by_media_type"),
+            {"media_type": MediaTypes.MUSIC.value},
+        )
+
+        self.assertRedirects(response, reverse("advanced"))
+        self.assertFalse(Music.objects.filter(id=music.id).exists())
+        self.assertFalse(ArtistTracker.objects.filter(id=artist_tracker.id).exists())
+        self.assertFalse(AlbumTracker.objects.filter(id=album_tracker.id).exists())
+        self.assertFalse(
+            MusicReleasePreference.objects.filter(id=preference.id).exists(),
+        )
+
+        message = str(next(iter(get_messages(response.wsgi_request))))
+        self.assertIn("Permanently deleted 3 Music item(s)", message)
+        self.assertIn("1 track, 1 album, 1 artist", message)
+
+    def test_delete_music_with_only_trackers_reports_success(self):
+        """Trackers with no Music rows left still count as something to delete.
+
+        Regression test for #579: the user's Music rows were already gone, so
+        the view counted zero and said "Nothing to delete for that media type."
+        while every artist and album stayed on /medialist/music.
+        """
+        artist = Artist.objects.create(name="Stranded Artist")
+        album = Album.objects.create(title="Stranded Album", artist=artist)
+        ArtistTracker.objects.create(user=self.user, artist=artist)
+        AlbumTracker.objects.create(user=self.user, album=album)
+
+        response = self.client.post(
+            reverse("bulk_delete_by_media_type"),
+            {"media_type": MediaTypes.MUSIC.value},
+        )
+
+        self.assertRedirects(response, reverse("advanced"))
+        message = str(next(iter(get_messages(response.wsgi_request))))
+        self.assertNotIn("Nothing to delete", message)
+        self.assertIn("Permanently deleted 2 Music item(s)", message)
+        self.assertFalse(ArtistTracker.objects.filter(user=self.user).exists())
+        self.assertFalse(AlbumTracker.objects.filter(user=self.user).exists())
+
+    def test_delete_music_leaves_other_users_trackers_alone(self):
+        """Another user following the same artist/album keeps their library."""
+        artist = Artist.objects.create(name="Shared Artist")
+        album = Album.objects.create(title="Shared Album", artist=artist)
+        ArtistTracker.objects.create(user=self.user, artist=artist)
+        AlbumTracker.objects.create(user=self.user, album=album)
+        other_artist_tracker = ArtistTracker.objects.create(
+            user=self.other_user,
+            artist=artist,
+        )
+        other_album_tracker = AlbumTracker.objects.create(
+            user=self.other_user,
+            album=album,
+        )
+
+        response = self.client.post(
+            reverse("bulk_delete_by_media_type"),
+            {"media_type": MediaTypes.MUSIC.value},
+        )
+
+        self.assertRedirects(response, reverse("advanced"))
+        self.assertFalse(ArtistTracker.objects.filter(user=self.user).exists())
+        self.assertTrue(
+            ArtistTracker.objects.filter(id=other_artist_tracker.id).exists(),
+        )
+        self.assertTrue(
+            AlbumTracker.objects.filter(id=other_album_tracker.id).exists(),
+        )
+
+    def test_delete_music_metadata_flag_cleans_catalog_behind_own_tracker(self):
+        """The requesting user's own tracker no longer blocks catalog cleanup.
+
+        Previously _delete_orphaned_music_catalog skipped any Artist/Album with
+        a tracker, and the deleting user's own tracker was never removed -- so
+        the catalog could never be cleaned up for a single-user instance.
+        """
+        artist = Artist.objects.create(name="Only Mine")
+        album = Album.objects.create(title="Only Mine Album", artist=artist)
+        ArtistTracker.objects.create(user=self.user, artist=artist)
+        AlbumTracker.objects.create(user=self.user, album=album)
+        music = self._music_track("own-track", self.user, artist, album)
+
+        response = self.client.post(
+            reverse("bulk_delete_by_media_type"),
+            {"media_type": MediaTypes.MUSIC.value, "delete_metadata": "true"},
+        )
+
+        self.assertRedirects(response, reverse("advanced"))
+        self.assertFalse(Item.objects.filter(id=music.item_id).exists())
+        self.assertFalse(Album.objects.filter(id=album.id).exists())
+        self.assertFalse(Artist.objects.filter(id=artist.id).exists())
+
+    def test_delete_music_metadata_flag_cleans_catalog_with_no_music_rows(self):
+        """Orphan cleanup runs even when only tracker rows were deleted.
+
+        The metadata checkbox promises to remove artists/albums with no
+        remaining tracked entries. When the user has stranded trackers and no
+        Music rows at all, there are no candidate Item ids, and the cleanup
+        used to be skipped entirely -- leaving exactly the orphans the option
+        said it would remove. That is the #579 library state.
+        """
+        artist = Artist.objects.create(name="Stranded Only")
+        album = Album.objects.create(title="Stranded Only Album", artist=artist)
+        ArtistTracker.objects.create(user=self.user, artist=artist)
+        AlbumTracker.objects.create(user=self.user, album=album)
+
+        response = self.client.post(
+            reverse("bulk_delete_by_media_type"),
+            {"media_type": MediaTypes.MUSIC.value, "delete_metadata": "true"},
+        )
+
+        self.assertRedirects(response, reverse("advanced"))
+        self.assertFalse(Album.objects.filter(id=album.id).exists())
+        self.assertFalse(Artist.objects.filter(id=artist.id).exists())
 
     def test_cache_clear_views_require_post(self):
         """GET requests to any clear-cache endpoint must be rejected."""

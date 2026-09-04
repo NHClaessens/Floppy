@@ -82,6 +82,7 @@ HOME_ROW_FRAGMENT_MAX_QUERIES = 122  # +2 from the Tags column Prefetch (#457)
 CUSTOM_LIST_DETAIL_MAX_QUERIES = 33  # +3 from prefilled release-year metadata
 SEASON_PAGE_FIRST_VIEW_EPISODE_COUNT = 18
 SEASON_PAGE_FIRST_VIEW_MAX_QUERIES = 46  # +1 from the per-item metadata language override lookup (#1009)
+SESSION_HISTORY_MODAL_MAX_QUERIES = 60
 
 
 def seed_tv_library(
@@ -490,6 +491,15 @@ class QueryCountTests(TestCase):
             reverse("list_detail", args=[self.custom_list.public_reference]),
             CUSTOM_LIST_DETAIL_MAX_QUERIES,
             "custom list detail",
+        )
+
+    def test_session_history_modal_query_budget(self):
+        """Session history stays within budget on a cold cache."""
+        self._assert_query_budget(
+            f"{reverse('activity_sessions_modal')}?media_type=tv&media_id=qc_show_0"
+            "&source=tmdb&season_number=1",
+            SESSION_HISTORY_MODAL_MAX_QUERIES,
+            "session history modal",
         )
 
     @patch("app.providers.trakt.is_configured", return_value=False)

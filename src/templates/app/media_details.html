@@ -88,6 +88,24 @@
 
   {% endif %}
 
+  {% if music_detail_kind != "album" %}
+    <div x-data="{ sessionHistoryOpen: false }"
+         @open-session-history.window="sessionHistoryOpen = true; $nextTick(() => $el.querySelector('[data-session-history-close]')?.focus())"
+         @keydown.escape.window="if (!$event.target.closest('[data-session-history-track-modal]')) sessionHistoryOpen = false">
+      <div x-show="sessionHistoryOpen"
+           x-cloak
+           class="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-3 md:p-6"
+           role="dialog"
+           aria-modal="true"
+           aria-label="Activity history"
+           @click.self="sessionHistoryOpen = false">
+        <div id="session-history-modal-host"
+             class="flex max-h-full w-full items-center justify-center"
+             @click.stop></div>
+      </div>
+    </div>
+  {% endif %}
+
   <script>
     (function() {
       // Reload when Safari's back/forward cache restores the page

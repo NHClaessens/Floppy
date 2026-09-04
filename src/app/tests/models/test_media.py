@@ -1,8 +1,7 @@
-from pathlib import Path
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, tag
+from django.test import TestCase
 from django.utils import timezone
 
 from app.models import (
@@ -16,10 +15,12 @@ from app.models import (
 )
 from app.services.completion import select_preferred_activity_entry
 
-mock_path = Path(__file__).resolve().parent.parent / "mock_data"
+# Cowboy Bebop's episode count. Mocked rather than fetched: these cases cover
+# the model's save logic, not the provider, and a live call would keep them out
+# of the offline suite (and out of CI, which excludes the network tag).
+COWBOY_BEBOP_EPISODES = 26
 
 
-@tag("network")
 class MediaModel(TestCase):
     """Test the custom save of the Media model."""
 
@@ -27,6 +28,16 @@ class MediaModel(TestCase):
         """Create a user."""
         self.credentials = {"username": "test", "password": "12345"}
         self.user = get_user_model().objects.create_user(**self.credentials)
+
+        self.fetch_releases = patch("app.models.Item.fetch_releases")
+        self.fetch_releases.start()
+        self.metadata = patch(
+            "app.providers.services.get_media_metadata",
+            return_value={"max_progress": COWBOY_BEBOP_EPISODES},
+        )
+        self.metadata.start()
+        self.addCleanup(self.fetch_releases.stop)
+        self.addCleanup(self.metadata.stop)
 
         item_anime = Item.objects.create(
             media_id="1",
@@ -48,7 +59,7 @@ class MediaModel(TestCase):
         self.anime.save()
         self.assertEqual(
             Anime.objects.get(item__media_id="1", user=self.user).progress,
-            26,
+            COWBOY_BEBOP_EPISODES,
         )
 
     def test_progress_is_max(self):
@@ -57,7 +68,7 @@ class MediaModel(TestCase):
         Status should be completed and end_date the current date if not specified.
         """
         self.anime.status = Status.IN_PROGRESS.value
-        self.anime.progress = 26
+        self.anime.progress = COWBOY_BEBOP_EPISODES
         self.anime.save()
 
         self.assertEqual(
@@ -71,11 +82,11 @@ class MediaModel(TestCase):
     def test_progress_bigger_than_max(self):
         """When progress is bigger than max, it should be set to max."""
         self.anime.status = Status.IN_PROGRESS.value
-        self.anime.progress = 30
+        self.anime.progress = COWBOY_BEBOP_EPISODES + 4
         self.anime.save()
         self.assertEqual(
             Anime.objects.get(item__media_id="1", user=self.user).progress,
-            26,
+            COWBOY_BEBOP_EPISODES,
         )
 
 

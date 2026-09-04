@@ -487,18 +487,17 @@ def get_saved_suggestions(user, media_type, query, limit=8):
     )
     local_media = list(local_queryset)
 
-    anime_mode = getattr(user, "anime_library_mode", MediaTypes.ANIME.value)
-    if media_type == MediaTypes.TV.value and anime_mode == MediaTypes.ANIME.value:
+    include_anime_in_anime, include_anime_in_tv = (
+        metadata_resolution.anime_library_visibility(user)
+    )
+    if media_type == MediaTypes.TV.value and not include_anime_in_tv:
         local_media = [
             media
             for media in local_media
             if getattr(getattr(media, "item", None), "library_media_type", None)
             != MediaTypes.ANIME.value
         ]
-    elif media_type == MediaTypes.ANIME.value and anime_mode in {
-        MediaTypes.ANIME.value,
-        "both",
-    }:
+    elif media_type == MediaTypes.ANIME.value and include_anime_in_anime:
         grouped = [
             media
             for media in BasicMedia.objects.get_media_list(

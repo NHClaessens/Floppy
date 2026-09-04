@@ -48,6 +48,7 @@ from app.models import (
 from app.providers import tmdb
 from app.release_years import prefill_display_release_years
 from app.search_views import _mark_grouped_anime_route
+from app.services import metadata_resolution
 from app.templatetags import app_tags
 from app.tv_sort import _sort_tv_media_by_time_left
 from users.models import (
@@ -1280,14 +1281,10 @@ def media_list(request, media_type):
         "anime_library_mode",
         MediaTypes.ANIME.value,
     )
-    include_grouped_anime_in_anime = anime_library_mode in {
-        MediaTypes.ANIME.value,
-        "both",
-    }
-    include_grouped_anime_in_tv = anime_library_mode in {
-        MediaTypes.TV.value,
-        "both",
-    }
+    (
+        include_grouped_anime_in_anime,
+        include_grouped_anime_in_tv,
+    ) = metadata_resolution.anime_library_visibility(request.user)
     cache_variant = (
         anime_library_mode
         if media_type in {MediaTypes.ANIME.value, MediaTypes.TV.value}

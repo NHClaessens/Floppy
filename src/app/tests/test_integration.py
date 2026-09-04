@@ -517,24 +517,164 @@ class IntegrationTest(StaticLiveServerTestCase):
         self.page.get_by_role("button", name="More tracking actions").click()
         self.page.get_by_role("button", name="Add new entry").click()
         expect(create_modal).to_be_visible()
-        self.page.set_viewport_size({"width": 375, "height": 812})
 
         end_date_input = create_modal.locator('input[name="end_date"]')
-        end_time_segment = "14:25"
         start_date_input = create_modal.locator('input[name="start_date"]')
-
-        create_modal.get_by_role("button", name="End date picker").click()
-        end_date_picker = create_modal.get_by_role(
-            "dialog",
-            name="End date picker",
+        clear_buttons = create_modal.get_by_role("button", name="Clear date")
+        clear_buttons.first.click()
+        end_quick_actions = create_modal.get_by_role(
+            "group", name="End date quick actions"
         )
+        start_quick_actions = create_modal.get_by_role(
+            "group", name="Start date quick actions"
+        )
+        expect(end_quick_actions).to_be_visible()
+        expect(start_quick_actions).to_be_visible()
+        expect(create_modal.get_by_text("Select date", exact=True)).to_have_count(0)
+        expect(
+            end_quick_actions.get_by_role("button", name="Start Now", exact=True)
+        ).to_be_visible()
+        expect(
+            end_quick_actions.get_by_role("button", name="Just Finished", exact=True)
+        ).to_be_visible()
+        expect(
+            end_quick_actions.get_by_role("button", name="Release Date", exact=True)
+        ).to_be_visible()
+        end_picker_dialog = create_modal.get_by_role(
+            "dialog", name="End date picker"
+        )
+        expect(end_picker_dialog).not_to_be_visible()
+
+        before_start_action = self.page.evaluate("Date.now()")
+        start_quick_actions.get_by_role(
+            "button", name="Start Now", exact=True
+        ).click()
+        after_start_action = self.page.evaluate("Date.now()")
+        start_value_ms = self.page.evaluate(
+            "value => new Date(value).getTime()",
+            start_date_input.input_value(),
+        )
+        end_value_ms = self.page.evaluate(
+            "value => new Date(value).getTime()",
+            end_date_input.input_value(),
+        )
+        self.assertGreaterEqual(start_value_ms, before_start_action - 1000)
+        self.assertLessEqual(start_value_ms, after_start_action + 1000)
+        self.assertGreaterEqual(
+            end_value_ms,
+            before_start_action + 95 * 60 * 1000 - 1000,
+        )
+        self.assertLessEqual(
+            end_value_ms,
+            after_start_action + 95 * 60 * 1000 + 1000,
+        )
+        expect(end_picker_dialog).not_to_be_visible()
+        expect(start_quick_actions).not_to_be_visible()
+        expect(end_quick_actions).not_to_be_visible()
+        expect(create_modal.locator('select[name="status"]')).to_have_value(
+            Status.IN_PROGRESS.value
+        )
+
+        create_modal.locator(".date-picker-closed-field").first.get_by_role(
+            "button", name="Clear date"
+        ).click()
+        create_modal.locator(".date-picker-closed-field").nth(1).get_by_role(
+            "button", name="Clear date"
+        ).click()
+        expect(start_quick_actions).to_be_visible()
+        expect(end_quick_actions).to_be_visible()
+
+        before_start_now = self.page.evaluate("Date.now()")
+        end_quick_actions.get_by_role("button", name="Start Now", exact=True).click()
+        after_start_now = self.page.evaluate("Date.now()")
+        expect(end_picker_dialog).not_to_be_visible()
+        expect(end_quick_actions).not_to_be_visible()
+        end_value_ms = self.page.evaluate(
+            "value => new Date(value).getTime()",
+            end_date_input.input_value(),
+        )
+        self.assertGreaterEqual(
+            end_value_ms,
+            before_start_now + 95 * 60 * 1000 - 1000,
+        )
+        self.assertLessEqual(
+            end_value_ms,
+            after_start_now + 95 * 60 * 1000 + 1000,
+        )
+        expect(create_modal.locator('select[name="status"]')).to_have_value(
+            Status.IN_PROGRESS.value
+        )
+
+        create_modal.locator(".date-picker-closed-field").first.get_by_role(
+            "button", name="Clear date"
+        ).click()
+        create_modal.locator(".date-picker-closed-field").nth(1).get_by_role(
+            "button", name="Clear date"
+        ).click()
+        expect(start_quick_actions).to_be_visible()
+        expect(end_quick_actions).to_be_visible()
+        start_quick_actions.get_by_role(
+            "button", name="Release Date", exact=True
+        ).click()
+        expect(end_picker_dialog).not_to_be_visible()
+        expect(create_modal.locator('select[name="status"]')).to_have_value(
+            Status.COMPLETED.value
+        )
+        self.assertTrue(start_date_input.input_value().startswith("2019-11-08T"))
+        expect(start_quick_actions).not_to_be_visible()
+
+        create_modal.locator(".date-picker-closed-field").first.get_by_role(
+            "button", name="Clear date"
+        ).click()
+        expect(start_quick_actions).to_be_visible()
+        start_quick_actions.get_by_role(
+            "button", name="Just Finished", exact=True
+        ).click()
+        expect(start_quick_actions).not_to_be_visible()
+        just_finished_start_ms = self.page.evaluate(
+            "value => new Date(value).getTime()",
+            start_date_input.input_value(),
+        )
+        just_finished_end_ms = self.page.evaluate(
+            "value => new Date(value).getTime()",
+            end_date_input.input_value(),
+        )
+        just_finished_now = self.page.evaluate("Date.now()")
+        self.assertGreaterEqual(
+            just_finished_start_ms,
+            just_finished_now - 95 * 60 * 1000 - 1000,
+        )
+        self.assertLessEqual(
+            just_finished_start_ms,
+            just_finished_now - 95 * 60 * 1000 + 1000,
+        )
+        self.assertGreaterEqual(just_finished_end_ms, just_finished_now - 1000)
+        self.assertLessEqual(just_finished_end_ms, just_finished_now + 1000)
+        create_modal.locator(".date-picker-closed-field").first.get_by_role(
+            "button", name="Clear date"
+        ).click()
+        create_modal.locator(".date-picker-closed-field").nth(1).get_by_role(
+            "button", name="Clear date"
+        ).click()
+
+        self.page.set_viewport_size({"width": 375, "height": 812})
+        expect(end_quick_actions).to_be_visible()
+        expect(
+            end_quick_actions.get_by_role("button", name="Release Date", exact=True)
+        ).to_be_visible()
+
+        end_time_segment = "14:25"
+
+        create_modal.get_by_role("button", name="Open End date picker").click()
+        end_date_picker = create_modal.get_by_role("dialog", name="End date picker")
         expect(
             end_date_picker.get_by_role("button", name="None", exact=True),
         ).to_be_visible()
         time_selects = end_date_picker.locator("select")
         time_selects.nth(0).select_option("14")
         time_selects.nth(1).select_option("25")
-        create_modal.get_by_role("button", name="Release date").click()
+        time_selects.nth(2).select_option("0")
+        end_date_picker.get_by_role("button", name="Release Date", exact=True).click()
         expect(end_date_input).to_have_value(f"2019-11-08T{end_time_segment}")
         end_hour, end_minute = [int(segment) for segment in end_time_segment.split(":")]
         expected_start_date = (
@@ -546,11 +686,8 @@ class IntegrationTest(StaticLiveServerTestCase):
         end_date_picker.get_by_role("button", name="None", exact=True).click()
         expect(end_date_input).to_have_value("")
 
-        create_modal.get_by_role("button", name="Start date picker").click()
-        start_date_picker = create_modal.get_by_role(
-            "dialog",
-            name="Start date picker",
-        )
+        create_modal.get_by_role("button", name="Open Start date picker").click()
+        start_date_picker = create_modal.get_by_role("dialog", name="Start date picker")
         start_date_picker.get_by_role("button", name="None", exact=True).click()
         expect(start_date_input).to_have_value("")
 
@@ -571,6 +708,127 @@ class IntegrationTest(StaticLiveServerTestCase):
         expect(edit_modal).to_be_visible()
         edit_modal.locator("button[type='button']").first.click()
         expect(self.page.locator("[data-track-modal-root]:visible")).to_have_count(0)
+
+    @patch("app.providers.services.get_media_metadata")
+    def test_session_history_calendar_and_shared_date_picker_navigation(
+        self,
+        mock_get_metadata,
+    ):
+        """Both calendars expose the shared navigation and activity-day behavior."""
+        mock_get_metadata.return_value = {
+            "media_id": "238",
+            "title": "Test Movie",
+            "media_type": MediaTypes.MOVIE.value,
+            "source": Sources.TMDB.value,
+            "image": "http://example.com/image.jpg",
+            "max_progress": 1,
+            "details": {"release_date": "2019-11-08"},
+            "related": {},
+        }
+        item = Item.objects.create(
+            media_id="238",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Test Movie",
+            image="http://example.com/image.jpg",
+            runtime_minutes=95,
+        )
+        for end_date in (
+            datetime(2026, 3, 1, 14, 0, tzinfo=UTC),
+            datetime(2026, 3, 12, 14, 0, tzinfo=UTC),
+            datetime(2026, 2, 28, 14, 0, tzinfo=UTC),
+        ):
+            Movie.objects.create(
+                item=item,
+                user=self.user,
+                status=Status.COMPLETED.value,
+                progress=1,
+                end_date=end_date,
+            )
+
+        # The detail page defers part of itself to a "fragment=secondary" htmx
+        # load. Opening the session-history modal while that request is still in
+        # flight lets the swap land on top of the modal and re-initialize its
+        # calendar, leaving the activity markers empty. Wait for the fragment
+        # first, the same way the episode test above does.
+        with self.page.expect_response(
+            lambda response: "fragment=secondary" in response.url,
+        ):
+            self.page.goto(
+                self.live_server_url
+                + reverse(
+                    "media_details",
+                    kwargs={
+                        "source": Sources.TMDB.value,
+                        "media_type": MediaTypes.MOVIE.value,
+                        "media_id": "238",
+                        "title": "test-movie",
+                    },
+                ),
+            )
+        expect(self.page.get_by_role("main")).to_contain_text("Test Movie")
+
+        self.page.get_by_role("button", name="View session history").first.click()
+        session_modal = self.page.locator(
+            '[role="dialog"][aria-label="Activity history"]:visible',
+        )
+        expect(session_modal).to_be_visible()
+        expect(session_modal).to_contain_text("Active days")
+
+        calendar = session_modal.locator("[data-calendar-component]")
+        expect(calendar.locator("[data-calendar-cell]")).to_have_count(42)
+        expect(calendar.locator('[data-calendar-cell="2026-03-01"]')).to_have_count(1)
+        expect(calendar.locator('[data-calendar-cell="2026-03-05"]')).to_have_count(1)
+        expect(calendar.locator('[data-calendar-cell="2026-03-01"]')).not_to_be_disabled()
+        expect(calendar.locator('[data-calendar-cell="2026-03-05"]')).to_be_disabled()
+        expect(calendar.locator("span.absolute.bottom-1")).to_have_count(3)
+
+        active_day = calendar.locator('[data-calendar-cell="2026-03-01"]')
+        active_day.click()
+        self.assertIn(
+            "bg-[var(--color-accent)]",
+            active_day.get_attribute("class") or "",
+        )
+        adjacent_active_day = calendar.locator('[data-calendar-cell="2026-02-28"]')
+        expect(adjacent_active_day).not_to_be_disabled()
+        adjacent_active_day.click()
+        self.assertIn(
+            "bg-[var(--color-accent)]",
+            adjacent_active_day.get_attribute("class") or "",
+        )
+
+        calendar.get_by_role("button", name="Select month").click()
+        calendar.get_by_role("button", name="Select year").click()
+        year_input = calendar.get_by_role("textbox", name="Year")
+        year_input.fill("2024")
+        year_input.press("Enter")
+        calendar.get_by_role("button", name="Mar", exact=True).click()
+        expect(calendar.get_by_role("button", name="Select month")).to_contain_text(
+            "March 2024",
+        )
+        session_modal.get_by_role(
+            "button", name="Close activity history",
+        ).click()
+
+        self.page.get_by_role("button", name="More tracking actions").click()
+        self.page.get_by_role("button", name="Add new entry").click()
+        track_modal = self.page.locator("[data-track-modal-root]:visible").first
+        track_modal.get_by_role("button", name="End date picker").click()
+        date_picker = track_modal.get_by_role("dialog", name="End date picker")
+        date_picker.get_by_role("button", name="Select month").click()
+        date_picker.get_by_role("button", name="Select year").click()
+        date_picker.get_by_role("textbox", name="Year").fill("2024")
+        date_picker.get_by_role("textbox", name="Year").press("Enter")
+        date_picker.get_by_role("button", name="Mar", exact=True).click()
+        expect(
+            date_picker.get_by_role("button", name="Select month"),
+        ).to_contain_text("March 2024")
+        date_picker.locator('[data-calendar-cell="2024-02-29"]').click()
+        self.assertTrue(
+            track_modal.locator('input[name="end_date"]').input_value().startswith(
+                "2024-02-29T",
+            ),
+        )
 
     @patch("app.models.Item.fetch_releases")
     @patch("app.views._should_queue_game_lengths_refresh", return_value=False)

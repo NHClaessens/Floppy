@@ -496,6 +496,9 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                     "item": _serialize_item(podcast.item),
                     "show": _serialize_show(show),
                     "show_podcast_uuid": show_podcast_uuid,
+                    "website_url": podcast.episode.website_url
+                    if podcast.episode
+                    else "",
                     "show_slug": show_slug,
                     "poster": poster,
                     "title": podcast.item.title,

@@ -280,6 +280,7 @@ def media_details(
         Sources.AUDIOBOOKSHELF.value,
     }:
         from app.models import PodcastEpisode, PodcastShow, PodcastShowTracker
+        from app.providers.services import _podcast_external_links
 
         # Check if this is a show (podcast_uuid) or an episode (episode_uuid)
         show = PodcastShow.objects.filter(podcast_uuid=media_id).first()
@@ -330,83 +331,17 @@ def media_details(
                 else None
             )
 
-            # If show has RSS feed, check if we need to fetch more episodes
-            # This ensures we get the full episode list even if initial enrichment only got partial list
+            # Reconcile the catalog against the feed: pick up episodes
+            # published since the last visit, and backfill website_url on the
+            # ones already stored, which is the only path that repairs rows
+            # created before podcast website links existed (issue #1014).
             if show.rss_feed_url and not public_view:
-                try:
-                    import hashlib
+                from app.fork_services_podcast import refresh_show_from_rss
 
-                    from integrations import podcast_rss
-
-                    # Fetch all episodes from RSS to see what's available
-                    episodes_data = podcast_rss.fetch_episodes_from_rss(
-                        show.rss_feed_url, limit=None
-                    )
-
-                    # Get existing episode UUIDs
-                    existing_uuids = set(
-                        PodcastEpisode.objects.filter(show=show).values_list(
-                            "episode_uuid", flat=True
-                        ),
-                    )
-
-                    # Create any missing episodes
-                    new_episodes_count = 0
-                    for episode_data in episodes_data:
-                        episode_uuid = episode_data.get("guid")
-                        if not episode_uuid:
-                            uuid_str = f"{episode_data.get('title', '')}{episode_data.get('published', '')}"
-                            episode_uuid = hashlib.md5(
-                                uuid_str.encode(), usedforsecurity=False
-                            ).hexdigest()[:36]
-
-                        if episode_uuid in existing_uuids:
-                            continue
-
-                        # Check for a match within this show by title + date
-                        episode = None
-                        if episode_data.get("title") and episode_data.get("published"):
-                            episode = PodcastEpisode.objects.filter(
-                                show=show,
-                                title__iexact=episode_data["title"].strip(),
-                                published__date=episode_data["published"].date(),
-                            ).first()
-
-                        if not episode:
-                            try:
-                                PodcastEpisode.objects.create(
-                                    show=show,
-                                    episode_uuid=episode_uuid,
-                                    title=episode_data.get("title", "Unknown Episode"),
-                                    published=episode_data.get("published"),
-                                    duration=episode_data.get("duration"),
-                                    audio_url=episode_data.get("audio_url", ""),
-                                    website_url=episode_data.get("website_url", ""),
-                                    episode_number=episode_data.get("episode_number"),
-                                    season_number=episode_data.get("season_number"),
-                                )
-                                new_episodes_count += 1
-                                existing_uuids.add(episode_uuid)
-                            except Exception:
-                                logger.debug(
-                                    "Skipping duplicate episode UUID %s for show %s",
-                                    episode_uuid,
-                                    show.title,
-                                )
-
-                    if new_episodes_count > 0:
-                        logger.info(
-                            "Fetched %d additional episodes for show %s (ID: %d)",
-                            new_episodes_count,
-                            show.title,
-                            show.id,
-                        )
-                except Exception as e:
-                    logger.warning(
-                        "Failed to refresh episode list from RSS feed for show %s: %s",
-                        show.title,
-                        exception_summary(e),
-                    )
+                _best_effort_detail_followup(
+                    lambda: refresh_show_from_rss(show),
+                    operation_name="podcast_show_rss_refresh",
+                )
 
             # Get all episodes for this show, ordered by published date (newest first)
             # Use Coalesce to handle None published dates (put them at the end)
@@ -706,6 +641,7 @@ def media_details(
                         "air_date": episode_obj.published,
                         "runtime": duration_str,
                         "overview": "",  # Podcast episodes don't have descriptions from API
+                        "website_url": episode_obj.website_url,
                         "history": episode_history,
                         "media": episode_media,
                         "item": episode_item,
@@ -732,7 +668,9 @@ def media_details(
                 "details": {
                     "author": show.author,
                     "language": show.language,
+                    "website_url": show.website_url,
                 },
+                "external_links": _podcast_external_links(show),
                 "episodes": episode_list,  # Use episodes key like TV seasons
             }
             media_metadata.setdefault("source_url", None)
@@ -806,6 +744,14 @@ def media_details(
                 "has_more": has_more,  # For fragment compatibility
                 "next_page": next_page,
                 "show_id": show.id,  # For API endpoint
+                # The show's website belongs in the same links popover every
+                # other detail page uses, rather than a podcast-only widget.
+                "detail_link_sections": _build_detail_link_sections(
+                    media_metadata,
+                    media_type,
+                    source,
+                    source,
+                ),
             }
             return render(request, "app/media_details.html", context)
 

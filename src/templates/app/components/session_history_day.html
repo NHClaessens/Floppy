@@ -1,0 +1,23 @@
+{% load app_tags %}
+
+<div id="session-history-day-{{ day.day_key|default:'unknown' }}"
+     class="history-day space-y-4">
+  <div class="sticky top-0 z-10 flex items-center justify-between gap-4 border-b border-[var(--color-border)] bg-[var(--color-page-bg)] pb-3 pt-2"
+       data-day-date="{% if day.date %}{{ day.date|date:'Y-m-d' }}{% endif %}">
+    <div class="history-date-row">
+      <span class="text-xl font-semibold text-[var(--color-text)]">{{ day.weekday }}</span>
+      <span class="text-xl text-[var(--color-text)]">{{ day.date_display }}</span>
+    </div>
+    <div class="text-right">
+      <p class="text-sm text-[var(--color-text-muted)]">
+        {{ day.entry_count }} item{{ day.entry_count|pluralize }} &middot; {{ day.total_runtime_display }}
+      </p>
+    </div>
+  </div>
+
+  <div class="divide-y divide-[var(--color-border)] overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+    {% for entry in day.entries %}
+      {% include "app/components/session_history_row.html" with entry=entry user=user request=request only %}
+    {% endfor %}
+  </div>
+</div>

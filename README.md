@@ -92,11 +92,11 @@ Floppy combines the jobs people often split between a watchlist, a media diary, 
 
 - **Richer metadata and title control**: localized and original titles switchable per user preference; critic ratings and popularity scores displayed; game-length data; manual metadata overrides; metadata-provider preference; image refresh flows.
 - **People, studios, and credit browsing**: actor, director, author, and studio pages with filmographies and top works; person credits visible from detail pages rather than hidden as tooltip data; author pages with top-read breakdowns.
-- **Careful anime handling**: proper separation of anime and TV library concerns so mixed libraries stay organized; anime-specific season and episode navigation; grouped-anime routing for franchise-spanning series.
+- **Careful anime handling**: scrobbled anime lands in the Anime library every time and never leaks into TV Shows; the storage shape follows your chosen Anime Provider, so TMDB/TVDB gives anime the same season and episode tree as TV Shows while MyAnimeList remains available; grouped-anime routing for franchise-spanning series.
 - **Richer episode and book workflows**: episode detail pages with individual scoring; bulk episode save; drop an episode without logging it to history; book-specific: barcode and ISBN scanning from a photo, percentage-based reading progress, top-authors stats, and more resilient import flows.
 - **Configurable home screen**: choose what rows appear and in what order; rows from library queries, custom lists, smart lists, or recently played but not rated; direction and media-type filters stored per user.
 - **Configurable table columns**: choose and reorder visible columns per view, with media tables and list-detail tables configured independently; available columns include critic rating, episodes left, time left, time to beat, runtime, time watched, last watched, next air date, date added, popularity, and more.
-- **Scheduled backups and export management**: recurring export scheduling with media-type and list inclusion options; export history and backup destination visible in settings.
+- **Scheduled data exports and database snapshots**: recurring CSV export scheduling with media-type and list inclusion options and export history visible in settings, plus an independent nightly raw database snapshot for disaster recovery.
 - **Account security**: TOTP authenticator setup and management; recovery codes; password recovery via authenticator or recovery code; session duration as a per-user preference.
 
 ### Day-to-day polish
@@ -157,7 +157,7 @@ Collections add ownership context alongside tracking, with room for copy-level d
 
 Floppy started as a fork of [Yamtrack](https://github.com/FuzzyGrim/Yamtrack) and has diverged substantially since — the rename exists so the two projects stop being confused for each other. The upgrade path is intentionally boring:
 
-- **Your data moves over as-is.** Export a CSV from Yamtrack and import it under **Settings → Import**; the formats are identical. Floppy's own backups export as `floppy_<date>.csv` and use the same format, so nothing is one-way.
+- **Your data moves over as-is.** Export a CSV from Yamtrack and import it under **Settings → Import**; the formats are identical. Floppy's own data export writes `floppy_<date>.csv` and uses the same format, so nothing is one-way.
 - **Your existing container keeps working.** If you already run this project's image, the rename doesn't break your compose file: the old `/yamtrack/db` mount path still resolves inside the image, and pre-rename `YAMTRACK_*` environment variables are still read.
 - **One thing to update:** the image moved to `ghcr.io/dannyvfilms/floppy`. Point your compose file at the new path when convenient — the old path stops receiving new builds.
 
@@ -226,6 +226,19 @@ services:
 ```
 
 The default `docker-compose.yml` in this repo already includes this mount.
+
+`BACKUP_DIR` holds two different things, and only one of them can replace a
+damaged `db.sqlite3`:
+
+- `BACKUP_DIR/<username>/floppy_<date>.csv` &mdash; scheduled CSV data
+  exports from Settings → Export. These restore media, ratings, and lists via
+  **Settings → Import**, but only into an already-working install; they do
+  not restore accounts, integration credentials, or preferences, and they
+  cannot replace the database file itself.
+- `BACKUP_DIR/database/` &mdash; a verified raw snapshot of `db.sqlite3`,
+  written on a schedule (`DB_SNAPSHOT_ENABLED`, default on). This is what to
+  restore from after physical corruption: stop Floppy, copy the newest file
+  here over `db.sqlite3`, and start Floppy again.
 
 This example stores the SQLite file and the generated key in one mounted
 directory:
@@ -419,7 +432,7 @@ The only universally required variable is `SECRET`. For Docker installs you shou
 - `CELERY_RESULT_BACKEND` - Redis service for Celery results. The default is `REDIS_URL`
 - `REDIS_ADMIN_URL` - Redis service that Floppy can tune with `CONFIG`. The default is `REDIS_CACHE_URL`, then `REDIS_URL`
 - `DEBUG` - leave unset or `False` in production; enabling it slows every request (debug toolbar, no template caching) and is only meant for troubleshooting
-- Grouped anime and Stremio routing - see the [grouped anime/Stremio guide](docs/grouped_anime_stremio.md)
+- Anime routing across scrobblers and importers - see the [grouped anime guide](docs/grouped_anime.md)
 - `REGISTRATION` - set to `True` to allow new signups (needed for your first account), then set to `False` afterward
 - `DEMO_ACCOUNT_ENABLED` - defaults to `True`, provisioning the built-in `demo` / `demodemo` account after migrations. The examples above set it to `False`; only turn it on if you want a shared demo login
 - `ALLOWED_HOSTS` / `PUID` / `PGID` - `ALLOWED_HOSTS` is a comma-separated list of hostnames/IPs Django will accept requests for; `PUID` / `PGID` set the file-ownership user/group inside the container (match your host user, e.g. Unraid's `99`/`100`, if you hit permission errors)
@@ -622,6 +635,14 @@ upgrades matter.
 - Do not assume `DATABASE_URL` enables PostgreSQL. Floppy uses Postgres only when `DB_HOST` is set.
 
 ### SQLite startup recovery
+
+This section covers a broken *relationship* between rows, which Floppy can
+often repair automatically. Physical corruption of the file itself is a
+different failure: the startup log and recovery page say "Floppy cannot read
+the database file," and the fix is to restore a copy of the file, not repair
+rows. `sqlite-recovery/` below does not help there, because it is only ever
+written while repairing a relationship; use `BACKUP_DIR/database/` instead
+(see the SQLite data paths section above).
 
 Floppy checks SQLite storage and relationships before it runs migrations.
 If the check finds an album artist credit whose album or artist no longer

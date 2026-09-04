@@ -83,12 +83,7 @@ def get_username(token):
 
 def importer(token, user, mode, anime_destination=MediaTypes.ANIME.value):
     """Import tv shows, movies and anime from SIMKL."""
-    simkl_importer = SimklImporter(
-        token,
-        user,
-        mode,
-        anime_destination=anime_destination,
-    )
+    simkl_importer = SimklImporter(token, user, mode)
     return simkl_importer.import_data()
 
 
@@ -104,14 +99,16 @@ class SimklImporter:
             token (str): Simkl OAuth token
             user: Django user object to import data for
             mode (str): Import mode ("new" or "overwrite")
-            anime_destination (str): "anime" to import anime into the Anime
-                bucket (default), or "tv_movies" to resolve anime via TMDB
-                and import into TV Shows/Movies instead.
+            anime_destination (str): accepted and ignored. It used to choose
+                between the Anime library and plain TV/Movie rows, which was a
+                workaround for scrobbles and imports disagreeing (issue #468).
+                Both now follow one rule, so the third shape it produced only
+                created shows tracked in two libraries at once. Recurring
+                schedules persist this kwarg, so it is still accepted.
         """
         self.token = helpers.decrypt_or_raise(token)
         self.user = user
         self.mode = mode
-        self.anime_destination = anime_destination
         self.warnings = []
 
         # Track existing media for "new" mode
@@ -185,10 +182,7 @@ class SimklImporter:
         if "movies" in data:
             self._process_movie_list(data["movies"])
         if "anime" in data:
-            if self.anime_destination == "tv_movies":
-                self._process_anime_as_tv_or_movie(data["anime"])
-            else:
-                self._process_anime_list(data["anime"])
+            self._process_anime_list(data["anime"])
 
     def _process_tv_list(self, tv_list):
         """Process TV list from Simkl."""
@@ -680,196 +674,6 @@ class SimklImporter:
 
         self.bulk_media[MediaTypes.ANIME.value].append(anime_instance)
         existing_anime_ids.add(mal_id)
-
-    def _process_anime_as_tv_or_movie(self, anime_list):
-        """Process anime list from Simkl, resolving entries via TMDB.
-
-        Routes each entry into TV Shows/Movies instead of Anime so it merges
-        with anything already imported from Plex/Trakt under the same TMDB
-        id. Entries without a TMDB id fall back to the Anime bucket.
-        """
-        logger.info("Processing anime as TV shows/movies")
-        existing_anime_ids = set()
-        existing_tv_ids = set()
-        existing_movie_ids = set()
-
-        for anime in anime_list:
-            self._progress_current += 1
-            import_progress.report(self._progress_current, self._progress_total, "SIMKL")
-            try:
-                movie_shape = anime.get("movie")
-                show_shape = anime.get("show")
-                shape = movie_shape or show_shape
-                title = shape["title"]
-                logger.debug("Processing %s", title)
-
-                tmdb_id = (shape.get("ids") or {}).get("tmdb")
-                if not tmdb_id:
-                    self.warnings.append(
-                        f"{title}: no TMDB ID found, imported to Anime instead",
-                    )
-                    self._process_single_anime_entry(anime, existing_anime_ids)
-                    continue
-
-                tmdb_id = str(tmdb_id)
-
-                if movie_shape:
-                    self._process_anime_movie_entry(
-                        anime,
-                        title,
-                        tmdb_id,
-                        existing_movie_ids,
-                    )
-                else:
-                    self._process_anime_tv_entry(
-                        anime,
-                        title,
-                        tmdb_id,
-                        existing_tv_ids,
-                    )
-
-            except Exception as error:
-                msg = f"Error processing entry: {anime}"
-                raise MediaImportUnexpectedError(msg) from error
-
-        logger.info("Processed %d anime as TV shows/movies", len(anime_list))
-
-    def _process_anime_movie_entry(self, anime, title, tmdb_id, existing_movie_ids):
-        """Process a TMDB-resolved anime entry into the Movie bucket."""
-        if tmdb_id in existing_movie_ids:
-            self.warnings.append(
-                f"{title} ({tmdb_id}) already present in the import list",
-            )
-            return
-
-        if not helpers.should_process_media(
-            self.existing_media,
-            self.to_delete,
-            MediaTypes.MOVIE.value,
-            Sources.TMDB.value,
-            tmdb_id,
-            self.mode,
-        ):
-            return
-
-        movie_status = self._get_status(anime["status"])
-
-        try:
-            metadata = app.providers.tmdb.movie(tmdb_id)
-        except services.ProviderAPIError as error:
-            if error.status_code == requests.codes.not_found:
-                self.warnings.append(
-                    f"{title}: not found in {Sources.TMDB.label} "
-                    f"with ID {tmdb_id}.",
-                )
-                return
-            raise
-
-        movie_item, _ = app.models.Item.objects.get_or_create(
-            media_id=tmdb_id,
-            source=Sources.TMDB.value,
-            media_type=MediaTypes.MOVIE.value,
-            defaults={
-                **app.models.Item.title_fields_from_metadata(metadata),
-                "image": metadata["image"],
-            },
-        )
-
-        movie_instance = app.models.Movie(
-            item=movie_item,
-            user=self.user,
-            status=movie_status,
-            score=anime["user_rating"],
-            progress=1 if movie_status == Status.COMPLETED.value else 0,
-            start_date=self._get_date(anime.get("last_watched_at")),
-            end_date=self._get_date(anime.get("last_watched_at")),
-            notes=anime["memo"]["text"] if anime["memo"] != {} else "",
-        )
-        movie_instance._history_date = self._get_history_date(anime)
-        self.bulk_media[MediaTypes.MOVIE.value].append(movie_instance)
-        existing_movie_ids.add(tmdb_id)
-
-    def _process_anime_tv_entry(self, anime, title, tmdb_id, existing_tv_ids):
-        """Process a TMDB-resolved anime entry into the TV Show bucket."""
-        if tmdb_id in existing_tv_ids:
-            self.warnings.append(
-                f"{title} ({tmdb_id}) already present in the import list",
-            )
-            return
-
-        try:
-            season_numbers = [season["number"] for season in anime["seasons"]]
-        except KeyError:
-            season_numbers = []
-
-        try:
-            tv_source, tv_media_id, metadata = self._resolve_tv_metadata(
-                anime,
-                title,
-                tmdb_id,
-                season_numbers,
-            )
-        except services.ProviderAPIError as error:
-            if error.status_code == requests.codes.not_found:
-                self.warnings.append(
-                    f"{title}: not found in {Sources.TMDB.label} "
-                    f"with ID {tmdb_id}.",
-                )
-                return
-            raise
-
-        should_process_tv = helpers.should_process_media(
-            self.existing_media,
-            self.to_delete,
-            MediaTypes.TV.value,
-            tv_source,
-            str(tv_media_id),
-            self.mode,
-        )
-
-        if should_process_tv:
-            tv_status = self._get_status(anime["status"])
-
-            tv_item, _ = app.models.Item.objects.get_or_create(
-                media_id=tv_media_id,
-                source=tv_source,
-                media_type=MediaTypes.TV.value,
-                defaults={
-                    **app.models.Item.title_fields_from_metadata(metadata),
-                    "image": metadata["image"],
-                },
-            )
-
-            tv_instance = app.models.TV(
-                item=tv_item,
-                user=self.user,
-                status=tv_status,
-                score=anime["user_rating"],
-                notes=anime["memo"]["text"] if anime["memo"] != {} else "",
-            )
-            tv_instance._history_date = self._get_history_date(anime)
-            self.bulk_media[MediaTypes.TV.value].append(tv_instance)
-            existing_tv_ids.add(tmdb_id)
-        elif self.mode == "new":
-            # The show already exists, but this entry's seasons/episodes
-            # shouldn't be dropped wholesale - reuse the existing TV row so
-            # any it doesn't have yet can still be added below.
-            tv_instance = self.existing_media[MediaTypes.TV.value][tv_source].get(
-                str(tv_media_id),
-            )
-            if tv_instance is None:
-                return
-        else:
-            return
-
-        if season_numbers:
-            self._process_seasons_and_episodes(
-                anime,
-                tv_instance,
-                tv_media_id,
-                tv_source,
-                metadata,
-            )
 
     def _get_status(self, status):
         """Map Simkl status to internal status."""

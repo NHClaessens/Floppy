@@ -5,7 +5,11 @@
   <div {% if forloop.last and media_list.has_next %} hx-get="{% url 'medialist' media_type %}?page={{ media_list.next_page_number }}" hx-trigger="revealed threshold:200px" hx-swap="afterend" hx-include="#filter-form" hx-indicator="#loading-indicator" class="pagination-trigger" data-page="{{ media_list.next_page_number }}" {% endif %}
        class="media-card bg-[var(--color-surface)] rounded-lg overflow-hidden shadow-lg relative group hover:ring-2 hover:ring-indigo-500 transition-all search-result-card-square{% if user.media_card_subtitle_display == 'always' %} media-card-subtitle-always{% endif %}"
        data-media-type="{{ MediaTypes.MUSIC.value }}"
-       x-data="{ trackOpen: false }">
+       x-data="{ trackOpen: false, revealed: false, tapToReveal(e) { if (this.revealed) { if (e.target.closest('button, a, input, select, textarea')) { return; } const link = this.$root.querySelector('.media-card-overlay a[href]') || this.$root.querySelector('a.media-card-title[href]'); if (link) { e.preventDefault(); e.stopPropagation(); link.click(); } return; } if (!window.matchMedia('(pointer: coarse)').matches) { return; } e.preventDefault(); e.stopPropagation(); this.revealed = true; window.dispatchEvent(new CustomEvent('media-card-revealed', { detail: this.$root })); } }"
+       @click.capture="tapToReveal($event)"
+       @media-card-revealed.window="if ($event.detail !== $root) revealed = false"
+           @click.window="if (revealed && !$root.contains($event.target)) revealed = false"
+       :class="revealed ? 'media-card-revealed' : ''">
     <div class="relative">
       <a href="{{ tracker.album|music_album_url }}">
         {% if tracker.album.image and tracker.album.image != IMG_NONE %}
@@ -40,7 +44,8 @@
       </div>
 
       {# Hover overlay with actions #}
-      <div class="media-card-overlay absolute inset-0 flex items-center justify-center opacity-0 hover-tap:opacity-100 transition-opacity duration-200 ease-in-out{% if user.clickable_media_cards %} pointer-coarse:hidden{% endif %}">
+      <div class="media-card-overlay absolute inset-0 flex items-center justify-center transition-opacity duration-200 ease-in-out{% if user.clickable_media_cards %} pointer-coarse:hidden{% endif %}"
+            :class="revealed ? 'opacity-100 pointer-events-auto media-card-overlay-revealed' : 'opacity-0 pointer-events-none'">
         <div class="absolute inset-0 bg-black/50 z-0"></div>
         <a href="{{ tracker.album|music_album_url }}" class="absolute inset-0 z-0"></a>
         <div class="relative z-10 flex items-center justify-center space-x-2.5">

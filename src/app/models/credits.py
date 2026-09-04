@@ -155,6 +155,7 @@ class MetadataBackfillField(models.TextChoices):
     TRAKT_POPULARITY = "trakt_popularity", "Trakt Popularity"
     IGDB_RATINGS = "igdb_ratings", "IGDB Ratings"
     WATCH_PROVIDERS = "watch_providers", "Watch Providers"
+    EXTERNAL_IDS = "external_ids", "External IDs"
 
 
 class MetadataBackfillState(models.Model):

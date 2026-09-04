@@ -140,7 +140,11 @@ def get_user_media(user, start_date, end_date):
                 if _all_time
                 else Season.objects.filter(id__in=season_ids, status__in=_status_filter)
             )
-            queryset = base_season_qs.prefetch_related(
+            # Grouped anime seasons belong to the anime bucket, which is
+            # counted separately below; without this they are counted twice.
+            queryset = base_season_qs.exclude(
+                related_tv__item__library_media_type=MediaTypes.ANIME.value,
+            ).prefetch_related(
                 Prefetch("episodes", queryset=base_episodes),
             )
         # For other models, apply date filtering conditionally
@@ -201,9 +205,21 @@ def get_user_media(user, start_date, end_date):
 
     # Pull grouped anime (TV-structured, library_media_type="anime") into the anime bucket
     if _tv_ids is not None and base_episodes is not None:
+        # Mirror the TV bucket's own base: "All Time" counts every show, even
+        # one with no episode rows (a rating-only import). Keying this pass off
+        # `_tv_ids` alone dropped those shows from TV *and* anime.
+        _grouped_anime_episodes = (
+            base_episodes
+            if _all_time
+            else base_episodes.filter(related_season__related_tv__in=_tv_ids)
+        )
         _grouped_anime_qs = (
-            TV.objects.filter(
-                id__in=_tv_ids,
+            (
+                TV.objects.filter(user=user)
+                if _all_time
+                else TV.objects.filter(id__in=_tv_ids)
+            )
+            .filter(
                 item__library_media_type=MediaTypes.ANIME.value,
                 status__in=[
                     Status.IN_PROGRESS.value,
@@ -228,9 +244,7 @@ def get_user_media(user, start_date, end_date):
                     .prefetch_related(
                         Prefetch(
                             "episodes",
-                            queryset=base_episodes.filter(
-                                related_season__related_tv__in=_tv_ids,
-                            ),
+                            queryset=_grouped_anime_episodes,
                         ),
                     ),
                 ),

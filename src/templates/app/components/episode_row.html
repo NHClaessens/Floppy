@@ -2,10 +2,17 @@
 {% load user_tags %}
 <div class="bg-[var(--color-surface)] rounded-lg overflow-hidden shadow-lg"
      x-show="!$store.epLayout || $store.epLayout !== 'list'">
+  {% comment %}
+    canHover keys the blur controls off the pointer's actual capability. Touch
+    fires only an emulated mouseenter, so a hover-gated control is reachable
+    there by accident at best - and the centred button is the only way to
+    unblur a thumbnail, so it must be present outright.
+  {% endcomment %}
   <div class="flex flex-col md:flex-row"
        x-data="{
          revealed: false,
          hovering: false,
+         canHover: window.matchMedia('(hover: hover)').matches,
          epWatched: {{ episode.history|yesno:'true,false' }},
          blurActive: {% if not public_view|default:False and user.is_authenticated %}{{ user.obfuscate_episodes|yesno:'true,false' }}{% else %}false{% endif %},
          syncBlurState(active) {
@@ -57,7 +64,7 @@
       {% if not public_view|default:False and user.is_authenticated %}
         {# Centered reveal button — shows on hover when blurred and not yet revealed #}
         <div class="absolute inset-0 z-20 flex items-center justify-center"
-             x-show="hovering && blurActive && !epWatched && !revealed"
+             x-show="(!canHover || hovering) && blurActive && !epWatched && !revealed"
              x-transition:enter="transition-opacity duration-150"
              x-transition:enter-start="opacity-0"
              x-transition:enter-end="opacity-100"
@@ -73,7 +80,7 @@
         </div>
         {# Corner eyeball — shows on hover; toggles the global blur setting #}
         <div class="absolute top-2 right-2 z-20"
-             x-show="hovering && (!blurActive || epWatched || revealed)"
+             x-show="(!canHover || hovering) && (!blurActive || epWatched || revealed)"
              x-transition:enter="transition-opacity duration-150"
              x-transition:enter-start="opacity-0"
              x-transition:enter-end="opacity-100"
@@ -162,7 +169,8 @@
     <div class="shrink-0" x-data="{ trackOpen: false }">
       {% include "app/components/detail_episode_track_button.html" with episode=episode detail_return_url=detail_return_url request=request track_button_oob=False target_suffix="-list" only %}
       <div x-show="trackOpen"
-           @mousedown.self="trackOpen = false"
+      @mousedown.self="trackOpen = false"
+           x-cloak
            @keydown.escape.window="trackOpen = false"
            class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"

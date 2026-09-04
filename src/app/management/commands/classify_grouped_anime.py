@@ -55,6 +55,14 @@ class Command(BaseCommand):
             default=None,
             help="Write the JSON classification report to this path",
         )
+        parser.add_argument(
+            "--include-decided",
+            action="store_true",
+            help=(
+                "Also re-examine rows already settled as TV. By default only "
+                "rows with no recorded verdict are classified."
+            ),
+        )
 
     def handle(self, *_args, **options):
         """Classify matching TV rows and optionally promote them."""
@@ -63,10 +71,16 @@ class Command(BaseCommand):
             message = "--apply and --dry-run cannot be combined"
             raise CommandError(message)
 
+        # An empty bucket means no verdict was ever recorded; `tv` means the
+        # classifier (or the user) decided this is not anime. Re-examining a
+        # settled verdict by default would let the classifier overrule it.
+        undecided_buckets = [""]
+        if options["include_decided"]:
+            undecided_buckets.append(MediaTypes.TV.value)
         queryset = TV.objects.filter(
             item__source=Sources.TMDB.value,
             item__media_type=MediaTypes.TV.value,
-            item__library_media_type__in=("", MediaTypes.TV.value),
+            item__library_media_type__in=undecided_buckets,
         ).select_related("item", "user")
         if options["username"]:
             queryset = queryset.filter(user__username=options["username"])

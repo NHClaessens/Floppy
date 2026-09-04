@@ -9,7 +9,11 @@ from django.test import TestCase, override_settings
 
 from app.apps import STARTUP_SWEEP_COUNTDOWNS
 from app.apps import AppConfig as FloppyAppConfig
-from app.tasks import GENRE_BACKFILL_VERSION, WATCH_PROVIDERS_BACKFILL_VERSION
+from app.tasks import (
+    EXTERNAL_IDS_BACKFILL_VERSION,
+    GENRE_BACKFILL_VERSION,
+    WATCH_PROVIDERS_BACKFILL_VERSION,
+)
 
 
 class AppStartupTests(TestCase):
@@ -34,6 +38,7 @@ class AppStartupTests(TestCase):
             patch.object(config, "_schedule_trakt_popularity_reconcile"),
             patch.object(config, "_schedule_igdb_rating_backfill_reconcile"),
             patch.object(config, "_schedule_provider_backfill_reconcile"),
+            patch.object(config, "_schedule_external_ids_backfill_reconcile"),
         ):
             config.ready()
 
@@ -219,6 +224,40 @@ class AppStartupTests(TestCase):
             priority=settings.CELERY_TASK_PRIORITY_BACKGROUND,
         )
         mock_should_run.assert_not_called()
+
+    @patch("app.reconcile_state.should_run")
+    @patch("app.tasks_external_ids.ensure_external_ids_backfill_reconcile.apply_async")
+    def test_schedule_external_ids_backfill_reconcile_enqueues_once_per_startup(
+        self,
+        mock_apply_async,
+        mock_should_run,
+    ):
+        """A second ready() does not enqueue again or query durable state."""
+        config = FloppyAppConfig("app", import_module("app"))
+
+        config._schedule_external_ids_backfill_reconcile()
+        config._schedule_external_ids_backfill_reconcile()
+
+        mock_apply_async.assert_called_once_with(
+            kwargs={"strategy_version": EXTERNAL_IDS_BACKFILL_VERSION},
+            countdown=STARTUP_SWEEP_COUNTDOWNS["external_ids"],
+            priority=settings.CELERY_TASK_PRIORITY_BACKGROUND,
+        )
+        mock_should_run.assert_not_called()
+
+    def test_settings_include_external_ids_backfill_reconcile_fallback_schedule(self):
+        schedule = settings.CELERY_BEAT_SCHEDULE["ensure_external_ids_backfill_reconcile"]
+
+        self.assertEqual(schedule["task"], "Ensure external ID backfill reconcile")
+        self.assertEqual(schedule["schedule"], settings.RECONCILE_INTERVAL_SECONDS)
+        self.assertEqual(
+            schedule["kwargs"]["batch_size"],
+            settings.EXTERNAL_IDS_RECONCILE_BATCH_SIZE,
+        )
+        self.assertEqual(
+            schedule["options"]["priority"],
+            settings.CELERY_TASK_PRIORITY_BACKGROUND,
+        )
 
     def test_startup_sweeps_are_staggered(self):
         """Five whole-library sweeps at once used to land on a warming container."""

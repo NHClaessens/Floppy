@@ -19,6 +19,8 @@
          plexLibrariesLoading: {% if plex_account %}true{% else %}false{% endif %},
          plexLiveError: '',
          plexWatchlistSyncEnabled: {% if plex_account and plex_account.watchlist_sync_enabled %}true{% else %}false{% endif %},
+         plexLibrary: 'all',
+         plexContentKind: 'auto',
          activeModal: null,
          openModal(slug) {
            this.activeModal = slug;
@@ -84,6 +86,29 @@
              return 'Checking';
            }
            return 'Disconnected';
+         },
+         selectedPlexSection() {
+           return this.plexSections.find(
+             (section) => `${section.machine_identifier}::${section.id}` === this.plexLibrary
+           ) || null;
+         },
+         showPlexContentKind() {
+           const section = this.selectedPlexSection();
+           return !!(section && section.is_music);
+         },
+         syncPlexContentKind() {
+           const section = this.selectedPlexSection();
+           if (!section || !section.is_music) {
+             this.plexContentKind = 'auto';
+             return;
+           }
+           if (section.content_kind && section.content_kind !== 'auto') {
+             this.plexContentKind = section.content_kind;
+           } else if (section.audiobook_hint) {
+             this.plexContentKind = 'audiobook';
+           } else {
+             this.plexContentKind = 'auto';
+           }
          },
          plexLibraryLabel(section) {
            let label = section.title || 'Unknown library';
@@ -155,6 +180,7 @@
 
              if (Array.isArray(data.sections)) {
                this.plexSections = data.sections;
+               this.syncPlexContentKind();
                this.hasPlexSections = data.sections.length > 0;
              }
 
@@ -741,6 +767,8 @@
                 <label class="block text-sm text-[var(--color-text-secondary)] mb-2">Library</label>
                 <div class="relative">
                   <select name="library"
+                          x-model="plexLibrary"
+                          @change="syncPlexContentKind()"
                           class="w-full py-2 px-3 bg-[var(--color-surface)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:border-indigo-500 focus:outline-none focus:ring focus:ring-indigo-200 focus:ring-opacity-50 appearance-none disabled:opacity-50"
                           :disabled="plexSubmitDisabled()">
                     <option value="all">All libraries</option>
@@ -764,6 +792,26 @@
                    x-show="!plexSections.length && !plexLibrariesLoading && plexConnectionState !== 'error'"
                    class="text-xs text-[var(--color-text-muted)] mt-1">
                   No libraries detected yet. Reconnect Plex to refresh.
+                </p>
+              </div>
+
+              <div x-cloak x-show="!isWatchlistMode() && showPlexContentKind()">
+                <label class="block text-sm text-[var(--color-text-secondary)] mb-2">Content type</label>
+                <div class="relative">
+                  <select name="content_kind"
+                          x-model="plexContentKind"
+                          class="w-full py-2 px-3 bg-[var(--color-surface)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:border-indigo-500 focus:outline-none focus:ring focus:ring-indigo-200 focus:ring-opacity-50 appearance-none disabled:opacity-50"
+                          :disabled="plexSubmitDisabled()">
+                    <option value="auto">Auto-detect</option>
+                    <option value="music">Music</option>
+                    <option value="audiobook">Audiobooks</option>
+                  </select>
+                  {% include "app/icons/chevron-down.svg" with classes="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--color-text-muted)] pointer-events-none" %}
+                </div>
+                <p class="text-xs text-[var(--color-text-muted)] mt-1">
+                  Audiobooks kept in a Plex Music library are tracked as books instead of
+                  music. Auto-detect decides per album; choose Audiobooks to import the whole
+                  library as books.
                 </p>
               </div>
 
@@ -2171,76 +2219,6 @@
             <input type="hidden" name="frequency" x-model="importFrequency">
             <input type="hidden" name="time" x-model="importTime">
             <input type="hidden" name="mode" x-model="importMode">
-            {% if user.tv_enabled and user.anime_enabled %}
-              <div class="mb-3">
-                <label class="block text-sm text-[var(--color-text-muted)] mb-2">Import Anime To</label>
-                <div class="relative"
-                     x-data="{
-                       open: false,
-                       selectedValue: 'anime',
-                       selectedLabel: 'Anime',
-                       menuStyle: '',
-                       setMenuPosition() {
-                         this.$nextTick(() => {
-                           const trigger = this.$refs.trigger;
-                           const panel = this.$refs.panel;
-                           if (!trigger || !panel) {
-                             return;
-                           }
-
-                           const triggerRect = trigger.getBoundingClientRect();
-                           this.menuStyle = `left: ${triggerRect.left}px; top: ${triggerRect.bottom + 8}px; width: ${triggerRect.width}px;`;
-                         });
-                       },
-                       toggleOpen() {
-                         if (this.open) {
-                           this.open = false;
-                           return;
-                         }
-
-                         this.open = true;
-                         this.setMenuPosition();
-                       },
-                     }"
-                     @click.outside="if (!$refs.panel || !$refs.panel.contains($event.target)) { open = false }"
-                     @resize.window="if (open) setMenuPosition()"
-                     @scroll.window="if (open) setMenuPosition()">
-                  <button type="button"
-                          x-ref="trigger"
-                          @click="toggleOpen()"
-                          class="flex items-center justify-between w-full px-3 py-2 bg-[var(--color-surface)] border border-gray-600 rounded-md text-[var(--color-text-secondary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent cursor-pointer">
-                    <span x-text="selectedLabel"></span>
-                    {% include "app/icons/chevron-down.svg" with classes="w-4 h-4 text-[var(--color-text-muted)]" %}
-                  </button>
-                  <template x-teleport="body">
-                    <div x-cloak
-                         x-ref="panel"
-                         x-show="open"
-                         x-transition:enter="transition ease-out duration-100"
-                         x-transition:enter-start="transform opacity-0 scale-95"
-                         x-transition:enter-end="transform opacity-100 scale-100"
-                         x-transition:leave="transition ease-in duration-75"
-                         x-transition:leave-start="transform opacity-100 scale-100"
-                         x-transition:leave-end="transform opacity-0 scale-95"
-                         class="fixed py-1 bg-[var(--color-panel)] rounded-md shadow-lg overflow-hidden z-50 border border-gray-600"
-                         style="display: none;"
-                         :style="menuStyle">
-                      <button type="button"
-                              @click="selectedValue = 'anime'; selectedLabel = 'Anime'; open = false"
-                              class="block w-full px-3 py-2 text-left text-sm transition-colors text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-strong)] hover:text-[var(--color-text)]">
-                        Anime
-                      </button>
-                      <button type="button"
-                              @click="selectedValue = 'tv_movies'; selectedLabel = 'TV Shows & Movies'; open = false"
-                              class="block w-full px-3 py-2 text-left text-sm transition-colors text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-strong)] hover:text-[var(--color-text)]">
-                        TV Shows & Movies
-                      </button>
-                    </div>
-                  </template>
-                  <input type="hidden" name="anime_destination" x-bind:value="selectedValue">
-                </div>
-              </div>
-            {% endif %}
             <button type="submit"
                     class="w-full px-4 py-2 text-sm rounded-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                     :class="standardImportsDisabled() ? 'bg-gray-600 text-gray-400 cursor-not-allowed' : 'bg-indigo-600 text-white hover:bg-indigo-700'"

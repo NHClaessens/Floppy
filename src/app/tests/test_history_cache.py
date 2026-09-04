@@ -78,6 +78,12 @@ class HistoryMonthCacheTests(TestCase):
             response.context["history_days"][0]["entries"][0]["title"],
             "Fallback Movie",
         )
+        cached_day = history_cache.get_cached_history_day(
+            self.user,
+            self.today_key,
+            logging_style_override=self.logging_style,
+        )
+        self.assertNotIn("notes", cached_day["entries"][0])
         self.assertEqual(mock_schedule_history_refresh.call_count, 0)
 
         active_month_day_keys = self._active_month_day_keys()

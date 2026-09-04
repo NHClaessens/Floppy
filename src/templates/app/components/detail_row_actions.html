@@ -6,7 +6,8 @@
     <div x-data="{ trackOpen: false }">
       {% include "app/components/detail_episode_track_button.html" with episode=episode detail_return_url=detail_return_url request=request track_button_oob=False only %}
       <div x-show="trackOpen"
-           @mousedown.self="trackOpen = false"
+      @mousedown.self="trackOpen = false"
+           x-cloak
            @keydown.escape.window="trackOpen = false"
            class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -31,7 +32,8 @@
         {% endif %}
       </button>
       <div x-show="trackOpen"
-           @mousedown.self="trackOpen = false"
+      @mousedown.self="trackOpen = false"
+           x-cloak
            @keydown.escape.window="trackOpen = false"
            class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -56,9 +58,10 @@
       </button>
 
       <div x-show="listsOpen"
+      @mousedown.self="listsOpen = false"
+           x-cloak
            @keydown.escape.window="listsOpen = false"
-           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-           @mousedown.self="listsOpen = false">
+           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
           <div id="{% if episode.item %}{% component_id 'lists' episode.item %}{% else %}{% component_id 'lists' episode %}{% endif %}"></div>
         </div>
@@ -78,9 +81,9 @@
         {% include "app/icons/history.svg" with classes="w-4 h-4" %}
       </button>
       <div x-show="historyOpen"
+      @mousedown.self="historyOpen = false"
            @keydown.escape.window="historyOpen = false"
-           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-           @mousedown.self="historyOpen = false">
+           class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
         <div class="w-full max-h-[90vh] px-4 md:px-0 relative z-60"
              style="width: min(96vw, 72rem);">
           <div id="{% component_id 'history' history_item %}"></div>

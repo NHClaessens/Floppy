@@ -323,6 +323,70 @@ class GPodderImporterTests(TestCase):
         self.assertEqual(show.image, "https://example.com/new-art.jpg")
         self.assertEqual(item.image, "https://example.com/new-art.jpg")
 
+    @patch("integrations.imports.gpodder.gpodder_api.register_device")
+    @patch("integrations.imports.gpodder.gpodder_api.fetch_episode_actions")
+    @patch("integrations.imports.gpodder.gpodder_api.fetch_subscriptions")
+    @patch("integrations.imports.gpodder.gpodder_api.verify_login")
+    @patch("integrations.imports.gpodder.podcast_rss.fetch_episodes_from_rss")
+    @patch("integrations.imports.gpodder.podcast_rss.fetch_show_metadata_from_rss")
+    def test_resync_backfills_website_url_on_an_existing_show_and_episode(
+        self,
+        mock_show_metadata,
+        mock_fetch_rss_episodes,
+        _mock_verify_login,
+        mock_fetch_subscriptions,
+        mock_fetch_actions,
+        _mock_register_device,
+    ):
+        """Rows imported before podcast website links existed repair on re-sync.
+
+        gPodder is the reporter's provider in issue #1014, and this importer
+        never wrote website_url at all -- not on create and not on update -- so
+        their links stayed blank however many times they synced.
+        """
+        now = timezone.now()
+        show = PodcastShow.objects.create(
+            podcast_uuid="gp_no_website",
+            source=Sources.GPODDER.value,
+            title="Example Show",
+            rss_feed_url="https://example.com/feed.xml",
+        )
+        episode = PodcastEpisode.objects.create(
+            show=show,
+            episode_uuid="ep-1",
+            title="Episode 1",
+            audio_url="https://cdn.example.com/ep1.mp3",
+            duration=300,
+            published=now,
+        )
+
+        mock_fetch_subscriptions.return_value = ["https://example.com/feed.xml"]
+        mock_show_metadata.return_value = {
+            "title": "Example Show",
+            "website_url": "https://www.spreaker.com/show/example",
+        }
+        mock_fetch_rss_episodes.return_value = [
+            {
+                "title": "Episode 1",
+                "published": now,
+                "duration": 300,
+                "audio_url": "https://cdn.example.com/ep1.mp3",
+                "guid": "ep-1",
+                "website_url": "https://www.spreaker.com/episode/one",
+            },
+        ]
+        mock_fetch_actions.return_value = ([], 99)
+
+        gpodder_import.importer(None, self.user, "new")
+
+        show.refresh_from_db()
+        episode.refresh_from_db()
+        self.assertEqual(show.website_url, "https://www.spreaker.com/show/example")
+        self.assertEqual(
+            episode.website_url,
+            "https://www.spreaker.com/episode/one",
+        )
+
     @patch(
         "integrations.imports.gpodder.GPodderImporter._process_action",
         side_effect=RuntimeError("boom"),

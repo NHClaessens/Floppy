@@ -1749,4 +1749,101 @@ class SqliteIntegrityTests(SimpleTestCase):
 
             self.assertEqual(ctx.exception.code, 1)
             self.assertFalse(decision.exists())
+
+    @requires_proc_fd_backup
+    def test_live_snapshot_writes_a_valid_verified_copy(self):
+        """create_live_database_snapshot (#1053) mirrors _create_verified_backup.
+
+        Unlike that function, this one runs against a live database with no
+        write lock held by the caller -- see the test below for the retention
+        and failure-mode coverage that matters specifically for that context.
+        """
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = self.create_orphan_database(tmp_dir, rows=3)
+            dest_dir = Path(tmp_dir) / "database"
+
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                dest_dir,
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+            self.assertIsNotNone(snapshot_path)
+            self.assertTrue(snapshot_path.is_file())
+            snapshot = sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True)
+            self.assertEqual(snapshot.execute("PRAGMA quick_check").fetchone(), ("ok",))
+            self.assertEqual(snapshot.execute("SELECT COUNT(*) FROM child").fetchone()[0], 3)
+            snapshot.close()
+            # No staging leftovers beside the published file.
+            self.assertEqual(
+                sorted(p.name for p in dest_dir.iterdir()),
+                [snapshot_path.name],
+            )
+
+    @requires_proc_fd_backup
+    def test_live_snapshot_retention_prunes_to_max_keep(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = self.create_orphan_database(tmp_dir)
+            dest_dir = Path(tmp_dir) / "database"
+            dest_dir.mkdir()
+            for i in range(9):
+                stale = dest_dir / f"db-{i:02d}.sqlite3"
+                stale.write_text("stale")
+                os.utime(stale, (1000 + i * 10, 1000 + i * 10))
+
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                dest_dir,
+                max_keep=5,
+                timeout_seconds=5,
+            )
+
+            remaining = sorted(p.name for p in dest_dir.glob("*.sqlite3"))
+            self.assertEqual(len(remaining), 5)
+            self.assertIn(snapshot_path.name, remaining)
+            self.assertNotIn("db-00.sqlite3", remaining)
+            self.assertNotIn("db-03.sqlite3", remaining)
+            self.assertIn("db-08.sqlite3", remaining)
+
+    def test_live_snapshot_missing_source_returns_none_without_raising(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            missing_path = str(Path(tmp_dir) / "does-not-exist.sqlite3")
+            dest_dir = Path(tmp_dir) / "database"
+
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                missing_path,
+                dest_dir,
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+            self.assertIsNone(snapshot_path)
+            if dest_dir.exists():
+                self.assertEqual(list(dest_dir.iterdir()), [])
+
+    @requires_proc_fd_backup
+    def test_live_snapshot_corrupt_source_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            db_path = str(Path(tmp_dir) / "db.sqlite3")
+            conn = sqlite3.connect(db_path)
+            conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            conn.commit()
+            conn.close()
+            raw = bytearray(Path(db_path).read_bytes())
+            raw[100:400] = b"\x00" * 300
+            Path(db_path).write_bytes(bytes(raw))
+            dest_dir = Path(tmp_dir) / "database"
+
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                dest_dir,
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+            self.assertIsNone(snapshot_path)
+            # Nothing published, and no staging temp file left behind.
+            self.assertEqual(list(dest_dir.glob("*.sqlite3")), [])
+            self.assertEqual(list(dest_dir.glob(".*")), [])
             self.assertEqual(self.read_incident_report(db_path)["status"], "corrupt")

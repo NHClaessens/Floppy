@@ -6,6 +6,7 @@ from django.utils import timezone
 from app import metadata_utils
 from app.models import Item
 from app.providers import services
+from app.services import metadata_resolution
 
 
 class Command(BaseCommand):
@@ -72,6 +73,18 @@ class Command(BaseCommand):
                 item.metadata_fetched_at = timezone.now()
                 update_fields.append("metadata_fetched_at")
                 item.save(update_fields=update_fields)
+
+                # provider_external_ids is in neither CORE_METADATA_FIELDS nor
+                # PROVIDER_METADATA_FIELDS, so apply_item_metadata() above
+                # never touches it. Without this the command couldn't repair a
+                # missing IMDb ID even with --force, though that is the repair
+                # route users are pointed at (issue #1066).
+                metadata_resolution.upsert_provider_links(
+                    item,
+                    metadata,
+                    provider=item.source,
+                    provider_media_type=item.media_type,
+                )
 
                 success_count += 1
                 self.stdout.write(

@@ -205,15 +205,14 @@ def import_mdblist(user_id, mode, username=None):
 
 
 @shared_task(name="Import from SIMKL")
-def import_simkl(token, user_id, mode, username=None, anime_destination="anime"):
-    """Celery task for importing media data from SIMKL."""
-    return import_media(
-        simkl.importer,
-        token,
-        user_id,
-        mode,
-        anime_destination=anime_destination,
-    )
+def import_simkl(token, user_id, mode, username=None, anime_destination=None):
+    """Celery task for importing media data from SIMKL.
+
+    `anime_destination` is accepted and ignored. Recurring schedules created
+    before the option was removed persist it in their task kwargs, so dropping
+    the parameter would break them on the next deploy.
+    """
+    return import_media(simkl.importer, token, user_id, mode)
 
 
 @shared_task(name="Import from MyAnimeList")

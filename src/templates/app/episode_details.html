@@ -28,17 +28,28 @@
     {# Season + episode subtitle — mirrors season page's subtitle line #}
     <div class="mb-3 flex flex-col items-center justify-between gap-y-4 md:mb-1 md:flex-row md:gap-y-0">
       <div class="w-full">
-        <div class="flex flex-col gap-y-4 md:flex-row md:gap-y-0 items-center justify-between mb-1">
+        <div class="relative flex flex-col gap-y-4 md:flex-row md:gap-y-0 items-center justify-between mb-1"
+             x-data="{ open: false }"
+             @click.away="open = false"
+             @keydown.escape.window="open = false">
           <div class="text-center md:text-start">
             <div class="hidden flex-wrap items-center justify-start gap-y-1 text-sm font-medium text-[var(--color-text-muted)] md:flex md:text-start">
               <a href="{{ season_url }}" class="hover:text-[var(--color-link)] transition-colors">{{ season_title }}</a>
               <span class="mx-2 text-gray-600">•</span>
-              <span>{{ episode_title }}</span>
-              {% if episode %}
-                {% if episode.display_episode_number|default:episode.episode_number %}
+              <button type="button"
+                      aria-haspopup="listbox"
+                      aria-label="Select episode"
+                      :aria-expanded="open.toString()"
+                      @click="open = !open"
+                      class="inline-flex items-center gap-1 text-sm font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] cursor-pointer">
+                <span>{{ episode_title }}</span>
+                {% if episode and episode.display_episode_number|default:episode.episode_number %}
                   <span class="mx-2 text-gray-600">•</span>
                   <span>Episode {{ episode.display_episode_number|default:episode.episode_number }}</span>
                 {% endif %}
+                <span class="h-4 w-4" :class="{ 'rotate-180': open }">{% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}</span>
+              </button>
+              {% if episode %}
                 {% if episode.air_date %}
                   <span class="mx-2 text-gray-600">•</span>
                   <span>{{ episode.air_date|user_date_format:user }}</span>
@@ -61,8 +72,16 @@
             <div class="md:hidden text-sm font-medium text-[var(--color-text-muted)] text-center">
               <a href="{{ season_url }}" class="hover:text-[var(--color-link)] transition-colors">{{ season_title }}</a>
               <span class="mx-1 text-gray-600">•</span>
-              {{ episode_title }}
-              {% if episode and episode.display_episode_number|default:episode.episode_number %}<span class="mx-1 text-gray-600">•</span>Ep {{ episode.display_episode_number|default:episode.episode_number }}{% endif %}
+              <button type="button"
+                      aria-haspopup="listbox"
+                      aria-label="Select episode"
+                      :aria-expanded="open.toString()"
+                      @click="open = !open"
+                      class="inline-flex items-center gap-1 text-sm font-medium text-[var(--color-text-muted)] hover:text-[var(--color-text)] cursor-pointer">
+                <span>{{ episode_title }}</span>
+                {% if episode and episode.display_episode_number|default:episode.episode_number %}<span class="mx-1 text-gray-600">•</span><span>Ep {{ episode.display_episode_number|default:episode.episode_number }}</span>{% endif %}
+                <span class="h-4 w-4" :class="{ 'rotate-180': open }">{% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}</span>
+              </button>
               {% if episode and episode.air_date %}<span class="mx-1 text-gray-600">•</span>{{ episode.air_date|user_date_format:user }}{% endif %}
               {% if not public_view and episode and episode.history %}{% with ep_watched=episode.history|watched_count %}{% if ep_watched %}<span class="mx-1 text-gray-600">•</span>Watched {% if ep_watched == 1 %}once{% else %}{{ ep_watched }} times{% endif %}{% endif %}{% endwith %}{% endif %}
             </div>
@@ -87,43 +106,6 @@
                 </span>
               {% endif %}
 
-            <div class="relative w-full md:w-auto"
-                 x-data="{ open: false }"
-                 @click.away="open = false"
-                 @keydown.escape.window="open = false">
-              <button @click="open = !open"
-                      class="flex h-11 w-full items-center justify-center space-x-2 px-4 border border-[var(--color-surface-border)] bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm hover:bg-[var(--color-surface-muted)] rounded-xl transition-colors duration-200 cursor-pointer md:w-auto md:justify-start">
-                <span class="text-sm font-medium">{{ episode.display_episode_number|default:episode_number }}. {{ episode_title }}</span>
-                <div class="w-4 h-4" :class="{ 'rotate-180': open }">{% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}</div>
-              </button>
-              <div x-show="open"
-                   x-transition:enter="transition ease-out duration-200"
-                   x-transition:enter-start="opacity-0 transform scale-95"
-                   x-transition:enter-end="opacity-100 transform scale-100"
-                   x-transition:leave="transition ease-in duration-150"
-                   x-transition:leave-start="opacity-100 transform scale-100"
-                   x-transition:leave-end="opacity-0 transform scale-95"
-                   class="absolute right-1/2 md:right-0 translate-x-1/2 md:translate-x-0 mt-2 w-64 bg-[var(--color-surface)] rounded-md shadow-lg overflow-hidden z-10">
-                <div class="max-h-[300px] overflow-y-auto">
-                  {% for ep in episodes %}
-                    <a href="{% if parent_media_type == MediaTypes.ANIME.value %}{% url 'anime_episode_details' source=source media_id=media_id title=show_title|slug season_number=season_number episode_number=ep.episode_number %}{% else %}{% url 'episode_details' source=source media_id=media_id title=show_title|slug season_number=season_number episode_number=ep.episode_number %}{% endif %}"
-                       hx-boost="true"
-                       class="w-full px-4 py-3 flex items-center space-x-3 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] transition-colors duration-200 cursor-pointer {% if ep.episode_number == episode_number %}bg-[var(--color-surface-muted)]{% endif %}">
-                      <div class="w-8 h-8 rounded-full flex items-center justify-center bg-indigo-600 text-white shrink-0">
-                        {{ ep.display_episode_number|default:ep.episode_number }}
-                      </div>
-                      <div class="flex-1 text-left min-w-0">
-                        <div class="text-sm font-medium line-clamp-1">{{ ep.title }}</div>
-                        <div class="text-xs text-[var(--color-text-muted)]">
-                          {{ ep.air_date|user_date_format:user|default_if_none:"Unknown date" }}
-                        </div>
-                      </div>
-                    </a>
-                  {% endfor %}
-                </div>
-              </div>
-            </div>
-
               {% if next_episode_number %}
                 <a href="{% if parent_media_type == MediaTypes.ANIME.value %}{% url 'anime_episode_details' source=source media_id=media_id title=show_title|slug season_number=season_number episode_number=next_episode_number %}{% else %}{% url 'episode_details' source=source media_id=media_id title=show_title|slug season_number=season_number episode_number=next_episode_number %}{% endif %}"
                    hx-boost="true"
@@ -139,6 +121,34 @@
                   {% include "app/icons/chevron-right.svg" with classes="w-4 h-4" %}
                 </span>
               {% endif %}
+            </div>
+          {% endif %}
+          {% if episodes %}
+            <div x-show="open"
+                 x-transition:enter="transition ease-out duration-200"
+                 x-transition:enter-start="opacity-0 transform scale-95"
+                 x-transition:enter-end="opacity-100 transform scale-100"
+                 x-transition:leave="transition ease-in duration-150"
+                 x-transition:leave-start="opacity-100 transform scale-100"
+                 x-transition:leave-end="opacity-0 transform scale-95"
+                 class="absolute left-0 top-full mt-2 w-64 bg-[var(--color-surface)] rounded-md shadow-lg overflow-hidden z-10">
+              <div class="max-h-[300px] overflow-y-auto">
+                {% for ep in episodes %}
+                  <a href="{% if parent_media_type == MediaTypes.ANIME.value %}{% url 'anime_episode_details' source=source media_id=media_id title=show_title|slug season_number=season_number episode_number=ep.episode_number %}{% else %}{% url 'episode_details' source=source media_id=media_id title=show_title|slug season_number=season_number episode_number=ep.episode_number %}{% endif %}"
+                     hx-boost="true"
+                     class="w-full px-4 py-3 flex items-center space-x-3 hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] transition-colors duration-200 cursor-pointer {% if ep.episode_number == episode_number %}bg-[var(--color-surface-muted)]{% endif %}">
+                    <div class="w-8 h-8 rounded-full flex items-center justify-center bg-indigo-600 text-white shrink-0">
+                      {{ ep.display_episode_number|default:ep.episode_number }}
+                    </div>
+                    <div class="flex-1 text-left min-w-0">
+                      <div class="text-sm font-medium line-clamp-1">{{ ep.title }}</div>
+                      <div class="text-xs text-[var(--color-text-muted)]">
+                        {{ ep.air_date|user_date_format:user|default_if_none:"Unknown date" }}
+                      </div>
+                    </div>
+                  </a>
+                {% endfor %}
+              </div>
             </div>
           {% endif %}
         </div>
@@ -196,7 +206,8 @@
             <div x-data="{ trackOpen: false }" class="w-full sm:w-auto sm:shrink-0">
               {% include "app/components/detail_episode_hero_track_button.html" with episode=episode source=source media_id=media_id season_number=season_number episode_number=episode_number %}
               <div x-show="trackOpen"
-                   @mousedown.self="trackOpen = false"
+              @mousedown.self="trackOpen = false"
+                   x-cloak
                    @keydown.escape.window="trackOpen = false"
                    class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                 <div class="modal-max-height overflow-y-auto px-4 md:px-0 relative z-60 w-full"
@@ -221,9 +232,10 @@
                     {% include "app/icons/list-add.svg" with classes="w-4 h-4" %}
                   </button>
                   <div x-show="listsOpen"
+                  @mousedown.self="listsOpen = false"
+                       x-cloak
                        @keydown.escape.window="listsOpen = false"
-                       class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-                       @mousedown.self="listsOpen = false">
+                       class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
                       <div id="{% if episode.item %}{% component_id 'lists' episode.item %}{% else %}{% component_id 'lists' episode %}{% endif %}"></div>
                     </div>
@@ -243,9 +255,9 @@
                     {% include "app/icons/history.svg" with classes="w-4 h-4" %}
                   </button>
                   <div x-show="historyOpen"
+                  @mousedown.self="historyOpen = false"
                        @keydown.escape.window="historyOpen = false"
-                       class="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
-                       @mousedown.self="historyOpen = false">
+                       class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
                     <div class="w-full max-h-[90vh] px-4 md:px-0 relative z-60"
                          style="width: min(96vw, 72rem);">
                       <div id="{% component_id 'history' episode.item %}"></div>
@@ -295,8 +307,7 @@
   </div>
 </div>
 
-{# Your Notes — same component the movie/season pages use, listing every watch that carries a note. #}
-{# Rendered even with no notes yet: the empty section is the anchor episode_save's OOB swap replaces. #}
+{# Your Notes — same component the movie/season pages use, pointed at the watch that carries the note. #}
 {% if show_notes %}
   {% include "app/components/detail_notes_section.html" with notes_entries=notes_entries notes_entry=notes_entry detail_notes_target_id=episode_notes_modal_target_id detail_notes_modal_url=episode_notes_modal_url detail_return_url=detail_return_url public_notes_view=public_notes_view %}
 {% endif %}
