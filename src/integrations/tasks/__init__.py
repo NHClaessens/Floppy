@@ -163,6 +163,7 @@ __all__ = [
     "import_jellyfin_playback_reporting",
     "import_kitsu",
     "import_koito_history",
+    "import_koreader",
     "import_lastfm_history",
     "import_mal",
     "import_mdblist",

@@ -2280,6 +2280,7 @@ def import_storyteller(request):
 
 
 KOREADER_IMPORT_TASK_NAME = "Import from KOReader"
+KOREADER_MAX_COMPLETION = 100
 
 
 def _parse_finished_threshold_percent(post):
@@ -2292,7 +2293,7 @@ def _parse_finished_threshold_percent(post):
     except ValueError as exc:
         msg = "Completion threshold must be a number between 1 and 100."
         raise ValueError(msg) from exc
-    if not 1 <= percent <= 100:
+    if not 1 <= percent <= KOREADER_MAX_COMPLETION:
         msg = "Completion threshold must be between 1 and 100 percent."
         raise ValueError(msg)
     return percent / 100.0
