@@ -813,7 +813,7 @@ class IntegrationTest(StaticLiveServerTestCase):
         self.page.get_by_role("button", name="More tracking actions").click()
         self.page.get_by_role("button", name="Add new entry").click()
         track_modal = self.page.locator("[data-track-modal-root]:visible").first
-        track_modal.get_by_role("button", name="End date picker").click()
+        track_modal.get_by_role("button", name="Open End date picker").click()
         date_picker = track_modal.get_by_role("dialog", name="End date picker")
         date_picker.get_by_role("button", name="Select month").click()
         date_picker.get_by_role("button", name="Select year").click()

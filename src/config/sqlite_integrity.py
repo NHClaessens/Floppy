@@ -891,7 +891,16 @@ def create_live_database_snapshot(
             max_keep=max_keep,
             timeout_seconds=timeout_seconds,
         )
-    except (OSError, sqlite3.DatabaseError, ValueError) as error:
+    except sqlite3.DatabaseError as error:
+        _log(f"[db-snapshot] Could not write a database snapshot: {error}")
+        busy = getattr(error, "sqlite_errorcode", None) in {
+            sqlite3.SQLITE_BUSY,
+            sqlite3.SQLITE_LOCKED,
+        }
+        if not busy:
+            _report_corruption(db_path, str(error))
+        return None
+    except (OSError, ValueError) as error:
         _log(f"[db-snapshot] Could not write a database snapshot: {error}")
         return None
 
