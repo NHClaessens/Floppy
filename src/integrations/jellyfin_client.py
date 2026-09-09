@@ -28,8 +28,12 @@ class JellyfinClient:
         self.user_id = user_id
 
     def _headers(self) -> dict[str, str]:
+        # See the following for the exact schema:
+        # https://gist.github.com/nielsvanvelzen/ea047d9028f676185832e51ffaf12a6f#the-jellyfin-authorization-scheme
         return {
-            "X-Emby-Token": self.api_key,
+            "Authorization": (
+                f'MediaBrowser Token="{self.api_key}", Client="Floppy"'
+            ),
             "Accept": "application/json",
         }
 

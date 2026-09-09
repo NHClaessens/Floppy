@@ -29,10 +29,9 @@ class JellyfinClientTests(SimpleTestCase):
         self.assertEqual(result, {"Version": "10.9"})
         called_url = mock_request.call_args.args[1]
         self.assertTrue(called_url.endswith("/System/Info"))
-        self.assertEqual(
-            mock_request.call_args.kwargs["headers"]["X-Emby-Token"],
-            "api-key",
-        )
+        auth = mock_request.call_args.kwargs["headers"]["Authorization"]
+        self.assertIn('Token="api-key"', auth)
+        self.assertTrue(auth.startswith("MediaBrowser "))
 
     @patch("integrations.jellyfin_client.requests.request")
     def test_unauthorized_raises_auth_error(self, mock_request):
