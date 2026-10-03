@@ -5,37 +5,17 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
     - cron: '0 * * * *'  # Runs hourly
   workflow_dispatch:     # Manual trigger
 
-# --- CONFIGURABLE VARIABLES (set in Forgejo UI: Settings > Variables) ---
-vars:
-  # Git Configuration
-  UPSTREAM_REPO_URL: "https://github.com/dannyvfilms/Floppy.git"
-  UPSTREAM_BRANCH: "latest"
-  TARGET_BRANCH: "latest"
-
-  # Docker Registry
-  FORGEJO_REGISTRY: "git.nilsc.org"
-  DOCKER_IMAGE_NAME: "nils/Floppy"
-
-  # LLM Configuration (OpenAI-compatible endpoint)
-  LLM_ENDPOINT: "http://192.168.20.51:11434/v1"
-  LLM_MODEL: "codellama:7b"
-
-secrets:
-  # Git (if upstream is private)
-  GIT_USERNAME: ${{ secrets.GIT_USERNAME }}  # Optional
-  GIT_TOKEN: ${{ secrets.GIT_TOKEN }}          # Optional
-
-  # Docker Registry
-  FORGEJO_REGISTRY_USER: ${{ secrets.FORGEJO_REGISTRY_USER }}
-  FORGEJO_REGISTRY_PASSWORD: ${{ secrets.FORGEJO_REGISTRY_PASSWORD }}
-
-  # LLM (if endpoint requires auth, e.g., OpenAI)
-  LLM_API_KEY: ${{ secrets.LLM_API_KEY }}  # Optional (for OpenAI, etc.)
+# Configure in Forgejo UI:
+#   Variables: UPSTREAM_REPO_URL, UPSTREAM_BRANCH, TARGET_BRANCH,
+#     FORGEJO_REGISTRY, DOCKER_IMAGE_NAME, LLM_ENDPOINT, LLM_MODEL
+#   Secrets: GIT_TOKEN, FORGEJO_REGISTRY_USER, FORGEJO_REGISTRY_PASSWORD,
+#     LLM_API_KEY (optional)
 
 jobs:
   sync-upstream:
     runs-on: linux
-    container: alpine/git
+    container:
+      image: alpine/git
     steps:
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -45,15 +25,16 @@ jobs:
 
       - name: Add upstream remote
         run: |
-          git remote add upstream ${{ vars.UPSTREAM_REPO_URL }}
+          git remote add upstream "${{ vars.UPSTREAM_REPO_URL }}"
           git fetch upstream
 
       - name: Attempt merge
         id: merge
         run: |
-          git checkout ${{ vars.TARGET_BRANCH }}
-          if ! git merge upstream/${{ vars.UPSTREAM_BRANCH }} --no-edit; then
-            echo "MERGE_CONFLICT=1" >> $GITHUB_ENV
+          git checkout "${{ vars.TARGET_BRANCH }}"
+          if ! git merge \
+            "upstream/${{ vars.UPSTREAM_BRANCH }}" --no-edit; then
+            echo "MERGE_CONFLICT=1" >> "$GITHUB_ENV"
           fi
         continue-on-error: true
 
@@ -83,15 +64,16 @@ jobs:
             RESOLVED_CONTENT=$(curl -s \
               -H "Content-Type: application/json" \
               -H "Authorization: Bearer ${{ secrets.LLM_API_KEY }}" \
-              -d '{
-                "model": "${{ vars.LLM_MODEL }}",
-                "messages": [{
-                  "role": "user",
-                  "content": "'"$(cat /tmp/conflict.txt | jq -Rs .)"'"
+              -d "{
+                \"model\": \"${{ vars.LLM_MODEL }}\",
+                \"messages\": [{
+                  \"role\": \"user\",
+                  \"content\": $(jq -Rs . < /tmp/conflict.txt)
                 }],
-                "stream": false
-              }' \
-              "${{ vars.LLM_ENDPOINT }}" | jq -r '.choices[0].message.content')
+                \"stream\": false
+              }" \
+              "${{ vars.LLM_ENDPOINT }}" \
+              | jq -r '.choices[0].message.content')
             echo "$RESOLVED_CONTENT" > "$file"
             git add "$file"
           done
@@ -100,7 +82,7 @@ jobs:
           git commit -m "$(printf '%s\n' \
             "Auto-merge upstream/${{ vars.UPSTREAM_BRANCH }}" \
             "with LLM conflict resolution")"
-          git push origin ${{ vars.TARGET_BRANCH }}
+          git push origin "${{ vars.TARGET_BRANCH }}"
 
       - name: Build and Push Docker Image
         if: success() || steps.merge.outcome == 'success'
@@ -108,7 +90,7 @@ jobs:
           apk add docker-cli
           echo "${{ secrets.FORGEJO_REGISTRY_PASSWORD }}" | docker login \
             -u "${{ secrets.FORGEJO_REGISTRY_USER }}" \
-            --password-stdin ${{ vars.FORGEJO_REGISTRY }}
+            --password-stdin "${{ vars.FORGEJO_REGISTRY }}"
           IMAGE="${{ vars.FORGEJO_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}"
           docker build -t "${IMAGE}:latest" .
           docker push "${IMAGE}:latest"
