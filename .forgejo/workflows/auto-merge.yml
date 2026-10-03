@@ -13,7 +13,7 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 
 jobs:
   sync-upstream:
-    runs-on: linux
+    runs-on: ${{ vars.RUNNER_LABEL }}
     container:
       image: alpine/git
     steps:
