@@ -1,5 +1,6 @@
+---
 name: Auto-Merge Upstream with LLM Conflict Resolution
-on:
+"on":
   schedule:
     - cron: '0 * * * *'  # Runs hourly
   workflow_dispatch:     # Manual trigger
@@ -7,17 +8,17 @@ on:
 # --- CONFIGURABLE VARIABLES (set in Forgejo UI: Settings > Variables) ---
 vars:
   # Git Configuration
-  UPSTREAM_REPO_URL: "https://github.com/dannyvfilms/Floppy.git"  # Upstream repo
-  UPSTREAM_BRANCH: "latest"                                      # Branch to merge from
-  TARGET_BRANCH: "latest"                                        # Branch in your fork
+  UPSTREAM_REPO_URL: "https://github.com/dannyvfilms/Floppy.git"
+  UPSTREAM_BRANCH: "latest"
+  TARGET_BRANCH: "latest"
 
   # Docker Registry
-  FORGEJO_REGISTRY: "git.nilsc.org"     # Forgejo registry host
-  DOCKER_IMAGE_NAME: "nils/Floppy"                     # Image name
+  FORGEJO_REGISTRY: "git.nilsc.org"
+  DOCKER_IMAGE_NAME: "nils/Floppy"
 
   # LLM Configuration (OpenAI-compatible endpoint)
-  LLM_ENDPOINT: "http://192.168.20.51:11434/v1"  # Ollama (OpenAI mode), OpenAI, etc.
-  LLM_MODEL: "codellama:7b"                                    # Model name
+  LLM_ENDPOINT: "http://192.168.20.51:11434/v1"
+  LLM_MODEL: "codellama:7b"
 
 secrets:
   # Git (if upstream is private)
@@ -51,85 +52,63 @@ jobs:
         id: merge
         run: |
           git checkout ${{ vars.TARGET_BRANCH }}
-          git merge upstream/${{ vars.UPSTREAM_BRANCH }} --no-edit || echo "MERGE_CONFLICT=1" >> $GITHUB_ENV
+          if ! git merge upstream/${{ vars.UPSTREAM_BRANCH }} --no-edit; then
+            echo "MERGE_CONFLICT=1" >> $GITHUB_ENV
+          fi
         continue-on-error: true
 
-      - name: Resolve conflicts with LLM (if needed)
+      - name: Resolve conflicts with LLM
         if: env.MERGE_CONFLICT == '1'
         run: |
-          # Install dependencies
           apk add python3 py3-pip git curl jq
           pip install requests
-
-          # Get conflicted files
           CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
           if [ -z "$CONFLICTED_FILES" ]; then
             echo "No conflicts to resolve."
             exit 0
           fi
-
-          # Resolve each conflicted file
           for file in $CONFLICTED_FILES; do
             echo "Resolving conflicts in: $file"
-
-            # Extract conflict markers
-            CONFLICT_CONTENT=$(cat "$file")
-            OURS=$(echo "$CONFLICT_CONTENT" | awk '/<<<<<<< HEAD/{flag=1; next} /=======/{flag=0} flag')
-            THEIRS=$(echo "$CONFLICT_CONTENT" | awk '/======={flag=1; next} />>>>>>>/{flag=0} flag')
-
-            # Call LLM (OpenAI-compatible endpoint)
-            RESOLVED_CONTENT=$(python3 -c "
-import requests, os
-
-# Build headers (add auth if LLM_API_KEY exists)
-headers = {'Content-Type': 'application/json'}
-if os.getenv('LLM_API_KEY'):
-    headers['Authorization'] = f'Bearer {os.getenv(\"LLM_API_KEY\")}'
-
-# Build prompt
-prompt = f'''Resolve the following Git merge conflict in {file}:
-<<<<<<< HEAD
-{OURS}
-=======
-{THEIRS}
->>>>>>> upstream/${{ vars.UPSTREAM_BRANCH }}
-
-Resolve this conflict intelligently, keeping the most logical changes from both sides.
-Return ONLY the resolved file content without conflict markers.'''
-
-# Send request to LLM endpoint
-response = requests.post(
-  '${{ vars.LLM_ENDPOINT }}',
-  json={
-    'model': '${{ vars.LLM_MODEL }}',
-    'messages': [{'role': 'user', 'content': prompt}],
-    'stream': False
-  },
-  headers=headers
-).json()
-
-# Extract response (handles both OpenAI and Ollama/TGI formats)
-if 'choices' in response:
-    print(response['choices'][0]['message']['content'])
-else:
-    print(response.get('response', ''))
-")
-
-            # Write resolved content back to file
+            OURS=$(git show :1:"$file" | head -n -1)
+            THEIRS=$(git show :3:"$file")
+            cat > /tmp/conflict.txt << EOF
+          Resolve the following Git merge conflict in $file:
+          <<<<<<< HEAD
+          $OURS
+          =======
+          $THEIRS
+          >>>>>>> upstream/${{ vars.UPSTREAM_BRANCH }}
+          Return ONLY the resolved file content without conflict markers.
+          EOF
+            RESOLVED_CONTENT=$(curl -s \
+              -H "Content-Type: application/json" \
+              -H "Authorization: Bearer ${{ secrets.LLM_API_KEY }}" \
+              -d '{
+                "model": "${{ vars.LLM_MODEL }}",
+                "messages": [{
+                  "role": "user",
+                  "content": "'"$(cat /tmp/conflict.txt | jq -Rs .)"'"
+                }],
+                "stream": false
+              }' \
+              "${{ vars.LLM_ENDPOINT }}" | jq -r '.choices[0].message.content')
             echo "$RESOLVED_CONTENT" > "$file"
             git add "$file"
           done
-
-          # Commit the resolved merge
           git config --global user.name "forgejo-runner"
           git config --global user.email "runner@forgejo.org"
-          git commit -m "Auto-merge upstream/${{ vars.UPSTREAM_BRANCH }} with LLM conflict resolution"
+          git commit -m "$(printf '%s\n' \
+            "Auto-merge upstream/${{ vars.UPSTREAM_BRANCH }}" \
+            "with LLM conflict resolution")"
           git push origin ${{ vars.TARGET_BRANCH }}
 
       - name: Build and Push Docker Image
         if: success() || steps.merge.outcome == 'success'
         run: |
           apk add docker-cli
-          echo "${{ secrets.FORGEJO_REGISTRY_PASSWORD }}" | docker login -u "${{ secrets.FORGEJO_REGISTRY_USER }}" --password-stdin ${{ vars.FORGEJO_REGISTRY }}
-          docker build -t ${{ vars.FORGEJO_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}:latest .
-          docker push ${{ vars.FORGEJO_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}:latest
+          echo "${{ secrets.FORGEJO_REGISTRY_PASSWORD }}" | docker login \
+            -u "${{ secrets.FORGEJO_REGISTRY_USER }}" \
+            --password-stdin ${{ vars.FORGEJO_REGISTRY }}
+          IMAGE="${{ vars.FORGEJO_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}"
+          docker build -t "${IMAGE}:latest" .
+          docker push "${IMAGE}:latest"
