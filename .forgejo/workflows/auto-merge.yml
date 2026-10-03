@@ -7,8 +7,8 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 
 # Configure in Forgejo UI:
 #   Variables: UPSTREAM_REPO_URL, UPSTREAM_BRANCH, TARGET_BRANCH,
-#     FORGEJO_REGISTRY, DOCKER_IMAGE_NAME, LLM_ENDPOINT, LLM_MODEL
-#   Secrets: GIT_TOKEN, FORGEJO_REGISTRY_USER, FORGEJO_REGISTRY_PASSWORD,
+#     IMAGE_REGISTRY, DOCKER_IMAGE_NAME, LLM_ENDPOINT, LLM_MODEL
+#   Secrets: GIT_TOKEN, IMAGE_REGISTRY_USER, IMAGE_REGISTRY_PASSWORD,
 #     LLM_API_KEY (optional)
 
 jobs:
@@ -88,9 +88,9 @@ jobs:
         if: success() || steps.merge.outcome == 'success'
         run: |
           apk add docker-cli
-          echo "${{ secrets.FORGEJO_REGISTRY_PASSWORD }}" | docker login \
-            -u "${{ secrets.FORGEJO_REGISTRY_USER }}" \
-            --password-stdin "${{ vars.FORGEJO_REGISTRY }}"
-          IMAGE="${{ vars.FORGEJO_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}"
+          echo "${{ secrets.IMAGE_REGISTRY_PASSWORD }}" | docker login \
+            -u "${{ secrets.IMAGE_REGISTRY_USER }}" \
+            --password-stdin "${{ vars.IMAGE_REGISTRY }}"
+          IMAGE="${{ vars.IMAGE_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}"
           docker build -t "${IMAGE}:latest" .
           docker push "${IMAGE}:latest"
