@@ -11,7 +11,10 @@ from django.db import models
 
 from app import cache_utils
 from app.models.choices import MediaTypes
-from app.models.manager import MediaManager
+from app.models.manager import (
+    MediaManager,
+    _media_list_deferred_item_fields,
+)
 from users.models import MediaStatusChoices
 
 ENTRY_GROUPING_PREFERENCE_FIELDS = {
@@ -27,29 +30,6 @@ _ENTRY_GROUPING_MODE: ContextVar[bool | None] = ContextVar(
     default=None,
 )
 _POST_SORT_KEYS = frozenset({"progress", "plays", "next_episode_air_date"})
-_DEFERRED_ITEM_FIELDS = (
-    "item__isbn",
-    "item__creators",
-    "item__provider_keywords",
-    "item__provider_external_ids",
-    "item__provider_certification",
-    "item__provider_collection_id",
-    "item__provider_collection_name",
-    "item__provider_game_lengths_match",
-    "item__provider_game_lengths_fetched_at",
-    "item__trakt_popularity_fetched_at",
-    "item__metadata_fetched_at",
-    "item__themes",
-    "item__provider_popularity",
-    "item__provider_rating_count",
-    "item__trakt_rating",
-    "item__trakt_rating_count",
-    "item__trakt_popularity_score",
-    "item__publishers",
-    "item__source_material",
-    "item__series_name",
-)
-
 
 def preference_field(media_type: str) -> str | None:
     """Return the saved preference field for a supported media type."""
@@ -98,6 +78,8 @@ def _get_separate_media_list(
     search,
     direction,
     list_sql_filters,
+    *,
+    needs_watch_providers=False,
 ):
     """Return raw tracking rows without duplicate reduction or aggregation."""
     model = apps.get_model(app_label="app", model_name=media_type)
@@ -122,7 +104,15 @@ def _get_separate_media_list(
         media_type,
         list_sql_filters or {},
     )
-    queryset = queryset.select_related("item").defer(*_DEFERRED_ITEM_FIELDS)
+    # The same deferral the grouped path uses, from the same definition. A
+    # local copy of the list had drifted from it and no longer deferred
+    # item__watch_providers -- roughly 146 KiB of JSON a title, decoded for
+    # the whole library, on a page that never renders it.
+    queryset = queryset.select_related("item").defer(
+        *_media_list_deferred_item_fields(
+            needs_watch_providers=needs_watch_providers,
+        ),
+    )
     queryset = manager._apply_prefetch_related(
         queryset,
         media_type,
@@ -164,21 +154,10 @@ def _install_media_list_policy() -> None:
         direction=None,
         *,
         list_sql_filters=None,
-        sql_limit=None,
-        sql_offset=None,
+        needs_watch_providers=False,
     ):
-        """Return media rows under the active entry-grouping policy.
-
-        # FORK (#1004): the SQL pagination fast path (sql_limit/sql_offset)
-        # has no equivalent in _get_separate_media_list's simpler, dedup-free
-        # query — always defer to current_method when it's requested, same
-        # as when entry-grouping mode isn't active at all. The API media-list
-        # path (the only caller that ever passes these) never enables
-        # entry-grouping mode, so this combination isn't expected in
-        # practice; falling through here is a defensive no-op, not a
-        # silently-wrong result.
-        """
-        if _ENTRY_GROUPING_MODE.get() is not True or sql_limit is not None:
+        """Return media rows under the active entry-grouping policy."""
+        if _ENTRY_GROUPING_MODE.get() is not True:
             return current_method(
                 manager,
                 user,
@@ -188,8 +167,7 @@ def _install_media_list_policy() -> None:
                 search,
                 direction,
                 list_sql_filters=list_sql_filters,
-                sql_limit=sql_limit,
-                sql_offset=sql_offset,
+                needs_watch_providers=needs_watch_providers,
             )
 
         return _get_separate_media_list(
@@ -201,6 +179,7 @@ def _install_media_list_policy() -> None:
             search,
             direction,
             list_sql_filters,
+            needs_watch_providers=needs_watch_providers,
         )
 
     get_media_list._supports_entry_grouping_context = True

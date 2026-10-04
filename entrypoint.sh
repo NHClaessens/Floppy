@@ -67,7 +67,7 @@ reject_unsafe_managed_directory() {
 
 DATA_DIR_INPUT=${FLOPPY_DATA_DIR:-/floppy/db}
 DATA_DIR=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$DATA_DIR_INPUT")
-LOG_DIR_INPUT=${LOG_DIR:-/floppy/logs}
+LOG_DIR_INPUT=${LOG_DIR:-${DATA_DIR}/logs}
 LOG_DIR_PATH=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$LOG_DIR_INPUT")
 BACKUP_DIR_INPUT=${BACKUP_DIR:-/floppy/backups}
 BACKUP_DIR_PATH=$(python -c 'from pathlib import Path; import sys; print(Path(sys.argv[1]).resolve())' "$BACKUP_DIR_INPUT")
@@ -136,36 +136,21 @@ if [ -z "$DB_HOST" ]; then
             echo "[entrypoint] Checking SQLite storage and relationships for ${DB_FILE}" >&2
             integrity_status=0
             integrity_pid=
-            heartbeat_pid=
-            # One bound, used by the command and its operator message, so the two
-            # can never drift apart.
-            integrity_timeout=600
-            trap 'kill "$integrity_pid" 2>/dev/null || :; wait "$integrity_pid" 2>/dev/null || :; kill "$heartbeat_pid" 2>/dev/null || :; wait "$heartbeat_pid" 2>/dev/null || :; exit 0' TERM INT
-            timeout "$integrity_timeout" python -c 'from config.sqlite_recovery_policy import check_database_for_startup; import sys; check_database_for_startup(sys.argv[1])' "$DB_FILE" &
+            # The watchdog stops the check only when it stops making progress
+            # (no reads and no CPU for minutes), never because it is slow, and
+            # prints the heartbeat lines while it runs. See
+            # src/config/sqlite_startup_watchdog.py.
+            trap 'kill "$integrity_pid" 2>/dev/null || :; wait "$integrity_pid" 2>/dev/null || :; exit 0' TERM INT
+            python -m config.sqlite_startup_watchdog "$DB_FILE" python -c 'from config.sqlite_recovery_policy import check_database_for_startup; import sys; check_database_for_startup(sys.argv[1])' "$DB_FILE" &
             integrity_pid=$!
-            # Heartbeats come from the status sidecar the scan itself writes,
-            # not from polling the scanner's PID, so a missing or malformed
-            # sidecar can never take the entrypoint down under "set -e".
-            (
-                while :; do
-                    sleep 30
-                    python -c 'from config.sqlite_integrity import print_startup_heartbeat; import sys; print_startup_heartbeat(sys.argv[1])' "$DB_FILE" 2>&1 || :
-                done
-            ) &
-            heartbeat_pid=$!
             wait "$integrity_pid" || integrity_status=$?
-            kill "$heartbeat_pid" 2>/dev/null || :
-            wait "$heartbeat_pid" 2>/dev/null || :
             trap - TERM INT
             if [ "$integrity_status" -eq 0 ]; then
                 break
             fi
             case "$integrity_status" in
-                124|143)
-                    # The scanner may have been killed before it could publish
-                    # its own terminal status, so the sidecar is confirmed here.
-                    python -c 'from config.sqlite_integrity import mark_startup_status_timeout; import sys; mark_startup_status_timeout(sys.argv[1], float(sys.argv[2]))' "$DB_FILE" "$integrity_timeout" 2>&1 || :
-                    echo "[entrypoint] SQLite integrity check exceeded its ${integrity_timeout}s timeout; startup is paused before migrations and services. The container will remain unhealthy and idle." >&2
+                124)
+                    echo "[entrypoint] SQLite integrity check stopped making progress; startup is paused before migrations and services. The container will remain unhealthy and idle." >&2
                     ;;
                 *)
                     echo "[entrypoint] SQLite startup is paused because the integrity check failed; migrations and services were not started. The container will remain unhealthy and idle." >&2
@@ -227,6 +212,14 @@ until echo "[entrypoint] Applying database migrations (attempt $((migrate_attemp
     sleep 15
 done
 
+# The image collects static files at build time with DEBUG unset, so
+# debug_toolbar's app (and its static assets) are never installed then. If an
+# operator turns DEBUG on for this container, re-collect now under the actual
+# runtime settings so /static/debug_toolbar/... stops 404ing instead of
+# serving a stale, DEBUG-less build (#1224).
+echo "[entrypoint] Collecting static files" >&2
+python manage.py collectstatic --noinput
+
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 
@@ -271,6 +264,8 @@ fi
 #
 # The log directory can be an operator-selected mount. Change only that
 # directory entry and Floppy's current log file, never unrelated content.
+mkdir -p -- "$LOG_DIR_PATH" 2>/dev/null || true
+export LOG_DIR="$LOG_DIR_PATH"
 if [ -e "$LOG_DIR_PATH" ] && ! timeout 600 chown abc:abc -- "$LOG_DIR_PATH"; then
     echo "[entrypoint] WARNING: chown of ${LOG_DIR_PATH} failed or timed out (stalled mount?); continuing" >&2
 fi
@@ -312,6 +307,12 @@ export FLOPPY_CELERY_ROLE="${FLOPPY_CELERY_ROLE:-background}"
 export FLOPPY_START_INTERACTIVE_WORKER="${FLOPPY_START_INTERACTIVE_WORKER:-true}"
 export FLOPPY_START_DISCOVER_WORKER="${FLOPPY_START_DISCOVER_WORKER:-true}"
 
+# Record what this boot decided. A later `docker exec ... floppy_preflight`
+# does not inherit the exports above, so without this it would re-probe the
+# host and report a tier the running processes were never started with.
+python -c 'import json, sys; from config.runtime_profile import sizing_report; sys.stdout.write(json.dumps(sizing_report()))' \
+    >/tmp/floppy-boot-sizing.json 2>/dev/null || rm -f /tmp/floppy-boot-sizing.json
+
 if [ "$FLOPPY_START_INTERACTIVE_WORKER" = "true" ]; then
     interactive_topology="on(interactive)"
 else
@@ -341,6 +342,15 @@ if [ "$current_nofile" = "unlimited" ] || [ "$current_nofile" -gt "$NOFILE_SOFT"
         echo "[entrypoint] WARNING: open-file soft limit is ${current_nofile} and could not be lowered; celery beat may take hours to start" >&2
     fi
 fi
+
+# supervisord reports every process exit and restart ("exited: gunicorn
+# (terminated by SIGKILL; not expected)"), which is the first thing needed when
+# the container keeps dying. Keep it on the log volume as well as in stdout.
+FLOPPY_SUPERVISORD_LOG=AUTO
+if [ -d "$LOG_DIR_PATH" ] && [ -w "$LOG_DIR_PATH" ]; then
+    FLOPPY_SUPERVISORD_LOG="${LOG_DIR_PATH}/supervisord.log"
+fi
+export FLOPPY_SUPERVISORD_LOG
 
 echo "[entrypoint] Starting services" >&2
 exec supervisord -c /etc/supervisord.conf

@@ -5,7 +5,9 @@
 # Plex counterpart survived as two rows depended on which one was imported
 # first. See issue #642.
 import logging
-from datetime import timedelta
+from datetime import timedelta, timezone
+
+from sortedcontainers import SortedList
 
 import app.models
 
@@ -44,6 +46,7 @@ class PlayTimes:
     def __init__(self):
         """Start with no known plays."""
         self._times = {}
+        self._index = {}
         self._runtimes = {}
 
     def record_runtime(self, key, runtime_minutes):
@@ -57,6 +60,21 @@ class PlayTimes:
         if played_at is None:
             return
         self._times.setdefault(key, []).append(played_at)
+        if key not in self._index:
+            self._index[key] = SortedList()
+        timestamps = self._index[key]
+        # Python compares two datetimes sharing a DST timezone by wall time,
+        # but compares different timezones by UTC. Such mixed orderings are
+        # not a total temporal order. Keep the original scan for those inputs
+        # (and mixed naive/aware histories), including its exception behavior.
+        if (
+            played_at.tzinfo is not None and not isinstance(played_at.tzinfo, timezone)
+        ) or (
+            timestamps and (timestamps[0].tzinfo is None) != (played_at.tzinfo is None)
+        ):
+            self._index[key] = None
+        elif timestamps is not None:
+            timestamps.add(played_at)
 
     def times_for(self, key):
         """Return the known play timestamps for one item."""
@@ -73,8 +91,21 @@ class PlayTimes:
             return False
 
         window = duplicate_play_window(self._runtimes.get(key))
+        timestamps = self._index.get(key)
+        if key in self._index and (
+            timestamps is None
+            or (candidate.tzinfo is not None and not isinstance(candidate.tzinfo, timezone))
+        ):
+            return any(abs(candidate - played_at) < window for played_at in self.times_for(key))
+        if not timestamps:
+            return False
+        position = timestamps.bisect_left(candidate)
+        # Only the predecessor and successor can be the nearest timestamp.
+        # Chunked sorted storage also avoids whole-list shifts for reverse or
+        # out-of-order imports. Keep times_for's insertion order unchanged.
         return any(
-            abs(candidate - played_at) < window for played_at in self.times_for(key)
+            abs(candidate - played_at) < window
+            for played_at in timestamps[max(0, position - 1) : position + 1]
         )
 
 

@@ -10,6 +10,7 @@ from celery import shared_task
 
 from app import backfill_queue
 from app import credits as credit_helpers
+from app.db_retry import run_retryable_db_operation
 from app.log_safety import exception_summary
 from app.models import (
     CREDITS_BACKFILL_VERSION,
@@ -152,8 +153,17 @@ def _populate_credits_for_items(items, delay_seconds):
             # invalidation for the whole batch instead.
             from app.signals import suppress_media_change_side_effects
 
+            # The sync is one atomic block, so a lock error rolls it back whole
+            # and a retry is safe. A lock held by a concurrent statistics sync
+            # usually clears within a few seconds.
             with suppress_media_change_side_effects():
-                credits.sync_item_credits_from_metadata(item, metadata)
+                run_retryable_db_operation(
+                    lambda item=item, metadata=metadata: (
+                        credits.sync_item_credits_from_metadata(item, metadata)
+                    ),
+                    operation_name="credits sync",
+                    operation_logger=logger,
+                )
             _record_backfill_success(
                 item,
                 MetadataBackfillField.CREDITS,

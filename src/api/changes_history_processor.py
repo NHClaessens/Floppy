@@ -2,7 +2,18 @@ from django.apps import apps
 
 from app.models import MediaTypes
 
-EXCLUDED_FIELDS = {"id", "item", "user", "related_tv", "related_season"}
+# Relations, not user-visible changes. A change entry carries the raw field
+# value, so a related object here reaches the JSON renderer and answers 500
+# ("Object of type ImportRun is not JSON serializable") for any media whose
+# first historical record was written by an import.
+EXCLUDED_FIELDS = {
+    "id",
+    "item",
+    "user",
+    "related_tv",
+    "related_season",
+    "import_run",
+}
 
 
 def delete_changes_history_entry(media_type, history_id, user):

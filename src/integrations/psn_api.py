@@ -25,7 +25,7 @@ from psnawp_api.core import psnawp_exceptions
 from psnawp_api.models.title_stats import PlatformCategory
 
 from app.log_safety import exception_summary
-from integrations.imports.helpers import MediaImportError
+from integrations.imports.helpers import ConnectionAuthError, MediaImportError
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def _translated(operation):
             "Invalid or expired PSN NPSSO token. "
             "Reconnect your PlayStation account with a fresh token."
         )
-        raise MediaImportError(msg) from e
+        raise ConnectionAuthError(msg) from e
     except psnawp_exceptions.PSNAWPForbidden as e:
         logger.warning("PSN %s failed: %s", operation, exception_summary(e))
         msg = "PSN denied access to this profile. Check its privacy settings."

@@ -866,6 +866,55 @@ class MediaManagerTests(TestCase):
         # first; by actual watched count (1/10=10% vs 3/10=30%) it should not.
         self.assertEqual(sorted_list, [in_order_season, skip_ahead_season])
 
+    def _mal_anime(self, media_id, status, provider_episode_count=12):
+        item = Item.objects.create(
+            media_id=media_id,
+            source=Sources.MAL.value,
+            media_type=MediaTypes.ANIME.value,
+            title=f"MAL {media_id}",
+            image="http://example.com/mal.jpg",
+            status=status,
+            provider_episode_count=provider_episode_count,
+            runtime_minutes=24,
+        )
+        return Anime.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            progress=1,
+        )
+
+    def test_annotate_max_progress_finished_anime_without_events(self):
+        """A finished MAL anime with no schedule events uses its episode count."""
+        anime = self._mal_anime("9001", "Finished")
+
+        MediaManager().annotate_max_progress([anime], MediaTypes.ANIME.value)
+
+        self.assertEqual(anime.max_progress, 12)
+        self.assertEqual(anime.total_runtime_minutes, 12 * 24)
+        self.assertNotEqual(anime.formatted_total_runtime, "--")
+
+    def test_annotate_max_progress_airing_anime_without_events(self):
+        """An airing anime waits for real events instead of the planned total."""
+        anime = self._mal_anime("9002", "Airing")
+
+        MediaManager().annotate_max_progress([anime], MediaTypes.ANIME.value)
+
+        self.assertIsNone(anime.max_progress)
+
+    def test_annotate_max_progress_anime_events_beat_episode_count(self):
+        """Released events stay authoritative over the provider episode count."""
+        anime = self._mal_anime("9003", "Finished")
+        Event.objects.create(
+            item=anime.item,
+            content_number=10,
+            datetime=timezone.now() - timedelta(days=1),
+        )
+
+        MediaManager().annotate_max_progress([anime], MediaTypes.ANIME.value)
+
+        self.assertEqual(anime.max_progress, 10)
+
     def test_annotate_max_progress(self):
         """Test the annotate_max_progress method."""
         manager = MediaManager()

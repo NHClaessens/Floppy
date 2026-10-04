@@ -23,7 +23,11 @@ from app.services.grouped_anime import GroupedAnimeMatch
 from integrations import tasks
 from integrations.imports import helpers, plex
 from integrations.imports.plex import PlexHistoryImporter
-from integrations.models import PlexAccount
+from integrations.models import (
+    ExternalReference,
+    ExternalReferenceReviewStatus,
+    PlexAccount,
+)
 
 
 # Suppress logging during tests
@@ -1412,7 +1416,7 @@ class TestPlexPostImportSideEffects(TestCase):
         self.user = User.objects.create_user(username="plexsideeffects")
 
     @patch("integrations.tasks.update_collection_metadata_from_plex.apply_async")
-    @patch("app.statistics_cache.schedule_all_ranges_refresh")
+    @patch("app.statistics_cache.invalidate_all_statistics_days")
     @patch("integrations.tasks._media_imports.history_cache.invalidate_history_cache")
     @patch("integrations.tasks._media_imports.events.tasks.reload_calendar.delay")
     @patch("integrations.imports.plex.importer")
@@ -1431,14 +1435,16 @@ class TestPlexPostImportSideEffects(TestCase):
         self.assertIn("1 created", result)
         mock_reload_calendar.assert_called_once()
         mock_invalidate_history.assert_called_once_with(self.user.id, force=True)
-        mock_schedule_stats.assert_called_once_with(self.user.id)
+        mock_schedule_stats.assert_called_once_with(
+            self.user.id, reason="media_import"
+        )
         mock_collection_refresh.assert_called_once_with(
             args=("all", self.user.id),
             countdown=60,
         )
 
     @patch("integrations.tasks.update_collection_metadata_from_plex.apply_async")
-    @patch("app.statistics_cache.schedule_all_ranges_refresh")
+    @patch("app.statistics_cache.invalidate_all_statistics_days")
     @patch("integrations.tasks._media_imports.history_cache.invalidate_history_cache")
     @patch("integrations.tasks._media_imports.events.tasks.reload_calendar.delay")
     @patch("integrations.imports.plex.importer")
@@ -1460,9 +1466,10 @@ class TestPlexPostImportSideEffects(TestCase):
         tasks.import_media(mock_importer, "all", self.user.id, "new")
 
         mock_reload_calendar.assert_not_called()
-        # The rest of the post-import refresh work still runs.
-        mock_invalidate_history.assert_called_once_with(self.user.id, force=True)
-        mock_schedule_stats.assert_called_once_with(self.user.id)
+        # No tracked rows changed, so the existing history/statistics payloads
+        # remain valid and recurring polling must not rebuild them.
+        mock_invalidate_history.assert_not_called()
+        mock_schedule_stats.assert_not_called()
 
 
 class TestPlexUsernameImportBehavior(TestCase):
@@ -1914,6 +1921,14 @@ class TestPlexIdentityAndScorePreservation(TestCase):
         importer._current_server_owned = owned
         return importer
 
+    def test_episode_order_identity_check_is_cached(self):
+        """A normal import must not query active orders once per episode."""
+        importer = self._importer()
+
+        with self.assertNumQueries(1):
+            self.assertFalse(importer._has_active_episode_order("123", "tmdb"))
+            self.assertFalse(importer._has_active_episode_order("456", "tmdb"))
+
     def test_friend_server_owner_history_skipped(self):
         """Treat accountID 1 on a shared server as the friend, never this user."""
         importer = self._configured_importer(owned=False)
@@ -2206,7 +2221,297 @@ class TestPlexIdentityAndScorePreservation(TestCase):
             existing_tv.pk,
         )
         self.assertFalse(Item.objects.filter(media_id="273207").exists())
+    @patch("integrations.imports.plex.plex_api.fetch_metadata")
+    def test_show_level_tmdb_id_is_not_re_resolved_via_tvdb_episode_result(
+        self,
+        mock_fetch_metadata,
+    ):
+        """A show-level TVDB ID must not override Plex's show-level TMDB ID."""
+        mock_fetch_metadata.return_value = {
+            "type": "show",
+            "title": "Grey's Anatomy",
+            "year": 2005,
+            "Guid": [
+                {"id": "imdb://tt0413573"},
+                {"id": "tmdb://1416"},
+                {"id": "tvdb://73762"},
+            ],
+        }
+        importer = self._importer()
+        importer._current_section_uri = "http://plex"
+        importer.processor._find_tv_media_id = mock.Mock(
+            side_effect=[
+                ("1416", None, None),
+                ("2221", None, None),
+            ],
+        )
+        metadata = {
+            "type": "episode",
+            "title": "Get Lucky",
+            "grandparentTitle": "Grey's Anatomy",
+            "grandparentRatingKey": "gp1",
+            "parentIndex": 22,
+            "index": 12,
+            "viewedAt": 1700000000,
+            "ratingKey": "rk-ga-1",
+        }
+        ids = {
+            "tmdb_id": "1416",
+            "tvdb_id": None,
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
 
+        recorded = importer._record_episode_entry(metadata, ids)
+
+        self.assertTrue(recorded)
+        self.assertEqual(importer._episode_records[0]["tmdb_id"], "1416")
+        importer.processor._find_tv_media_id.assert_called_once()
+
+    def _episode_row(self, **extra):
+        return {
+            "type": "episode",
+            "title": "Night of the Lizard",
+            "grandparentTitle": "Spider-Man",
+            "parentIndex": 1,
+            "index": 2,
+            "viewedAt": 1723919050,
+            "ratingKey": "rk-876",
+            **extra,
+        }
+
+    @patch("app.providers.tvdb.enabled", return_value=False)
+    @patch("app.providers.tmdb.search", return_value={"results": []})
+    @patch(
+        "app.providers.tmdb.find",
+        return_value={"tv_results": [], "tv_episode_results": []},
+    )
+    def test_episode_tmdb_id_is_never_used_as_show_id(self, *_mocks):
+        """An unresolved episode must not become /tv/<episode tmdb id> (#876)."""
+        importer = self._importer()
+        ids = {
+            "tmdb_id": "999001",
+            "tvdb_id": "283512",
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        recorded = importer._record_episode_entry(self._episode_row(), ids)
+
+        self.assertFalse(recorded)
+        self.assertEqual(importer._episode_records, [])
+
+    def _show_metadata(self):
+        return {
+            "type": "show",
+            "title": "Spider-Man",
+            "year": 1994,
+            "Guid": [{"id": "tmdb://888"}],
+        }
+
+    @patch("integrations.imports.plex.plex_api.fetch_metadata")
+    @patch("app.providers.tmdb.find")
+    def test_tvdb_episode_id_colliding_with_a_series_is_ignored(
+        self,
+        mock_find,
+        mock_fetch_metadata,
+    ):
+        """A TVDB episode ID that is also a series ID must not pick that series."""
+        mock_find.return_value = {
+            "tv_results": [{"id": 5555}],
+            "tv_episode_results": [],
+        }
+        mock_fetch_metadata.return_value = self._show_metadata()
+        importer = self._importer()
+        importer._current_section_uri = "http://plex"
+        ids = {
+            "tmdb_id": None,
+            "tvdb_id": "283512",
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        recorded = importer._record_episode_entry(
+            self._episode_row(grandparentRatingKey="gp1"),
+            ids,
+        )
+
+        self.assertTrue(recorded)
+        record = importer._episode_records[0]
+        self.assertEqual(record["tmdb_id"], "888")
+        self.assertEqual((record["season_number"], record["episode_number"]), (1, 2))
+
+    @patch("integrations.imports.plex.plex_api.fetch_metadata")
+    @patch("app.providers.tmdb.find")
+    def test_agreeing_episode_lookup_keeps_tmdb_numbering(
+        self,
+        mock_find,
+        mock_fetch_metadata,
+    ):
+        """Episode-level numbering is still used when it belongs to the show."""
+        mock_find.return_value = {
+            "tv_results": [],
+            "tv_episode_results": [
+                {"show_id": 888, "season_number": 2, "episode_number": 5},
+            ],
+        }
+        mock_fetch_metadata.return_value = self._show_metadata()
+        importer = self._importer()
+        importer._current_section_uri = "http://plex"
+        ids = {
+            "tmdb_id": None,
+            "tvdb_id": "283512",
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        importer._record_episode_entry(
+            self._episode_row(grandparentRatingKey="gp1"),
+            ids,
+        )
+
+        record = importer._episode_records[0]
+        self.assertEqual(record["tmdb_id"], "888")
+        self.assertEqual((record["season_number"], record["episode_number"]), (2, 5))
+
+
+    @patch("app.providers.tvdb.enabled", return_value=False)
+    @patch(
+        "app.providers.tmdb.find",
+        return_value={"tv_results": [], "tv_episode_results": []},
+    )
+    def test_legacy_agent_tmdb_guid_still_names_the_show(self, *_mocks):
+        """themoviedb://<show>/<season>/<episode> carries the show's TMDB ID."""
+        importer = self._importer()
+        ids = {
+            "tmdb_id": "1416",
+            "tvdb_id": None,
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        recorded = importer._record_episode_entry(
+            self._episode_row(
+                guid="com.plexapp.agents.themoviedb://1416/1/2?lang=en",
+            ),
+            ids,
+        )
+
+        self.assertTrue(recorded)
+        self.assertEqual(importer._episode_records[0]["tmdb_id"], "1416")
+
+    @patch("integrations.imports.plex.plex_api.fetch_metadata")
+    @patch("app.providers.tmdb.find")
+    def test_episode_hit_under_another_tmdb_show_is_trusted(
+        self,
+        mock_find,
+        mock_fetch_metadata,
+    ):
+        """TMDB can split one Plex show; a real episode hit keeps its show."""
+        mock_find.return_value = {
+            "tv_results": [],
+            "tv_episode_results": [
+                {"show_id": 239770, "season_number": 1, "episode_number": 1},
+            ],
+        }
+        mock_fetch_metadata.return_value = self._show_metadata()
+        importer = self._importer()
+        importer._current_section_uri = "http://plex"
+        ids = {
+            "tmdb_id": None,
+            "tvdb_id": None,
+            "imdb_id": "tt27526113",
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        importer._record_episode_entry(
+            self._episode_row(grandparentRatingKey="gp1"),
+            ids,
+        )
+
+        self.assertEqual(importer._episode_records[0]["tmdb_id"], "239770")
+
+    def _auto_reference(self, *, corrected):
+        wrong, _ = Item.objects.get_or_create(
+            media_id="5555",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            defaults={"title": "Wrong Show"},
+        )
+        return ExternalReference.objects.create(
+            user=self.user,
+            integration="plex",
+            source_account="machine::111",
+            external_namespace="plex_rating_key",
+            external_identity="rk-876",
+            media_type=MediaTypes.TV.value,
+            matched_item=None if corrected else wrong,
+            corrected_item=wrong if corrected else None,
+            review_status=(
+                ExternalReferenceReviewStatus.CORRECTED.value
+                if corrected
+                else ExternalReferenceReviewStatus.RESOLVED.value
+            ),
+        )
+
+    @patch("integrations.imports.plex.plex_api.fetch_metadata")
+    @patch(
+        "app.providers.tmdb.find",
+        return_value={"tv_results": [], "tv_episode_results": []},
+    )
+    def test_wrong_automatic_match_heals_on_reimport(
+        self,
+        _mock_find,
+        mock_fetch_metadata,
+    ):
+        """An earlier wrong auto-match must not pin later imports (#876)."""
+        mock_fetch_metadata.return_value = self._show_metadata()
+        importer = self._importer()
+        importer._current_section_uri = "http://plex"
+        ids = {
+            "tmdb_id": None,
+            "tvdb_id": "283512",
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        importer._record_episode_entry(
+            self._episode_row(grandparentRatingKey="gp1"),
+            ids,
+            reference=self._auto_reference(corrected=False),
+        )
+
+        self.assertEqual(importer._episode_records[0]["tmdb_id"], "888")
+
+    @patch("integrations.imports.plex.plex_api.fetch_metadata")
+    def test_saved_correction_still_wins(self, mock_fetch_metadata):
+        """A user's correction overrides the show's own provider IDs."""
+        mock_fetch_metadata.return_value = self._show_metadata()
+        importer = self._importer()
+        importer._current_section_uri = "http://plex"
+        ids = {
+            "tmdb_id": None,
+            "tvdb_id": "283512",
+            "imdb_id": None,
+            "anidb_id": None,
+            "plex_guid": None,
+        }
+
+        importer._record_episode_entry(
+            self._episode_row(grandparentRatingKey="gp1"),
+            ids,
+            reference=self._auto_reference(corrected=True),
+        )
+
+        self.assertEqual(importer._episode_records[0]["tmdb_id"], "5555")
+        mock_fetch_metadata.assert_not_called()
 
 class TestPlexEpisodeResyncForExistingShow(TestCase):
     """Regression test for issue #541.
@@ -2297,6 +2602,7 @@ class TestPlexEpisodeResyncForExistingShow(TestCase):
             "index": 1,
             "viewedAt": int(self.existing_watched_at.timestamp()),
             "ratingKey": "rk-dup",
+            "guid": "com.plexapp.agents.themoviedb://701/1/1?lang=en",
         }
         new_watched_at = self.existing_watched_at + timezone.timedelta(hours=1)
         new_metadata = {
@@ -2307,6 +2613,7 @@ class TestPlexEpisodeResyncForExistingShow(TestCase):
             "index": 2,
             "viewedAt": int(new_watched_at.timestamp()),
             "ratingKey": "rk-new",
+            "guid": "com.plexapp.agents.themoviedb://701/1/2?lang=en",
         }
         ids = {
             "tmdb_id": "701",
@@ -2526,6 +2833,7 @@ class TestPlexImportCrossSourceDedup(TestCase):
             "index": 8,
             "viewedAt": int(import_watched_at.timestamp()),
             "ratingKey": "rk-ep-dup",
+            "guid": "com.plexapp.agents.themoviedb://901/1/1?lang=en",
         }
         ids = {
             "tmdb_id": "901",
@@ -2621,6 +2929,7 @@ class TestPlexImportCrossSourceDedup(TestCase):
             "index": 1,
             "viewedAt": int(rewatch_at.timestamp()),
             "ratingKey": "rk-ep-rewatch",
+            "guid": "com.plexapp.agents.themoviedb://902/1/1?lang=en",
         }
         ids = {
             "tmdb_id": "902",

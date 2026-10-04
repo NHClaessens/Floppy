@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from contextvars import ContextVar
 from typing import TYPE_CHECKING
 
 import redis
@@ -40,6 +41,40 @@ logger = logging.getLogger(__name__)
 # losing it only costs one redundant drain, while holding it too long stalls the
 # queue until the next enqueue.
 SCHEDULED_MARKER_TTL = 30
+
+# Keep only queue descriptors, never import-sized sets of item IDs. There are
+# currently seven queues; unexpected callers beyond this bound schedule normally.
+MAX_DEFERRED_DRAINS = 16
+_deferred_drains = ContextVar("deferred_backfill_drains", default=None)
+
+
+@contextlib.contextmanager
+def defer_backfill_publication():
+    """Persist queue membership now and publish drains at a bulk-operation boundary.
+
+    This affects only the current execution context. Existing drains can still
+    consume the shared queues, and Redis outages keep the normal direct-dispatch
+    fallback. On process death the missing metadata remains discoverable by the
+    existing startup/nightly scans; queue membership also survives until its TTL.
+    """
+    if _deferred_drains.get() is not None:
+        yield
+        return
+    pending = {}
+    token = _deferred_drains.set(pending)
+    try:
+        yield
+    finally:
+        _deferred_drains.reset(token)
+        for scheduled_key, (task, countdown, kwargs) in pending.items():
+            try:
+                reschedule(scheduled_key, task, countdown, kwargs)
+            except Exception:
+                # Try every queue even if the broker fails, without replacing an
+                # import exception. Persisted metadata gaps allow later recovery.
+                logger.exception(
+                    "Deferred backfill publication failed: %s", scheduled_key
+                )
 
 
 def _client():
@@ -95,6 +130,11 @@ def enqueue(
     if client is None:
         return False
 
+    pending = _deferred_drains.get()
+    defer = pending is not None and (
+        scheduled_key in pending or len(pending) < MAX_DEFERRED_DRAINS
+    )
+    original_scheduled_key = scheduled_key
     queue_key, scheduled_key = namespaced(queue_key), namespaced(scheduled_key)
     try:
         pipe = client.pipeline()
@@ -102,7 +142,8 @@ def enqueue(
         # Refreshed on every enqueue so an actively-fed queue never expires
         # mid-drain, while an abandoned one still ages out.
         pipe.expire(queue_key, ttl)
-        pipe.set(scheduled_key, 1, ex=SCHEDULED_MARKER_TTL, nx=True)
+        if not defer:
+            pipe.set(scheduled_key, 1, ex=SCHEDULED_MARKER_TTL, nx=True)
         results = pipe.execute()
     except redis.RedisError as error:
         logger.debug("Backfill queue %s unavailable: %s", queue_key, error)
@@ -110,7 +151,11 @@ def enqueue(
 
     # SET NX returns truthy only for the caller that created the marker, so
     # exactly one of several concurrent enqueues schedules the drain.
-    if results[-1]:
+    if defer:
+        pending.setdefault(
+            original_scheduled_key, (drain_task, countdown, drain_kwargs or {})
+        )
+    elif results[-1]:
         drain_task.apply_async(countdown=countdown, kwargs=drain_kwargs or {})
     return True
 

@@ -51,6 +51,11 @@ class ImportTaskRegistryConsistencyTests(TestCase):
 
     def test_every_registered_recurring_import_is_queried(self):
         """Every registered recurring import must reach the schedule lookup."""
+        # A worker populates its registry by importing the task modules at
+        # boot. Nothing in a test process does that, and ``integrations.tasks``
+        # only imports its implementations on attribute access, so reading
+        # ``app.tasks`` first would compare against an empty registry.
+        app.loader.import_default_modules()
         recurring_task_names = {
             name for name in app.tasks if name.endswith("(Recurring)")
         }

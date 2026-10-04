@@ -10,6 +10,7 @@ trailer or photo gallery.
 
 from django.core.cache import cache
 
+from app.image_cache import rewrite_image_url
 from app.models import MediaTypes, Sources
 from app.providers import tmdb
 
@@ -45,8 +46,8 @@ def resolve_carousel_media(media_type, source, media_id, *, season_number=None) 
         data = tmdb.carousel_media(media_type, media_id, season_number=season_number)
         photos = [
             {
-                "url": tmdb.get_carousel_image_url(photo["file_path"], size="w1280"),
-                "thumb_url": tmdb.get_carousel_image_url(photo["file_path"], size="w300"),
+                "url": rewrite_image_url(tmdb.get_carousel_image_url(photo["file_path"], size="w1280")),
+                "thumb_url": rewrite_image_url(tmdb.get_carousel_image_url(photo["file_path"], size="w300")),
             }
             for photo in data["photos"]
         ]
@@ -63,10 +64,11 @@ def resolve_carousel_media(media_type, source, media_id, *, season_number=None) 
                 # t_screenshot_big_2x and similar named IGDB transforms crop to a
                 # fixed canvas; t_1080p only caps resolution, so it keeps the
                 # source image's real aspect ratio for the main pane/lightbox.
-                "url": f"https://images.igdb.com/igdb/image/upload/t_1080p/{image_id}.jpg",
-                "thumb_url": (
-                    f"https://images.igdb.com/igdb/image/upload/"
-                    f"t_screenshot_big_2x/{image_id}.jpg"
+                "url": rewrite_image_url(
+                    f"https://images.igdb.com/igdb/image/upload/t_1080p/{image_id}.jpg"
+                ),
+                "thumb_url": rewrite_image_url(
+                    f"https://images.igdb.com/igdb/image/upload/t_screenshot_big_2x/{image_id}.jpg"
                 ),
             }
             for image_id in data["photos"]

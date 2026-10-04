@@ -275,3 +275,33 @@ class ProviderErrorLoggingTests(SimpleTestCase):
             services._rate_limit_headers(response),
             {"Retry-After": "5980", "X-Ratelimit-Daily-Remaining": "0"},
         )
+
+
+class InteractiveTimeoutTests(CooldownIsolationMixin, SimpleTestCase):
+    """A provider that never answers must not hold a web thread for minutes."""
+
+    def _timeout_used(self, *, interactive):
+        ok = Mock()
+        ok.json.return_value = {}
+        with patch.object(services, "resilient_request", return_value=ok) as request:
+            if interactive:
+                with interactive_request_scope():
+                    api_request("igdb", "GET", "https://example.test/x")
+            else:
+                api_request("igdb", "GET", "https://example.test/x")
+        return request.call_args.kwargs["timeout"]
+
+    def test_interactive_request_uses_the_short_timeout(self):
+        self.assertLessEqual(self._timeout_used(interactive=True), 10)
+
+    def test_background_request_keeps_the_patient_timeout(self):
+        self.assertEqual(
+            self._timeout_used(interactive=False),
+            services.settings.REQUEST_TIMEOUT,
+        )
+
+    def test_read_timeouts_are_not_retried_but_connection_failures_are(self):
+        retry = services.session.get_adapter("https://api.themoviedb.org/3").max_retries
+
+        self.assertIs(retry.read, False)
+        self.assertEqual(retry.total, 3)

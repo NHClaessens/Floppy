@@ -75,6 +75,11 @@ class JellyfinStateAdapter:
 
     def resolve_external_id(self, item):
         """Return the Jellyfin item id for a Floppy item, or None."""
+        # The server's numbering is independent of the personal tracking
+        # order. Without an explicit reverse mapping this must need review.
+        if getattr(item, "episode_order_id", None):
+            return None
+
         if item.media_type not in _SUPPORTED_MEDIA_TYPES:
             return None
 

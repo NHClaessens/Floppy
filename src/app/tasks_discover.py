@@ -13,7 +13,7 @@ from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.utils import timezone
 
-from app import history_cache
+from app import cache_safety, history_cache
 from app.interactive_requests import interactive_request_active
 from app.models import MediaTypes
 from app.task_cooperation import CooperativeRun
@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 # Mirrors BACKGROUND_TASK_PRIORITY in tasks.py — both read from the same setting.
 BACKGROUND_TASK_PRIORITY = getattr(settings, "CELERY_TASK_PRIORITY_BACKGROUND", 9)
+DISCOVER_PROFILE_REFRESH_LOCK_SECONDS = 30 * 60
 
 
 @shared_task(name="Refresh Discover Rows")
@@ -29,15 +30,41 @@ def refresh_discover_rows(
     user_id: int, media_type: str, row_keys: list[str], show_more: bool = False
 ):
     """Refresh selected Discover rows for a user."""
+    from app.discover.service import release_row_refresh
+
+    row_keys = row_keys or []
+    try:
+        result = _refresh_rows(user_id, media_type, row_keys, show_more)
+    except Exception:
+        release_row_refresh(user_id, media_type, row_keys, show_more)
+        raise
+    # Keep the higher-level tab cache aligned with refreshed row caches, unless
+    # another row refresh for this tab is still queued: that one rebuilds it.
+    if not release_row_refresh(user_id, media_type, row_keys, show_more):
+        logger.info(
+            "discover_refresh_rows_tab_coalesced user_id=%s media_type=%s row_keys=%s",
+            user_id,
+            media_type,
+            ",".join(row_keys),
+        )
+        return result
+    if result.pop("rebuild_tab", None):
+        _rebuild_tab_after_rows(result["user"], result["media_type"], show_more)
+    result.pop("user", None)
+    return result
+
+
+def _refresh_rows(user_id, media_type, row_keys, show_more):
     from app.discover import tab_cache as discover_tab_cache
     from app.discover.service import refresh_rows_for_user
-    from app.discover.tab_cache import refresh_tab_cache
 
     user_model = get_user_model()
     user = user_model.objects.filter(id=user_id).first()
     if not user:
         logger.warning("discover_refresh_rows_user_missing user_id=%s", user_id)
         return {"refreshed": 0, "reason": "missing_user"}
+    if not user.show_discover:
+        return {"refreshed": 0, "reason": "discover_disabled"}
 
     requested_media_type = (
         (media_type or discover_tab_cache.ALL_MEDIA_KEY).strip().lower()
@@ -56,24 +83,29 @@ def refresh_discover_rows(
         return {"refreshed": 0, "reason": "disabled_media_type", "user_id": user_id}
 
     refreshed = refresh_rows_for_user(
-        user,
-        requested_media_type,
-        row_keys or [],
-        show_more=show_more,
-    )
-    # Keep the higher-level tab cache aligned with refreshed row caches.
-    refresh_tab_cache(
-        user,
-        requested_media_type,
-        show_more=show_more,
-        force=False,
-        clear_provider_cache=False,
+        user, requested_media_type, row_keys, show_more=show_more
     )
     return {
         "refreshed": refreshed,
         "user_id": user_id,
         "media_type": requested_media_type,
+        "rebuild_tab": True,
+        "user": user,
     }
+
+
+def _rebuild_tab_after_rows(user, media_type, show_more):
+    from app.discover.service import stale_refresh_suppressed
+    from app.discover.tab_cache import refresh_tab_cache
+
+    with stale_refresh_suppressed():
+        refresh_tab_cache(
+            user,
+            media_type,
+            show_more=show_more,
+            force=False,
+            clear_provider_cache=False,
+        )
 
 
 @shared_task(name="Refresh Discover Tab Cache")
@@ -93,6 +125,13 @@ def refresh_discover_tab_cache(
     if not user:
         logger.warning("discover_tab_refresh_user_missing user_id=%s", user_id)
         return {"refreshed": False, "reason": "missing_user"}
+    if not user.show_discover:
+        discover_tab_cache.release_refresh_reservation(
+            user_id,
+            (media_type or discover_tab_cache.ALL_MEDIA_KEY).strip().lower(),
+            show_more=show_more,
+        )
+        return {"refreshed": False, "reason": "discover_disabled"}
 
     requested_media_type = (
         (media_type or discover_tab_cache.ALL_MEDIA_KEY).strip().lower()
@@ -109,6 +148,26 @@ def refresh_discover_tab_cache(
             requested_media_type,
         )
         return {"refreshed": False, "reason": "disabled_media_type", "user_id": user_id}
+
+    if (
+        not force
+        and not clear_provider_cache
+        and discover_tab_cache.has_fresh_tab_cache(
+            user_id, requested_media_type, show_more=show_more
+        )
+    ):
+        # A copy queued behind a long task finds the tab already rebuilt for
+        # this activity version by the copy that ran first.
+        discover_tab_cache.release_refresh_lock(
+            user_id, requested_media_type, show_more=show_more
+        )
+        logger.info(
+            "discover_tab_refresh_skipped user_id=%s media_type=%s show_more=%s reason=already_fresh",
+            user_id,
+            requested_media_type,
+            int(bool(show_more)),
+        )
+        return {"refreshed": False, "reason": "already_fresh", "user_id": user_id}
 
     rows = refresh_tab_cache(
         user,
@@ -170,7 +229,7 @@ def warm_discover_startup_tabs(user_ids: list[int] | None = None):
     from app.discover.tab_cache import schedule_user_tab_warmup
 
     user_model = get_user_model()
-    users = user_model.objects.filter(is_active=True)
+    users = user_model.objects.filter(is_active=True, show_discover=True)
     if user_ids:
         users = users.filter(id__in=user_ids)
 
@@ -249,25 +308,44 @@ def warm_history_day_cache_coverage(
 
 
 @shared_task(name="Refresh Discover Profile For User")
-def refresh_discover_profile_for_user(user_id: int, media_types: list[str]):
-    """Recompute one user's Discover taste profiles."""
+def refresh_discover_profile_for_user(
+    user_id: int, media_types: list[str], force: bool = False
+):
+    """Refresh stale profiles, allowing explicit callers to force recomputation."""
     from app.discover.profile import get_or_compute_taste_profile
 
     user_model = get_user_model()
     user = user_model.objects.filter(id=user_id).first()
     if not user:
         return {"profiles_refreshed": 0, "reason": "missing_user"}
+    if not user.show_discover:
+        return {"profiles_refreshed": 0, "reason": "discover_disabled"}
 
     refreshed = 0
+    skipped = 0
     for media_type in media_types:
-        get_or_compute_taste_profile(user, media_type, force=True)
-        refreshed += 1
-    return {"profiles_refreshed": refreshed}
+        lock_key = f"discover_profile_refresh:{user_id}:{media_type}"
+        if not force and not cache_safety.acquire_lock(
+            lock_key,
+            timeout=DISCOVER_PROFILE_REFRESH_LOCK_SECONDS,
+            on_error=cache_safety.ON_ERROR_SKIP,
+        ):
+            skipped += 1
+            continue
+        try:
+            get_or_compute_taste_profile(user, media_type, force=force)
+            refreshed += 1
+        finally:
+            if not force:
+                cache_safety.release_lock(lock_key)
+    return {"profiles_refreshed": refreshed, "profiles_skipped": skipped}
 
 
 @shared_task(name="Refresh Discover Profiles")
 def refresh_discover_profiles(
-    user_ids: list[int] | None = None, media_types: list[str] | None = None
+    user_ids: list[int] | None = None,
+    media_types: list[str] | None = None,
+    force: bool = False,
 ):
     """Fan out Discover taste profile refreshes, capped per run.
 
@@ -283,18 +361,28 @@ def refresh_discover_profiles(
     target_media_types = media_types or [ALL_MEDIA_KEY]
 
     if user_ids:
-        selected = list(user_model.objects.filter(id__in=user_ids))
+        selected = list(
+            user_model.objects.filter(id__in=user_ids, show_discover=True),
+        )
     else:
         cutoff = timezone.now() - timedelta(days=PROFILE_REFRESH_ACTIVE_DAYS)
         selected = _rotating_user_batch(
-            user_model.objects.filter(is_active=True, last_login__gte=cutoff),
+            user_model.objects.filter(
+                is_active=True,
+                show_discover=True,
+                last_login__gte=cutoff,
+            ),
             "discover_profile_refresh_cursor",
             settings.WARMUP_USER_LIMIT,
         )
 
     for index, user in enumerate(selected):
         refresh_discover_profile_for_user.apply_async(
-            kwargs={"user_id": user.id, "media_types": target_media_types},
+            kwargs={
+                "user_id": user.id,
+                "media_types": target_media_types,
+                "force": force,
+            },
             # Spread them out so a single beat tick doesn't become a burst.
             countdown=index * 5,
             priority=BACKGROUND_TASK_PRIORITY,
@@ -315,6 +403,14 @@ def warm_discover_api_cache():
         return {
             "skipped": True,
             "reason": "interactive_request_active",
+            "warmed": 0,
+            "failed": 0,
+        }
+
+    if not get_user_model().objects.filter(is_active=True, show_discover=True).exists():
+        return {
+            "skipped": True,
+            "reason": "discover_disabled",
             "warmed": 0,
             "failed": 0,
         }

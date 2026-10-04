@@ -1,4 +1,5 @@
 # FORK: tests for the receive-only Koito listening-history integration.
+from datetime import timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
@@ -6,6 +7,7 @@ from django.core.cache import cache
 from django.db.utils import OperationalError
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from django_celery_beat.models import CrontabSchedule, PeriodicTask
 
 from app.models import Music
@@ -631,6 +633,54 @@ class KoitoExportTests(KoitoTestCase):
     @patch("integrations.koito_api.get_track")
     @patch("integrations.koito_api.get_listens")
     @patch("integrations.koito_api.get_export")
+    def test_stale_history_import_lock_is_reclaimed_and_import_retries(
+        self,
+        mock_export,
+        mock_listens,
+        mock_track,
+        mock_album,
+    ):
+        """A lock left by a worker that died mid-import is reclaimed and retried."""
+        mock_export.return_value = self.EXPORT
+        mock_listens.return_value = _page(
+            [_listen(time="2026-06-01T08:00:00Z", track_id=1)],
+        )
+        mock_track.return_value = {
+            "musicbrainz_id": "rec-1",
+            "duration": 195,
+            "album_id": 5,
+        }
+        mock_album.return_value = {
+            "title": "Music Has the Right to Children",
+            "musicbrainz_id": "rel-1",
+        }
+
+        self.account.history_import_status = LastFMHistoryImportStatus.RUNNING
+        self.account.history_import_started_at = timezone.now() - timedelta(
+            minutes=30
+        )
+        self.account.history_import_last_error_message = ""
+        self.account.save()
+
+        cache.set(
+            koito_sync.get_koito_history_import_lock_key(self.user.id),
+            {"started_at": (timezone.now() - timedelta(minutes=30)).isoformat()},
+        )
+
+        tasks.import_koito_history(user_id=self.user.id)
+
+        self.account.refresh_from_db()
+        self.assertEqual(
+            self.account.history_import_status,
+            LastFMHistoryImportStatus.COMPLETED,
+        )
+        self.assertTrue(self.account.history_import_completed_at)
+        self.assertIsNone(cache.get(koito_sync.get_koito_history_import_lock_key(self.user.id)))
+
+    @patch("integrations.koito_api.get_album")
+    @patch("integrations.koito_api.get_track")
+    @patch("integrations.koito_api.get_listens")
+    @patch("integrations.koito_api.get_export")
     def test_export_and_poll_do_not_duplicate_the_same_listen(
         self,
         mock_export,
@@ -695,3 +745,30 @@ class KoitoReceiveOnlyTests(KoitoTestCase):
         tasks._run_incremental_koito_sync(self.account)
         for call in mock_get.call_args_list:
             self.assertTrue(str(call).startswith("call("))
+
+
+class KoitoFanOutProbeTests(KoitoTestCase):
+    """The scheduled poll re-probes a broken account instead of skipping it forever."""
+
+    def _break(self, failed_ago):
+        self.account.connection_broken = True
+        self.account.last_failed_at = timezone.now() - failed_ago
+        self.account.save(update_fields=["connection_broken", "last_failed_at"])
+
+    @patch("integrations.tasks._koito._run_incremental_koito_sync")
+    def test_broken_account_is_reprobed_once_due(self, mock_run):
+        mock_run.return_value = {"status": "success"}
+        self._break(timedelta(hours=2))
+
+        tasks.poll_all_koito_accounts()
+
+        mock_run.assert_called_once()
+        self.assertEqual(mock_run.call_args.args[0].pk, self.account.pk)
+
+    @patch("integrations.tasks._koito._run_incremental_koito_sync")
+    def test_recently_rejected_account_waits_for_next_probe(self, mock_run):
+        self._break(timedelta(minutes=5))
+
+        tasks.poll_all_koito_accounts()
+
+        mock_run.assert_not_called()

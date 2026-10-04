@@ -79,6 +79,8 @@ def resolve_episode_coordinate(
 
 def cleanup_episode_history_for_season(season, episode_number):
     """Delete detached history for one already-resolved tracked season."""
+    if season.item.episode_order_id or season.order_archived:
+        return 0
     return Episode.objects.filter(
         related_season=season,
         item__media_id=season.item.media_id,
@@ -98,6 +100,8 @@ def cleanup_episode_history_for_route(
     library_media_type=None,
 ):
     """Delete detached history rows matching a user's episode route."""
+    if str(media_id).startswith("order_"):
+        return 0
     seasons = Season.objects.filter(
         user=user,
         item__media_id=media_id,
@@ -105,6 +109,8 @@ def cleanup_episode_history_for_route(
         item__media_type=MediaTypes.SEASON.value,
         item__season_number=season_number,
         item__episode_number__isnull=True,
+        order_archived=False,
+        item__episode_order__isnull=True,
     )
     if library_media_type:
         seasons = seasons.filter(item__library_media_type=library_media_type)

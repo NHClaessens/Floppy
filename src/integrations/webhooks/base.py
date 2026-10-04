@@ -1,7 +1,10 @@
 import logging
 import re
 from datetime import UTC, datetime
+from http import HTTPStatus
 
+import requests
+from django.db.models import Q
 from django.utils import timezone
 
 import app
@@ -9,10 +12,11 @@ from app import fork_services_play_dedupe as play_dedupe
 from app.log_safety import exception_summary
 from app.models import MediaTypes, ProviderMetadataStatus, Sources, Status
 from app.providers import tvmaze
+from app.providers.services import ProviderAPIError
 from app.services.completion import select_preferred_activity_entry
 from integrations import episode_remap
-from integrations.matching import unique_title_match
-from integrations.webhooks import anime_mappings
+from integrations.matching import split_title_year, title_matches
+from integrations.webhooks import anime_mappings, write_policy
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +26,43 @@ logger = logging.getLogger(__name__)
 # in both libraries at once (discussion #967).
 ANIME_EPISODE_REFUSED = object()
 
+# Bounds the per-candidate show lookups a title tie can cost.
+MAX_SEASON_TIEBREAK_CANDIDATES = 5
+
+
+def _is_transient_provider_error(error):
+    """Return whether a provider failure is worth retrying the webhook for.
+
+    A 404 or other client error is an answer (e.g. an episode-level TMDB id);
+    a timeout, rate limit, or server error says nothing about the id.
+    """
+    if isinstance(error, requests.exceptions.RequestException):
+        return True
+    if not isinstance(error, ProviderAPIError):
+        return False
+    status = error.status_code
+    return (
+        status is None
+        or status in (HTTPStatus.REQUEST_TIMEOUT, HTTPStatus.TOO_MANY_REQUESTS)
+        or status >= HTTPStatus.INTERNAL_SERVER_ERROR
+    )
+
 
 class BaseWebhookProcessor:
     """Base class for webhook processors."""
+
+    # Short label recorded on `Media.entry_source`/`MoviePlay.entry_source`/
+    # `Episode.entry_source` for rows this processor creates. Subclasses set
+    # their provider name.
+    SOURCE_LABEL = ""
 
     MEDIA_TYPE_MAPPING = {
         "Episode": MediaTypes.TV.value,
         "Movie": MediaTypes.MOVIE.value,
     }
+    # True when an episode payload's TVDB/IMDb ids name the episode itself
+    # (Jellyfin, Emby). See `_find_tv_media_id(episode_ids=...)`.
+    TV_IDS_ARE_EPISODE_LEVEL = False
 
     def process_payload(self, payload, user):
         """Process webhook payload."""
@@ -62,6 +95,27 @@ class BaseWebhookProcessor:
     def _is_unplayed(self, _payload):
         """Check if media is marked as unplayed."""
         return False
+
+    def _is_manual_mark(self, _payload):
+        """Check if the event is a user toggling watched state, not a playback.
+
+        A manual mark for something already watched is agreement, not a
+        rewatch. It is also what our own watched-state push echoes back as,
+        stamped with the push time, so the play-time dedupe cannot catch it.
+        """
+        return False
+
+    def _should_record(self, event, *, played, position_seconds):
+        """Check this integration's write policy before touching tracking rows.
+
+        See integrations/webhooks/write_policy.py.
+        """
+        return write_policy.should_record(
+            self.SOURCE_LABEL,
+            event,
+            played=played,
+            position_seconds=position_seconds,
+        )
 
     def _extract_external_ids(self, payload):
         """Extract external IDs from payload."""
@@ -210,10 +264,17 @@ class BaseWebhookProcessor:
                         return None
 
         series_title = self._extract_series_title(payload)
+        payload_season = (
+            season_number
+            if season_number is not None
+            else self._extract_season_episode_from_payload(payload)[0]
+        )
         media_id, found_season, found_episode = self._find_tv_media_id(
             ids,
             series_title=series_title,
             allow_title_fallback=True,
+            season_number=payload_season,
+            episode_ids=self.TV_IDS_ARE_EPISODE_LEVEL,
         )
         if not media_id:
             logger.warning("No matching TMDB ID found for TV show")
@@ -240,7 +301,19 @@ class BaseWebhookProcessor:
         tv_metadata = None
         try:
             tv_metadata = app.providers.tmdb.tv_with_seasons(media_id, [season_number])
-        except Exception as exc:  # pragma: no cover - defensive network guard
+        except Exception as exc:
+            if _is_transient_provider_error(exc):
+                # The show id may well be right; TMDB just did not answer.
+                # Guessing by title here recorded watches on unrelated
+                # same-title shows (#1279). Let the webhook task retry.
+                logger.warning(
+                    "TMDB unavailable loading show %s season %s; retrying the "
+                    "webhook: %s",
+                    media_id,
+                    season_number,
+                    exception_summary(exc),
+                )
+                raise
             logger.warning(
                 "Failed tmdb.tv_with_seasons for season %s: %s",
                 season_number,
@@ -254,6 +327,7 @@ class BaseWebhookProcessor:
                 alt_ids["tmdb_id"] = None
                 fallback_media_id, alt_season, alt_episode = self._find_tv_media_id(
                     alt_ids,
+                    episode_ids=self.TV_IDS_ARE_EPISODE_LEVEL,
                 )
 
                 if fallback_media_id:
@@ -282,21 +356,11 @@ class BaseWebhookProcessor:
                         "Attempting title-based TMDB search for webhook payload"
                     )
                     try:
-                        search_results = app.providers.tmdb.search(
-                            MediaTypes.TV.value,
+                        media_id = self._resolve_tv_by_title(
                             series_title,
-                            page=1,
+                            self._extract_series_year(payload),
+                            season_number=season_number,
                         )
-                        metadata = payload.get("Metadata") or {}
-                        matched = unique_title_match(
-                            (search_results or {}).get("results") or [],
-                            series_title,
-                            year=(
-                                metadata.get("grandparentYear")
-                                or metadata.get("year")
-                            ),
-                        )
-                        media_id = matched.get("media_id") if matched else None
                         if media_id:
                             tv_metadata = app.providers.tmdb.tv_with_seasons(
                                 media_id,
@@ -325,6 +389,8 @@ class BaseWebhookProcessor:
                 alt_ids,
                 series_title=series_title,
                 allow_title_fallback=True,
+                season_number=season_number,
+                episode_ids=self.TV_IDS_ARE_EPISODE_LEVEL,
             )
             if fallback_media_id:
                 media_id = fallback_media_id
@@ -349,6 +415,7 @@ class BaseWebhookProcessor:
                     return None
         elif (
             ids.get("tvdb_id")
+            and not self.TV_IDS_ARE_EPISODE_LEVEL
             and not self._extract_payload_tmdb_id(payload)
             and str(tv_metadata.get("tvdb_id") or "") != str(ids["tvdb_id"])
         ):
@@ -895,7 +962,7 @@ class BaseWebhookProcessor:
     def _remember_tvdb_override(self, media_id, ids):
         """Persist a preferred TVDB ID for a resolved TMDB show when available."""
         tvdb_id = ids.get("tvdb_id")
-        if not media_id or not tvdb_id:
+        if not media_id or not tvdb_id or self.TV_IDS_ARE_EPISODE_LEVEL:
             return
 
         app.providers.tmdb.set_tvdb_id_override(media_id, tvdb_id)
@@ -1063,6 +1130,8 @@ class BaseWebhookProcessor:
         series_title=None,
         allow_title_fallback=False,
         year=None,
+        season_number=None,
+        episode_ids=False,
     ):
         """Find TV media ID from external IDs, with optional title search fallback.
 
@@ -1072,6 +1141,12 @@ class BaseWebhookProcessor:
             series_title: Show title used for title-search fallback.
             allow_title_fallback: Enable title-search when all ID lookups fail.
             year: First-air year used to disambiguate title-search results.
+            season_number: Played season, used only to break a title tie.
+            episode_ids: The TVDB/IMDb ids name one episode, not a show. TMDB's
+                find returns a bare show when an episode's TVDB id happens to
+                equal an unrelated series' TVDB id (#876, #1312), so that hit
+                is ignored and lookup moves on to the TVDB episode / title
+                fallbacks.
 
         Returns:
             tuple: (media_id, season_number, episode_number)
@@ -1107,7 +1182,9 @@ class BaseWebhookProcessor:
                         result.get("season_number"),
                         result.get("episode_number"),
                     )
-                if response.get("tv_results"):
+                if response.get("tv_results") and not (
+                    episode_ids and ext_type == "tvdb_id"
+                ):
                     result = response["tv_results"][0]
                     return result.get("id"), None, None
 
@@ -1155,42 +1232,94 @@ class BaseWebhookProcessor:
             "TV ID missing; attempting title fallback search for: %s", series_title
         )
         try:
-            search_results = app.providers.tmdb.search(
-                MediaTypes.TV.value,
+            found_id = self._resolve_tv_by_title(
                 series_title,
-                page=1,
+                year,
+                season_number=season_number,
             )
-            results = (search_results or {}).get("results") or []
-            found_id = self._pick_title_search_result(results, series_title, year)
-            if found_id:
-                logger.info("Resolved TV entry via title search")
-                return str(found_id), None, None
-
-            # Retry with year stripped from titles like "Show (YYYY)"
-            clean_title = re.sub(r"\s*\(\d{4}\)$", "", series_title[:500])
-            if clean_title != series_title:
-                search_results = app.providers.tmdb.search(
-                    MediaTypes.TV.value,
-                    clean_title,
-                    page=1,
-                )
-                results = (search_results or {}).get("results") or []
-                found_id = self._pick_title_search_result(results, clean_title, year)
-                if found_id:
-                    logger.info("Resolved TV entry via normalized title search")
-                    return str(found_id), None, None
         except Exception as exc:
             logger.warning(
                 "Title search failed during TV resolution: %s",
                 exception_summary(exc),
             )
+            found_id = None
+        if found_id:
+            logger.info("Resolved TV entry via title search")
+            return found_id, None, None
 
         return None, None, None
 
-    def _pick_title_search_result(self, results, title, year=None):
-        """Pick only a unique normalized-title result constrained by year."""
-        result = unique_title_match(results, title, year=year)
-        return result.get("media_id") if result else None
+    def _extract_series_year(self, payload):
+        """Return the show's first-air year from the payload, if it has one.
+
+        Override in subclasses. Never return an episode's or season's air
+        year: it selects whichever same-title show premiered that year.
+        """
+        return
+
+    def _resolve_tv_by_title(self, series_title, year=None, *, season_number=None):
+        """Return the show-level TMDB id of a unique exact-title match.
+
+        This is the one title-search path for TV webhooks. ``year`` is the
+        show's first-air year; a trailing "(YYYY)" in the title supplies it
+        when absent, and the provider is searched with the bare title. When
+        several shows share the title, the played season breaks the tie: a
+        show that has no such season cannot be the one being watched. A miss
+        or a remaining tie is remembered so the caller can queue the event
+        for review instead of dropping it silently (issue #1279).
+        """
+        title, title_year = split_title_year(series_title)
+        if not title:
+            return None
+        search_results = app.providers.tmdb.search(
+            MediaTypes.TV.value,
+            title,
+            page=1,
+        )
+        candidate_ids = [
+            str(result["media_id"])
+            for result in title_matches(
+                (search_results or {}).get("results") or [],
+                title,
+                year=year or title_year,
+            )
+            if result.get("media_id")
+        ]
+        if (
+            len(candidate_ids) > 1
+            and season_number not in (None, 0)
+            and len(candidate_ids) <= MAX_SEASON_TIEBREAK_CANDIDATES
+        ):
+            candidate_ids = [
+                media_id
+                for media_id in candidate_ids
+                if self._show_has_season(media_id, season_number)
+            ]
+            if len(candidate_ids) == 1:
+                logger.info(
+                    "Resolved same-title TV show %s by its season %s",
+                    candidate_ids[0],
+                    season_number,
+                )
+        if len(candidate_ids) == 1:
+            return candidate_ids[0]
+        self._unresolved_series_title = series_title
+        return None
+
+    def _show_has_season(self, media_id, season_number):
+        """Return whether TMDB lists ``season_number`` for the show."""
+        try:
+            seasons = (
+                app.providers.tmdb.tv(media_id).get("related") or {}
+            ).get("seasons") or []
+        except ProviderAPIError as exc:
+            if _is_transient_provider_error(exc):
+                raise
+            return False
+        return any(
+            str(season.get("season_number")) == str(season_number)
+            for season in seasons
+        )
 
     def _get_mal_id_from_provider_links(
         self,
@@ -1320,6 +1449,9 @@ class BaseWebhookProcessor:
                 current_instance.start_date = now
                 current_instance.status = Status.IN_PROGRESS.value
 
+            if self.SOURCE_LABEL and not current_instance.entry_source:
+                current_instance.entry_source = self.SOURCE_LABEL
+
             if current_instance.tracker.changed():
                 current_instance.save()
                 logger.info(
@@ -1335,11 +1467,19 @@ class BaseWebhookProcessor:
             # A second row here is a rewatch, but the same play may already have
             # been recorded by a repeated webhook or by a Trakt/Plex history
             # import, so measure it against the plays already stored (#642).
-            duplicate = movie_played and play_dedupe.existing_movie_play_times(
-                user,
-                media_ids=[movie_item.media_id],
-                source=movie_item.source,
-            ).is_duplicate(movie_item.media_id, now)
+            already_watched = (
+                self._is_manual_mark(payload)
+                and current_instance is not None
+                and current_instance.status == Status.COMPLETED.value
+            )
+            duplicate = movie_played and (
+                already_watched
+                or play_dedupe.existing_movie_play_times(
+                    user,
+                    media_ids=[movie_item.media_id],
+                    source=movie_item.source,
+                ).is_duplicate(movie_item.media_id, now)
+            )
 
             if duplicate:
                 logger.debug(
@@ -1357,6 +1497,7 @@ class BaseWebhookProcessor:
                     else Status.IN_PROGRESS.value,
                     start_date=now if not movie_played else None,
                     end_date=now if movie_played else None,
+                    entry_source=self.SOURCE_LABEL,
                 )
                 logger.info(
                     "Created new movie instance with status: %s",
@@ -1481,7 +1622,10 @@ class BaseWebhookProcessor:
         seen_media_ids = {str(media_id)}
         alt_ids = dict(ids)
         alt_ids["tmdb_id"] = None
-        recovered_media_id, _alt_season, _alt_episode = self._find_tv_media_id(alt_ids)
+        recovered_media_id, _alt_season, _alt_episode = self._find_tv_media_id(
+            alt_ids,
+            episode_ids=self.TV_IDS_ARE_EPISODE_LEVEL,
+        )
         if recovered_media_id and str(recovered_media_id) not in seen_media_ids:
             recovered_tv_metadata = self._load_tv_metadata_with_required_season(
                 recovered_media_id,
@@ -1497,10 +1641,10 @@ class BaseWebhookProcessor:
             return None, None
 
         try:
-            search_results = app.providers.tmdb.search(
-                MediaTypes.TV.value,
+            candidate_media_id = self._resolve_tv_by_title(
                 series_title,
-                page=1,
+                self._extract_series_year(payload),
+                season_number=season_number,
             )
         except Exception as exc:  # pragma: no cover - defensive network guard
             logger.warning(
@@ -1510,13 +1654,6 @@ class BaseWebhookProcessor:
             )
             return None, None
 
-        metadata = payload.get("Metadata") or {}
-        result = unique_title_match(
-            search_results.get("results") or [],
-            series_title,
-            year=metadata.get("grandparentYear") or metadata.get("year"),
-        )
-        candidate_media_id = result.get("media_id") if result else None
         if candidate_media_id and str(candidate_media_id) not in seen_media_ids:
             recovered_tv_metadata = self._load_tv_metadata_with_required_season(
                 candidate_media_id,
@@ -1634,6 +1771,30 @@ class BaseWebhookProcessor:
 
         return Sources.TMDB.value, str(media_id), tv_metadata, season_metadata
 
+    def _status_change_reason(self):
+        """Label recorded in history when this webhook changes a status."""
+        source = (self.SOURCE_LABEL or "webhook").capitalize()
+        return f"{source} playback"
+
+    @staticmethod
+    def _show_deleted_by_user(user, tv_item, tmdb_id, tvdb_id):
+        """Return whether the user deleted this show under any of its ids.
+
+        The tombstone keeps the identity the show was tracked under, which can
+        differ from the one this event resolved to (a TVDB-tracked show seen
+        here through TMDB, say), so check every id the show is known by.
+        """
+        identities = Q(source=tv_item.source, media_id=tv_item.media_id)
+        if tmdb_id:
+            identities |= Q(source=Sources.TMDB.value, media_id=str(tmdb_id))
+        if tvdb_id:
+            identities |= Q(source=Sources.TVDB.value, media_id=str(tvdb_id))
+        return app.models.DeletedMedia.objects.filter(
+            identities,
+            user=user,
+            media_type=MediaTypes.TV.value,
+        ).exists()
+
     def _handle_tv_episode(
         self,
         media_id,
@@ -1647,6 +1808,24 @@ class BaseWebhookProcessor:
     ):
         """Handle TV episode playback event."""
         from app.services import metadata_resolution
+        from integrations.episode_orders import apply_targets, resolve_incoming
+
+        targets = resolve_incoming(
+            user, media_id, Sources.TMDB.value, season_number, episode_number,
+            integration=type(self).__name__,
+        )
+        if targets is not None:
+            apply_targets(
+                user,
+                targets,
+                watched_at=(
+                    self._get_played_at(payload) or timezone.now().replace(
+                        second=0, microsecond=0,
+                    )
+                ) if self._is_played(payload) else None,
+                unplayed=self._is_unplayed(payload),
+            )
+            return targets[0] if targets else None
 
         if self._is_unplayed(payload):
             # As above: retract the latest play, keep the rest. Also scoped to
@@ -1787,6 +1966,26 @@ class BaseWebhookProcessor:
             )
             return None
 
+        # `grouped_anime_match` was classified against whatever media_id was
+        # current at that time, but remap/season-recovery above may have since
+        # resolved a different show. Applying a stale match would promote the
+        # wrong (or, as in issue #1246, a different but real) item into the
+        # anime bucket using another show's external IDs.
+        if (
+            grouped_anime_match is not None
+            and grouped_anime_match.tmdb_id is not None
+            and str(grouped_anime_match.tmdb_id) != str(media_id)
+        ):
+            logger.warning(
+                "Discarding grouped-anime match for TMDB %s: episode resolved "
+                "to a different show (TMDB %s) during season recovery",
+                grouped_anime_match.tmdb_id,
+                media_id,
+            )
+            grouped_anime_match = None
+            if library_media_type == MediaTypes.ANIME.value:
+                library_media_type = None
+
         existing_tv_item = self._find_existing_tracked_tv_item(
             user,
             external_ids,
@@ -1913,16 +2112,47 @@ class BaseWebhookProcessor:
             provider_media_type=MediaTypes.TV.value,
         )
 
+        # A playback-start event proves nothing was watched yet, so it must not
+        # undo a status the user chose or bring back a show they deleted. Only
+        # a real play may do that (#1133).
+        played = self._is_played(payload)
+        if (
+            not played
+            and not app.models.TV.objects.filter(item=tv_item, user=user).exists()
+            and self._show_deleted_by_user(
+                user,
+                tv_item,
+                media_id,
+                tv_metadata.get("tvdb_id"),
+            )
+        ):
+            logger.info(
+                "Ignoring playback start for deleted show: %s",
+                item_tv_metadata["title"],
+            )
+            return None
+        start_keeps = {*app.models.USER_HELD_STATUSES, Status.COMPLETED.value}
+
         tv_instance, tv_created = app.models.TV.objects.get_or_create(
             item=tv_item,
             user=user,
-            defaults={"status": Status.IN_PROGRESS.value},
+            defaults={
+                "status": Status.IN_PROGRESS.value,
+                "entry_source": self.SOURCE_LABEL,
+            },
         )
 
         if tv_created:
             logger.info("Created new TV instance: %s", item_tv_metadata["title"])
+        elif not played and tv_instance.status in start_keeps:
+            logger.info(
+                "Keeping %s status on playback start: %s",
+                tv_instance.status,
+                item_tv_metadata["title"],
+            )
         elif tv_instance.status != Status.IN_PROGRESS.value:
             tv_instance.status = Status.IN_PROGRESS.value
+            tv_instance._change_reason = self._status_change_reason()
             tv_instance.save()
             logger.info(
                 "Updated TV instance status to %s: %s",
@@ -2024,7 +2254,15 @@ class BaseWebhookProcessor:
             item=season_item,
             user=user,
             related_tv=tv_instance,
-            defaults={"status": Status.IN_PROGRESS.value},
+            defaults={
+                "status": (
+                    tv_instance.status
+                    if not played
+                    and tv_instance.status in app.models.USER_HELD_STATUSES
+                    else Status.IN_PROGRESS.value
+                ),
+                "entry_source": self.SOURCE_LABEL,
+            },
         )
 
         if season_created:
@@ -2033,8 +2271,11 @@ class BaseWebhookProcessor:
                 tv_metadata["title"],
                 season_number,
             )
+        elif not played and season_instance.status in start_keeps:
+            pass
         elif season_instance.status != Status.IN_PROGRESS.value:
             season_instance.status = Status.IN_PROGRESS.value
+            season_instance._change_reason = self._status_change_reason()
             season_instance.save()
             logger.info(
                 "Updated season instance status to %s: %s S%02d",
@@ -2066,7 +2307,9 @@ class BaseWebhookProcessor:
                 media_ids=[episode_item.media_id],
                 source=episode_item.source,
             )
-            should_create = not existing_plays.is_duplicate(play_key, now)
+            should_create = not existing_plays.is_duplicate(play_key, now) and not (
+                self._is_manual_mark(payload) and existing_plays.times_for(play_key)
+            )
             if not should_create:
                 logger.debug(
                     "Skipping duplicate episode record near %s: %s S%02dE%02d",
@@ -2081,7 +2324,11 @@ class BaseWebhookProcessor:
                     item=episode_item,
                     related_season=season_instance,
                     end_date=now,
+                    entry_source=self.SOURCE_LABEL,
                 )
+                if self.SOURCE_LABEL and not season_instance.entry_source:
+                    season_instance.entry_source = self.SOURCE_LABEL
+                    season_instance.save(update_fields=["entry_source"])
                 logger.info(
                     "Marked episode as played: %s S%02dE%02d",
                     tv_metadata["title"],

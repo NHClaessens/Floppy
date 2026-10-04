@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from urllib.parse import quote
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
-from django.urls import reverse
+from django.urls import get_script_prefix
 from django.utils import timezone
+from django.utils.http import RFC3986_SUBDELIMS, escape_leading_slashes
 from django.utils.text import slugify
 
 from app import helpers
@@ -105,6 +107,35 @@ def set_user_playback_state(user_id: int, state: dict) -> None:
         state,
         timeout=PLAYBACK_CACHE_TIMEOUT_SECONDS,
     )
+    _queue_playback_webhook(user_id)
+
+
+def _queue_playback_webhook(user_id: int) -> None:
+    """Queue the outgoing playback webhook, for users who configured one.
+
+    Hung off the single writer rather than the event handlers so it cannot
+    miss a state change: play, pause, resume, stop, scrobble and the deferred
+    artwork fill all land here.
+
+    A user who has configured nothing pays one indexed EXISTS query and no
+    more — everything past that check happens in a separate task, so a slow
+    endpoint cannot delay the state write that just succeeded. The media-server
+    webhooks all reach this from a Celery worker (`process_webhook.delay`), but
+    `ScrobbleView._update_live_playback` reaches it in-request, so that query is
+    on the response path for the scrobble API.
+    """
+    has_webhook = (
+        get_user_model()
+        .objects.filter(pk=user_id)
+        .exclude(playback_webhook_url="")
+        .exists()
+    )
+    if not has_webhook:
+        return
+
+    from app.tasks import post_playback_webhook
+
+    post_playback_webhook.delay(user_id)
 
 
 def clear_user_playback_state(user_id: int) -> None:
@@ -287,6 +318,7 @@ def apply_playback_event(
     duration_seconds: int | None = None,
     store_progress: bool = False,
     provider_completed: bool | None = None,
+    image: str | None = None,
 ) -> None:
     """Update live playback cache state from a webhook event.
 
@@ -375,10 +407,21 @@ def apply_playback_event(
         playback_media_type=playback_media_type,
     ):
         if offset_seconds is None:
-            offset_seconds = _coerce_int(
-                existing_state.get("view_offset_seconds"),
-                0,
-            )
+            # **The estimate, not the raw stored offset.**
+            #
+            # Not every client reports a view offset on every event — some send
+            # none at all. While playing that costs nothing, because
+            # `_estimate_progress_seconds` adds wall-clock on read. But a pause
+            # writes a new state, and storing the raw offset there discards the
+            # position the server had just computed: a session that started at
+            # zero and ran for two minutes was stored as zero the moment it was
+            # paused, and every reader — the web card, the API, a client's Lock
+            # Screen — showed 0:00 for something two minutes in.
+            #
+            # Taking the estimate keeps what playing had already established,
+            # and is a no-op when the event does carry an offset, since this
+            # branch only runs when it does not.
+            offset_seconds = _estimate_progress_seconds(existing_state, now_ts)
         if dur_seconds is None:
             dur_seconds = _coerce_int(
                 existing_state.get("duration_seconds"),
@@ -459,6 +502,12 @@ def apply_playback_event(
         state["image_resolved_at_ts"] = existing_state.get(
             "image_resolved_at_ts",
         )
+    elif image:
+        # The caller already resolved artwork (e.g. a MAL cour that the
+        # source-agnostic episode resolver below cannot look up).
+        state["image"] = image
+        state["image_source"] = "primary"
+        state["image_resolved_at_ts"] = now_ts
     else:
         # Runs in the webhook Celery worker, so provider calls are
         # allowed here; the request path only ever reads the result.
@@ -645,59 +694,60 @@ def _slugify_title(title: str, media_id: str | None = None) -> str:
     return cleaned
 
 
+def _app_path(path: str = "") -> str:
+    """Return the absolute path to an app page, exactly as ``reverse()`` would.
+
+    Built by hand because the outgoing playback webhook renders this card in a
+    Celery worker, whose ROOT_URLCONF (``config.celery_urls``) is deliberately
+    empty, so every ``reverse()`` there raises NoReverseMatch. Pointing
+    ``reverse()`` at ``config.urls`` instead is no way out: resolving it
+    imports allauth, which workers leave out of INSTALLED_APPS — the same
+    constraint ``audiobookshelf_cover.build_cover_proxy_url`` works around.
+    Callers pass the route from ``app/urls.py`` (``home``, ``media_details``,
+    ``season_details``); ``LiveDetailsUrlTests`` holds them to it.
+
+    A worker also never handles a request, so the script prefix stays at its
+    "/" default and never picks up a BASE_URL subpath. Apply it by hand only
+    while that default is in effect, so a request with the real prefix already
+    set is not double-prefixed. Quoting matches ``reverse()`` byte for byte.
+    """
+    prefix = get_script_prefix()
+    if prefix == "/" and settings.FORCE_SCRIPT_NAME:
+        prefix = settings.FORCE_SCRIPT_NAME.rstrip("/") + "/"
+    return escape_leading_slashes(
+        quote(prefix + path, safe=RFC3986_SUBDELIMS + "/~:@"),
+    )
+
+
 def _build_details_url(state: dict, library_media_type: str | None = None) -> str:
     """Build a URL to the media details page for the playing item."""
     media_id = state.get("media_id")
     source = state.get("source") or Sources.TMDB.value
     playback_media_type = state.get("media_type")
     if not media_id:
-        return reverse("home")
+        return _app_path()
 
     title = (state.get("series_title") or state.get("title") or "").strip()
     slug_title = _slugify_title(title, media_id)
 
     if playback_media_type == MediaTypes.EPISODE.value:
         if library_media_type == MediaTypes.ANIME.value:
-            return reverse(
-                "media_details",
-                kwargs={
-                    "source": source,
-                    "media_type": MediaTypes.ANIME.value,
-                    "media_id": media_id,
-                    "title": slug_title,
-                },
+            return _app_path(
+                f"details/{source}/{MediaTypes.ANIME.value}/{media_id}/{slug_title}",
             )
         season_number = _coerce_int(state.get("season_number"))
         if season_number is not None:
-            return reverse(
-                "season_details",
-                kwargs={
-                    "source": source,
-                    "media_id": media_id,
-                    "title": slug_title,
-                    "season_number": season_number,
-                },
+            return _app_path(
+                f"details/{source}/{MediaTypes.TV.value}/{media_id}/{slug_title}"
+                f"/season/{season_number}",
             )
         # No season number — fall back to TV show details
-        return reverse(
-            "media_details",
-            kwargs={
-                "source": source,
-                "media_type": MediaTypes.TV.value,
-                "media_id": media_id,
-                "title": slug_title,
-            },
+        return _app_path(
+            f"details/{source}/{MediaTypes.TV.value}/{media_id}/{slug_title}",
         )
 
-    return reverse(
-        "media_details",
-        kwargs={
-            "source": source,
-            "media_type": playback_media_type or MediaTypes.MOVIE.value,
-            "media_id": media_id,
-            "title": slug_title,
-        },
-    )
+    media_type = playback_media_type or MediaTypes.MOVIE.value
+    return _app_path(f"details/{source}/{media_type}/{media_id}/{slug_title}")
 
 
 def _resolve_card_title(state, state_item):
@@ -721,6 +771,9 @@ def _resolve_card_subtitle(state, title):
     episode_code = None
     if season_number is not None and episode_number is not None:
         episode_code = f"S{season_number:02d}E{episode_number:02d}"
+    elif episode_number is not None:
+        # Flat MAL anime cours have no season; show the cour-relative number.
+        episode_code = f"E{episode_number:02d}"
     episode_title = (state.get("episode_title") or "").strip()
     if episode_code and episode_title and episode_title != title:
         return episode_code, f"{episode_code} • {episode_title}"
@@ -951,7 +1004,7 @@ def build_home_playback_card(user) -> dict | None:
             image, image_source = settings.IMG_NONE, "pending"
         guard_key = f"{IMAGE_RESOLVE_GUARD_PREFIX}:{user.id}"
         if cache.add(guard_key, True, IMAGE_RESOLVE_GUARD_SECONDS):
-            from app.tasks import resolve_playback_image
+            from app.tasks_interactive import resolve_playback_image
 
             resolve_playback_image.delay(user.id)
 
@@ -965,7 +1018,11 @@ def build_home_playback_card(user) -> dict | None:
     ):
         _ep_media_id = state.get("media_id")
         _ep_source = state.get("source") or Sources.TMDB.value
-        if _ep_media_id:
+        if _ep_source == Sources.MAL.value:
+            # A MAL-sourced episode card is a flat anime cour by construction
+            # (see GenericScrobbleProcessor.resolve_anime_live_identity).
+            library_media_type = MediaTypes.ANIME.value
+        elif _ep_media_id:
             tv_item = (
                 Item.objects.filter(
                     media_id=_ep_media_id,

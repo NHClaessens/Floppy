@@ -33,6 +33,7 @@ that would otherwise succeed.
 
 from __future__ import annotations
 
+import json
 import shutil
 import sqlite3
 from contextlib import suppress
@@ -47,7 +48,9 @@ from django.db import DatabaseError, connections
 from django.db.migrations.executor import MigrationExecutor
 
 from app.log_safety import redact_secrets, safe_url
+from app.redis_diagnosis import REDIS_SCHEMES, explain_redis_error
 from app.redis_tuning import parse_size
+from config.runtime_profile import sizing_report, web_concurrency_warning
 from config.sqlite_integrity import (
     IntegrityScanTimeoutError,
     inspect_database,
@@ -105,8 +108,6 @@ _NETWORK_TIMEOUT_SECONDS = 5
 # or renamed. Added keys keep the same version.
 REPORT_VERSION = 1
 
-# Celery can use a broker this check has no client for. Only these are ours.
-REDIS_SCHEMES = ("redis://", "rediss://", "unix://")
 
 
 @dataclass(frozen=True)
@@ -699,17 +700,20 @@ def check_redis() -> CheckResult:
                 facts=facts,
             )
         except (redis.RedisError, OSError, ValueError) as error:
+            # "Check Redis is running" is the wrong advice when the hostname
+            # does not resolve: Redis is running, on a network Floppy is not on.
+            cause, fix = explain_redis_error(error, url)
+            if not fix:
+                fix = _where(
+                    "check that the Redis service is running and reachable",
+                    "check that Redis is running and that REDIS_URL points at it",
+                )
             return CheckResult(
                 name="redis",
                 status=FAIL,
                 summary=f"cannot reach {shown} ({', '.join(roles)})",
-                cause=clean(error),
-                fix=_where(
-                    f"{CONFIG} check that the Redis service is running and "
-                    "reachable",
-                    f"{CONFIG} check that Redis is running and that REDIS_URL "
-                    "points at it",
-                ),
+                cause=cause or clean(error),
+                fix=f"{CONFIG} {fix}",
                 facts=facts,
             )
         if _memory_ceiling(client) == 0:
@@ -739,6 +743,156 @@ def check_redis() -> CheckResult:
     return CheckResult(name="redis", status=OK, summary=summary, facts=facts)
 
 
+# Baked into the image by the Dockerfile and re-exported by entrypoint.sh, so
+# it survives an orchestrator's stale VERSION/COMMIT_SHA in the environment.
+# A module constant so tests can point it somewhere else.
+_BUILD_INFO_PATH = Path("/etc/floppy-build-info")
+# Written by entrypoint.sh once the tier is resolved. A `docker exec` does not
+# inherit PID 1's exports, so without this the check would re-detect the tier
+# rather than report the decision the running container actually booted with.
+_BOOT_SIZING_PATH = Path("/tmp/floppy-boot-sizing.json")  # noqa: S108
+
+
+def _read_build_info() -> dict:
+    """Return the identity baked into the image, empty if it is not present."""
+    try:
+        contents = _BUILD_INFO_PATH.read_text()
+    except OSError:
+        return {}
+    values = {}
+    for line in contents.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    return values
+
+
+def _read_boot_sizing() -> dict:
+    """Return the sizing entrypoint.sh recorded at boot, empty if absent."""
+    try:
+        return json.loads(_BOOT_SIZING_PATH.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def check_runtime() -> CheckResult:
+    """Report which build is running and how it sized itself.
+
+    Answers the two questions a memory or behaviour report cannot be read
+    without: whether this container is running the code someone thinks it is,
+    and how many resident processes it decided to start.
+    """
+    detected = sizing_report()
+    build_info = _read_build_info()
+    boot_sizing = _read_boot_sizing()
+
+    if settings.LOCAL_COMMIT_SHA:
+        identity_source = "git-checkout"
+    elif build_info:
+        identity_source = "image"
+    elif settings.ENV_COMMIT_SHA or settings.ENV_VERSION_RAW:
+        identity_source = "environment"
+    else:
+        identity_source = "unknown"
+
+    build_info_matches = None
+    if build_info.get("COMMIT_SHA"):
+        build_info_matches = build_info["COMMIT_SHA"] == settings.COMMIT_SHA
+
+    # A `docker exec` receives the container's environment, not the corrected
+    # exports entrypoint.sh made in PID 1, so settings here can carry a stale
+    # VERSION/COMMIT_SHA that the image itself does not have. Report the baked
+    # values as the identity and keep what this process resolved beside them,
+    # or the report would label a shadowed value as coming from the image.
+    version = settings.VERSION
+    commit = settings.COMMIT_SHA_SHORT
+    if identity_source == "image":
+        version = build_info.get("VERSION") or version
+        baked_commit = build_info.get("COMMIT_SHA")
+        commit = baked_commit[:7] if baked_commit else commit
+
+    # Likewise for topology: sizing_report() describes what a process starting
+    # now would choose, which is not what the running container started if the
+    # host's memory or CPU moved since boot. Prefer the recorded decision, and
+    # fall back per key so a record written by an older build cannot KeyError.
+    def running(key):
+        """Return the boot-time value for a key, else the freshly detected one."""
+        return boot_sizing.get(key, detected[key]) if boot_sizing else detected[key]
+
+    facts = {
+        "version": version,
+        "commit": commit,
+        "identity_source": identity_source,
+        "settings_version": settings.VERSION,
+        "settings_commit": settings.COMMIT_SHA_SHORT,
+        "build_info_present": bool(build_info),
+        "build_info_matches_settings": build_info_matches,
+        **{key: running(key) for key in detected},
+        # What a process starting now would choose, kept beside the running
+        # values so drift since boot stays inspectable.
+        "detected_sizing": detected,
+    }
+    if boot_sizing:
+        facts["boot_sizing"] = boot_sizing
+
+    summary = (
+        f"{version} ({identity_source}), {running('profile')}, "
+        f"gunicorn {running('web_concurrency')}x{running('gunicorn_threads')}, "
+        f"resident: {', '.join(running('expected_programs'))}"
+    )
+
+    # Collected rather than returned one at a time: these conditions co-occur.
+    # An older deployment template that pins WEB_CONCURRENCY is also the kind
+    # that carries a stale COMMIT_SHA, and reporting only the first would hide
+    # the second from the one diagnostic an operator runs.
+    warnings = []
+
+    if detected["web_concurrency_over_profile"]:
+        warnings.append((
+            web_concurrency_warning(),
+            _where(
+                f"{CONFIG} clear WEB_CONCURRENCY in this container's template or "
+                "compose file and restart",
+                f"{CONFIG} unset WEB_CONCURRENCY and restart",
+            ),
+        ))
+
+    if detected["web_concurrency_source"] == "invalid":
+        warnings.append((
+            "WEB_CONCURRENCY is set to something that is not a number, so it "
+            "was ignored and the detected profile was used instead",
+            f"{CONFIG} set WEB_CONCURRENCY to a whole number, or clear it",
+        ))
+
+    if build_info_matches is False:
+        warnings.append((
+            f"the environment reports {settings.VERSION}, but this image was "
+            f"built as {build_info.get('VERSION', 'unknown')}, so something in "
+            "the deployment is shadowing the image's own identity",
+            f"{CONFIG} remove VERSION and COMMIT_SHA from this deployment",
+        ))
+
+    if boot_sizing and boot_sizing.get("tier") != detected["tier"]:
+        warnings.append((
+            f"this container booted at tier {boot_sizing.get('tier')} but now "
+            f"detects {detected['tier']}, so the running process count no longer "
+            "matches the host",
+            f"{FLOPPY} restart the container to resize it",
+        ))
+
+    if warnings:
+        return CheckResult(
+            name="runtime",
+            status=WARN,
+            summary=summary,
+            cause="; ".join(cause for cause, _ in warnings),
+            fix="; ".join(fix for _, fix in warnings),
+            facts=facts,
+        )
+
+    return CheckResult(name="runtime", status=OK, summary=summary, facts=facts)
+
+
 def run_checks(
     *,
     include_redis: bool = True,
@@ -751,7 +905,7 @@ def run_checks(
     migration check can run at all.
     """
     database = None
-    results = [check_paths(), check_config()]
+    results = [check_runtime(), check_paths(), check_config()]
     database = check_database(timeout_seconds=timeout_seconds)
     results.append(database)
     results.append(check_migrations(database_ok=not database.failed))

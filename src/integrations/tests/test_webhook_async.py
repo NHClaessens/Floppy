@@ -10,6 +10,7 @@ from unittest.mock import call, patch
 
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.cache import cache
 from django.test import Client, SimpleTestCase, TestCase
 from django.urls import reverse
 from simple_history.models import HistoricalRecords
@@ -177,6 +178,26 @@ class ProcessWebhookTaskTests(TestCase):
         self.assertIsNotNone(self.user.plex_webhook_last_received_at)
 
     @patch("integrations.webhooks.plex.PlexWebhookProcessor.process_payload")
+    def test_plex_payload_log_redacts_identity_fields(self, _mock_process):
+        """The logged payload censors the user, server and device, not the media."""
+        payload = {
+            "event": "media.play",
+            "Account": {"id": 1234, "thumb": "https://plex.tv/a", "title": "alice"},
+            "Server": {"title": "Home", "uuid": "server-abc"},
+            "Player": {"local": False, "publicAddress": "203.0.113.9"},
+            "Metadata": {"title": "Jumanji", "librarySectionTitle": "Movies"},
+        }
+
+        with self.assertLogs("integrations.tasks", level="INFO") as logs:
+            tasks.process_webhook("plex", payload, self.user.id)
+
+        output = "\n".join(logs.output)
+        for value in ("alice", "203.0.113.9", "server-abc", "Movies"):
+            with self.subTest(value=value):
+                self.assertNotIn(value, output)
+        self.assertIn("Jumanji", output)
+
+    @patch("integrations.webhooks.plex.PlexWebhookProcessor.process_payload")
     def test_shared_plex_task_uses_owner_account_and_recipient(self, mock_process):
         """Shared processing attributes data to the recipient without sharing tokens."""
         recipient = get_user_model().objects.create_user(username="recipient")
@@ -261,7 +282,7 @@ class ProcessWebhookTaskTests(TestCase):
             tasks.process_webhook("jellyfin", {"Event": "Stop"}, missing_id)
         self.assertIn("missing user", logs.output[0])
 
-    @patch("integrations.tasks.push_jellyfin_watched.delay")
+    @patch("integrations.tasks.push_jellyfin_watched.apply_async")
     @patch("integrations.webhooks.jellyfin.JellyfinWebhookProcessor.process_payload")
     def test_jellyfin_instant_push_when_enabled(self, _mock_process, mock_push_delay):
         """A Jellyfin webhook should queue a push-back when instant push is enabled."""
@@ -273,11 +294,16 @@ class ProcessWebhookTaskTests(TestCase):
             instant_push_enabled=True,
         )
 
+        cache.clear()
         tasks.process_webhook("jellyfin", {"Event": "Stop"}, self.user.id)
 
-        mock_push_delay.assert_called_once_with(user_id=self.user.id)
+        mock_push_delay.assert_called_once()
+        self.assertEqual(
+            mock_push_delay.call_args.kwargs["kwargs"],
+            {"user_id": self.user.id},
+        )
 
-    @patch("integrations.tasks.push_jellyfin_watched.delay")
+    @patch("integrations.tasks.push_jellyfin_watched.apply_async")
     @patch("integrations.webhooks.jellyfin.JellyfinWebhookProcessor.process_payload")
     def test_jellyfin_instant_push_skipped_when_disabled(
         self,
@@ -297,7 +323,7 @@ class ProcessWebhookTaskTests(TestCase):
 
         mock_push_delay.assert_not_called()
 
-    @patch("integrations.tasks.push_jellyfin_watched.delay")
+    @patch("integrations.tasks.push_jellyfin_watched.apply_async")
     @patch("integrations.webhooks.jellyfin.JellyfinWebhookProcessor.process_payload")
     def test_jellyfin_instant_push_skipped_without_account(
         self,

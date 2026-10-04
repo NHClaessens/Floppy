@@ -46,3 +46,44 @@ class PodcastShowDetailWebsiteLinkTests(TestCase):
 
         self.assertNotContains(response, "Visit show website")
         self.assertNotContains(response, "Episode website")
+
+
+class CompletedPlaysByPodcastIdTests(TestCase):
+    """The shared history read can be bounded per podcast in SQL."""
+
+    def test_limit_keeps_only_the_newest_plays_of_each_podcast(self):
+        from datetime import UTC, datetime, timedelta
+
+        from django.contrib.auth import get_user_model
+
+        from app.models import Item, MediaTypes, Podcast, Sources, Status
+        from app.podcast_views import completed_plays_by_podcast_id
+
+        user = get_user_model().objects.create_user(username="plays", password="x")
+        item = Item.objects.create(
+            media_id="plays-episode",
+            source=Sources.POCKETCASTS.value,
+            media_type=MediaTypes.PODCAST.value,
+            title="Episode",
+            image="https://example.com/i.jpg",
+        )
+        podcast = Podcast.objects.create(
+            item=item,
+            user=user,
+            status=Status.COMPLETED.value,
+            progress=30,
+            end_date=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        for day in range(2, 26):
+            podcast.end_date = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day)
+            podcast.save()
+
+        everything = completed_plays_by_podcast_id({podcast.id})[podcast.id]
+        newest = completed_plays_by_podcast_id({podcast.id}, limit=10)[podcast.id]
+
+        self.assertGreater(len(everything), 10)
+        self.assertEqual(len(newest), 10)
+        self.assertEqual(
+            [record.end_date for record in newest],
+            [record.end_date for record in everything[:10]],
+        )

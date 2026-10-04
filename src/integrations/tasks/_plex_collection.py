@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 # Number of items fetched per Plex library section page when searching for a match.
 PLEX_SECTION_PAGE_SIZE = 100
 
+# Upper bound on synchronous per-item detailed-metadata fetches during a single
+# section scan. Bulk list fetches already request includeGuids=1, so this
+# fallback should rarely fire; the cap exists so a library full of entries
+# that still lack a parseable Guid can't turn into thousands of sequential
+# blocking HTTP calls.
+MAX_COLLECTION_SCAN_METADATA_FETCHES = 200
+
 
 @shared_task(name="Update collection metadata from Plex webhook")
 def update_collection_metadata_from_plex_webhook(
@@ -1283,6 +1290,8 @@ def update_collection_metadata_from_plex(library, user_id):
             batch_processed = 0
             batch_matched = 0
             section_start_time = time.time()
+            fallback_metadata_fetches = 0
+            fallback_cap_logged = False
 
             from integrations.plex import extract_external_ids_from_guids
 
@@ -1343,15 +1352,35 @@ def update_collection_metadata_from_plex(library, user_id):
                             guids = [{"id": single_guid}]
 
                     external_ids = extract_external_ids_from_guids(guids)
+                    has_matchable_id = any(
+                        external_ids.get(key)
+                        for key in ("tmdb_id", "imdb_id", "tvdb_id")
+                    )
 
-                    # If no external IDs, try fetching detailed metadata
-                    if not external_ids and guids:
-                        guid_value = (
-                            guids[0].get("id")
-                            if isinstance(guids[0], dict)
-                            else guids[0]
-                        )
-                        if guid_value and guid_value.startswith("plex://"):
+                    # If no matchable external ID (e.g. the list entry only
+                    # exposed a bare "plex://..." guid), fetch detailed
+                    # per-item metadata, which always returns the full
+                    # Guid[] array regardless of the item's metadata agent.
+                    # Bulk list fetches already request includeGuids=1, so
+                    # this should rarely trigger; bound it so a library full
+                    # of unresolvable entries can't block on thousands of
+                    # sequential HTTP calls.
+                    if not has_matchable_id and guids:
+                        if (
+                            fallback_metadata_fetches
+                            >= MAX_COLLECTION_SCAN_METADATA_FETCHES
+                        ):
+                            if not fallback_cap_logged:
+                                logger.info(
+                                    "Reached per-section cap of %d detailed metadata "
+                                    "fetches in section '%s'; skipping further fallback "
+                                    "lookups for unresolved entries",
+                                    MAX_COLLECTION_SCAN_METADATA_FETCHES,
+                                    section.get("title"),
+                                )
+                                fallback_cap_logged = True
+                        else:
+                            fallback_metadata_fetches += 1
                             try:
                                 detailed_metadata = plex_api.fetch_metadata(
                                     plex_account.plex_token,

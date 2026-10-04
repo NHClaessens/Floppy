@@ -88,6 +88,7 @@ ENV FLOPPY_CELERY_ROLE=background
 ENV FLOPPY_CELERY_QUEUES=celery
 ENV FLOPPY_START_INTERACTIVE_WORKER=true
 ENV FLOPPY_START_DISCOVER_WORKER=true
+ENV FLOPPY_SUPERVISORD_LOG=AUTO
 
 COPY ./runtime-entrypoint.sh /runtime-entrypoint.sh
 COPY ./entrypoint.sh /entrypoint.sh

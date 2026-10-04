@@ -10,6 +10,7 @@ from django.core.cache import cache
 from app.log_safety import exception_summary
 from app.models import Item, MediaTypes, Sources
 from app.providers import services
+from app.tasks_backfill_state import MalformedItemIdentityError
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def _fetch_item_metadata(item: Item):
     if item.media_type == MediaTypes.SEASON.value:
         if item.season_number is None:
             msg = "season item missing season_number"
-            raise ValueError(msg)
+            raise MalformedItemIdentityError(msg)
         return services.get_media_metadata(
             item.media_type,
             item.media_id,
@@ -93,7 +94,7 @@ def _fetch_item_metadata(item: Item):
     if item.media_type == MediaTypes.EPISODE.value:
         if item.season_number is None or item.episode_number is None:
             msg = "episode item missing season_number or episode_number"
-            raise ValueError(msg)
+            raise MalformedItemIdentityError(msg)
         return services.get_media_metadata(
             item.media_type,
             item.media_id,

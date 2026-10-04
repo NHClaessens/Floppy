@@ -57,6 +57,15 @@
             <span class="font-medium text-xs sm:text-sm">{% translate episode_plays_tab_label|default:_("Episode Plays") %}</span>
           </button>
         {% endif %}
+        {% if status_history_tab_available %}
+          <button type="button"
+                  @click="activeTab = 'status-history'"
+                  class="flex flex-1 sm:flex-none items-center justify-center sm:justify-start gap-2 sm:gap-3 px-3 py-2 sm:px-4 sm:py-3 w-full rounded-lg text-left transition-colors cursor-pointer"
+                  :class="activeTab === 'status-history' ? 'text-[var(--color-text)] bg-[var(--color-border)]' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]'">
+            {% include "app/icons/clock-reversing.svg" with classes="w-4 h-4 sm:w-5 sm:h-5 shrink-0" %}
+            <span class="font-medium text-xs sm:text-sm">{% translate "Status history" %}</span>
+          </button>
+        {% endif %}
         {% if discover_tab_available %}
           <button type="button"
                   @click="activeTab = 'discover'"
@@ -79,6 +88,7 @@
                   hx-swap="{% if track_action_update %}outerHTML{% else %}none{% endif %}"
                   x-data="mediaForm"
                   x-init="init"
+                  {% if general_existing_instance %}data-existing-instance{% endif %}
                   @submit="closeTrackModal($el)">
           {% csrf_token %}
           <input type="hidden" name="track_form_id" value="{{ track_form_id }}">
@@ -131,9 +141,9 @@
                       </button>
                     </div>
                   {% elif field.name == "start_date" %}
-                    {% include "app/components/date_time_picker.html" with field_name=field.name field_value=field.value|default_if_none:"" field_id=field.id_for_label field_label=field.label mobile_label=_("Start:") track_time=TRACK_TIME suggestion_label=date_suggestion.label suggestion_date=date_suggestion.date suggestion_runtime_minutes=date_suggestion.runtime_minutes runtime_minutes=date_suggestion.runtime_minutes week_start=user.week_start_day use_12_hour=user|user_uses_12_hour_format copy_from=form.fields.end_date|yesno:"end_date," copy_from_label=_("End") only %}
+                    {% include "app/components/date_time_picker.html" with field_name=field.name field_value=field.value|default_if_none:"" field_id=field.id_for_label field_label=field.label mobile_label=_("Start:") track_time=TRACK_TIME suggestion_label=date_suggestion.label suggestion_date=date_suggestion.date suggestion_runtime_minutes=date_suggestion.runtime_minutes suggestion_extras=date_suggestion.extras runtime_minutes=date_suggestion.runtime_minutes week_start=user.week_start_day use_12_hour=user|user_uses_12_hour_format copy_from=form.fields.end_date|yesno:"end_date," copy_from_label=_("End") quick_action_mode="start" only %}
                   {% elif field.name == "end_date" %}
-                    {% include "app/components/date_time_picker.html" with field_name=field.name field_value=field.value|default_if_none:"" field_id=field.id_for_label field_label=field.label mobile_label=_("End:") track_time=TRACK_TIME suggestion_label=date_suggestion.label suggestion_date=date_suggestion.date suggestion_runtime_minutes=date_suggestion.runtime_minutes runtime_minutes=date_suggestion.runtime_minutes week_start=user.week_start_day use_12_hour=user|user_uses_12_hour_format copy_from=form.fields.start_date|yesno:"start_date," copy_from_label=_("Start") only %}
+                    {% include "app/components/date_time_picker.html" with field_name=field.name field_value=field.value|default_if_none:"" field_id=field.id_for_label field_label=field.label mobile_label=_("End:") track_time=TRACK_TIME suggestion_label=date_suggestion.label suggestion_date=date_suggestion.date suggestion_runtime_minutes=date_suggestion.runtime_minutes suggestion_extras=date_suggestion.extras runtime_minutes=date_suggestion.runtime_minutes week_start=user.week_start_day use_12_hour=user|user_uses_12_hour_format copy_from=form.fields.start_date|yesno:"start_date," copy_from_label=_("Start") quick_action_mode="end" only %}
                   {% else %}
                     {{ field|add_class:"w-full p-2 bg-[var(--color-surface-strong)] rounded-md text-[var(--color-text)] text-sm border border-gray-600 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]" }}
                   {% endif %}
@@ -231,13 +241,13 @@
               {% endif %}
             </div>
             <div class="flex items-center gap-2 ml-auto">
-              {% if episode_create_url %}
-                <button type="button"
-                        hx-get="{{ episode_create_url }}"
-                        hx-target="closest [data-track-modal-root]"
-                        hx-swap="outerHTML"
+              {% if episode_save_as_new %}
+                <button type="submit"
+                        name="save_as_new_entry"
+                        value="1"
                         class="px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 cursor-pointer">
-                  {% translate "Add new entry" %}
+                  <span class="sm:hidden">{% translate "New entry" %}</span>
+                  <span class="hidden sm:inline">{% translate "Save as new entry" %}</span>
                 </button>
               {% endif %}
               <button type="submit"
@@ -261,6 +271,13 @@
 
       {% if collection_tab_available %}
         <section x-show="activeTab === 'collection'" x-cloak>
+          {% if library_panel_url %}
+            {# Radarr/Sonarr/Seerr details are fetched once, the first time this tab is shown. #}
+            <div class="library-panel"
+                 hx-get="{{ library_panel_url }}"
+                 hx-trigger="intersect once"
+                 hx-swap="outerHTML"></div>
+          {% endif %}
           {% include "app/components/collection_modal.html" with item=collection_context.item entry=collection_context.entry existing_entries=collection_context.existing_entries visible_existing_entries=collection_context.visible_existing_entries season_audit_entries=collection_context.season_audit_entries episode_audit_entries=collection_context.episode_audit_entries form=collection_context.form return_url=collection_context.return_url collection_fields=collection_context.collection_fields custom_field_groups=collection_context.custom_field_groups entry_custom_field_values=collection_context.entry_custom_field_values manage_fields_open=collection_context.manage_fields_open custom_field_schema_json=collection_context.custom_field_schema_json field_type_choices_json=collection_context.field_type_choices_json media_type_choices_json=collection_context.media_type_choices_json collection_fields_save_url=collection_context.collection_fields_save_url collection_tab=True request=request csrf_token=csrf_token only %}
         </section>
       {% endif %}
@@ -268,6 +285,35 @@
       {% if episode_plays_tab_available %}
         <section x-show="activeTab === 'episode-plays'" x-cloak>
           {% include "app/components/fill_track_episode_bulk.html" %}
+        </section>
+      {% endif %}
+      {% if status_history_tab_available %}
+        <section x-show="activeTab === 'status-history'" x-cloak data-status-changes>
+          <h3 class="text-sm font-medium text-[var(--color-text-secondary)] mb-1">{% translate "Status history" %}</h3>
+          <p class="text-xs text-[var(--color-text-muted)] mb-4">{% translate "Every status change, newest first, with what made it." %}</p>
+          {% if status_changes %}
+            <ul class="space-y-2">
+              {% for change in status_changes %}
+                <li class="bg-[var(--color-surface-strong)] rounded-lg px-4 py-3">
+                  <div class="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+                    <span class="text-sm text-[var(--color-text)]">
+                      {% if change.old %}{% translate change.old %} → {% endif %}{% translate change.new %}
+                    </span>
+                    <span class="text-xs text-[var(--color-text-muted)]">{{ change.date|user_datetime_format:user }}</span>
+                  </div>
+                  <p class="text-xs text-[var(--color-text-secondary)] mt-1">
+                    {% if change.reason %}
+                      {% blocktranslate trimmed with reason=change.reason %}by {{ reason }}{% endblocktranslate %}
+                    {% else %}
+                      {% translate "source not recorded" %}
+                    {% endif %}
+                  </p>
+                </li>
+              {% endfor %}
+            </ul>
+          {% else %}
+            <p class="text-sm text-[var(--color-text-muted)]">{% translate "No status changes recorded yet." %}</p>
+          {% endif %}
         </section>
       {% endif %}
       {% if discover_tab_available %}

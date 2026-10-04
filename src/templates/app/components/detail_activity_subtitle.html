@@ -1,5 +1,6 @@
 
 {% load i18n %}
+{% load app_tags %}
 {% load user_tags %}
 
 {% if activity_subtitle %}
@@ -15,7 +16,7 @@
       {% if activity_subtitle.duration_text %}
         <span class="inline-flex items-center">
           <span>
-            {{ activity_subtitle.duration_text|cut:" watched"|cut:" played"|cut:" listened"|cut:" read" }}{% if activity_subtitle.primary_text %} ({{ activity_subtitle.primary_text|cut:"Progress: " }}){% endif %}
+            {{ activity_subtitle.duration_text|cut:" watched"|cut:" played"|cut:" listened"|cut:" read" }}{% if activity_subtitle.primary_text %} ({{ activity_subtitle.primary_text|cut:"Progress: "|translate_activity_text:media_type }}){% endif %}
           </span>
         </span>
         {% if activity_subtitle.date_start or activity_subtitle.date_end %}
@@ -65,7 +66,9 @@
             hx-swap="innerHTML"
             @click="$dispatch('open-session-history')">
       {% if activity_subtitle.primary_text %}
-        <span>{{ activity_subtitle.primary_text }}</span>
+        <span>
+          {{ activity_subtitle.primary_text|translate_activity_text:media_type }}
+        </span>
       {% endif %}
       {% if activity_subtitle.date_start or activity_subtitle.date_end %}
         <span class="mx-2 text-gray-600">•</span>
@@ -85,7 +88,19 @@
       {% endif %}
       {% if activity_subtitle.duration_text %}
         <span class="mx-2 text-gray-600">•</span>
-        <span>{{ activity_subtitle.duration_text }}</span>
+        <span>
+          {% if " watched" in activity_subtitle.duration_text %}
+            {{ activity_subtitle.duration_text|cut:" watched" }} {% translate "watched" %}
+          {% elif " played" in activity_subtitle.duration_text %}
+            {{ activity_subtitle.duration_text|cut:" played" }} {% translate "played" %}
+          {% elif " listened" in activity_subtitle.duration_text %}
+            {{ activity_subtitle.duration_text|cut:" listened" }} {% translate "listened" %}
+          {% elif " read" in activity_subtitle.duration_text %}
+            {{ activity_subtitle.duration_text|cut:" read" }} {% translate "read" %}
+          {% else %}
+            {% translate activity_subtitle.duration_text %}
+          {% endif %}
+        </span>
       {% endif %}
     </button>
   </div>

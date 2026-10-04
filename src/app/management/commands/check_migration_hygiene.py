@@ -250,31 +250,39 @@ class Command(BaseCommand):
             message = "No apps provided. Use --apps with at least one app label."
             raise CommandError(message)
 
-        base_ref, resolution_warnings = _resolve_base_ref(
-            repo_root, options["base_ref"]
-        )
-
         loader = MigrationLoader(connections["default"], ignore_no_migrations=True)
         multi_leaf_apps = _collect_multi_leaf_apps(loader.graph, apps)
 
-        local_paths = _local_migration_paths(repo_root, apps)
-        base_paths = _ref_migration_paths(repo_root, base_ref, apps)
-        fork_only_paths = sorted(local_paths - base_paths)
-
-        immutable_paths, immutable_warnings = _immutable_migration_paths(
-            repo_root, apps
-        )
-        enforce_paths = [
-            path for path in fork_only_paths if path not in immutable_paths
-        ]
-
-        risky_violations = []
-        for rel_path in enforce_paths:
-            risky_violations.extend(
-                _find_risky_operations(repo_root / rel_path, rel_path)
-            )
-
         duplicate_number_info = _duplicate_number_info(repo_root, apps)
+
+        resolution_warnings: list[str] = []
+        immutable_warnings: list[str] = []
+        risky_violations = []
+        base_ref = None
+        try:
+            base_ref, resolution_warnings = _resolve_base_ref(
+                repo_root, options["base_ref"]
+            )
+        except CommandError as exc:
+            resolution_warnings.append(
+                f"could not resolve a base ref ({exc}); skipping risky-operation check."
+            )
+        else:
+            local_paths = _local_migration_paths(repo_root, apps)
+            base_paths = _ref_migration_paths(repo_root, base_ref, apps)
+            fork_only_paths = sorted(local_paths - base_paths)
+
+            immutable_paths, immutable_warnings = _immutable_migration_paths(
+                repo_root, apps
+            )
+            enforce_paths = [
+                path for path in fork_only_paths if path not in immutable_paths
+            ]
+
+            for rel_path in enforce_paths:
+                risky_violations.extend(
+                    _find_risky_operations(repo_root / rel_path, rel_path)
+                )
 
         for warning in [*resolution_warnings, *immutable_warnings]:
             self.stdout.write(self.style.WARNING(f"Warning: {warning}"))

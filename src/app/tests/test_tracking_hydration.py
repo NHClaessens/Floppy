@@ -59,6 +59,37 @@ class TrackingHydrationTests(TestCase):
     @patch("app.services.tracking_hydration.credits.sync_item_credits_from_metadata")
     @patch("app.services.tracking_hydration.upsert_provider_links")
     @patch("app.services.tracking_hydration.services.get_media_metadata")
+    def test_ensure_item_metadata_stores_anime_episode_count(
+        self,
+        mock_get_media_metadata,
+        _mock_upsert_provider_links,
+        _mock_sync_item_credits,
+    ):
+        mock_get_media_metadata.return_value = {
+            "media_id": "437",
+            "source": Sources.MAL.value,
+            "media_type": MediaTypes.ANIME.value,
+            "title": "Perfect Blue",
+            "image": "https://example.com/perfect-blue.jpg",
+            "max_progress": 12,
+            "details": {"episodes": 12, "runtime": "24 min", "status": "Finished"},
+            "related": {},
+        }
+
+        result = tracking_hydration.ensure_item_metadata(
+            None,
+            MediaTypes.ANIME.value,
+            "437",
+            Sources.MAL.value,
+        )
+
+        result.item.refresh_from_db()
+        self.assertEqual(result.item.provider_episode_count, 12)
+        self.assertEqual(result.item.runtime_minutes, 24)
+
+    @patch("app.services.tracking_hydration.credits.sync_item_credits_from_metadata")
+    @patch("app.services.tracking_hydration.upsert_provider_links")
+    @patch("app.services.tracking_hydration.services.get_media_metadata")
     def test_ensure_item_metadata_always_passes_a_list_of_season_numbers(
         self,
         mock_get_media_metadata,

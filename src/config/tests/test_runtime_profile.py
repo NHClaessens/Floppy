@@ -414,3 +414,126 @@ class SizingTests(SimpleTestCase):
         self.assertIn("interactive=on(interactive)", stderr.getvalue())
         self.assertIn("discover=off(merged)", stderr.getvalue())
         self.assertIn("export FLOPPY_START_INTERACTIVE_WORKER='true'", stdout.getvalue())
+
+
+class SizingSourceTests(SimpleTestCase):
+    """Telling an operator's choice apart from the profile's own."""
+
+    def _profile(self, tier=TIER_STANDARD):
+        return ResourceProfile(
+            tier=tier,
+            memory_bytes=16 * GIB,
+            available_bytes=None,
+            swap_bytes=8 * GIB,
+            cpus=8,
+            overridden=False,
+        )
+
+    def test_defaults_ignore_the_environment(self):
+        """The tier's own answer must stay readable behind an override."""
+        profile = self._profile()
+        with mock.patch.dict(
+            runtime_profile.os.environ,
+            {"WEB_CONCURRENCY": "4", "GUNICORN_THREADS": "16"},
+            clear=True,
+        ):
+            self.assertEqual(runtime_profile.web_concurrency_default(profile), 1)
+            self.assertEqual(runtime_profile.gunicorn_threads_default(profile), 4)
+            self.assertEqual(web_concurrency(profile), 4)
+            self.assertEqual(gunicorn_threads(profile), 16)
+
+    def test_unset_and_empty_are_both_automatic(self):
+        """An empty string is how compose passes through an unset variable."""
+        for environment in ({}, {"WEB_CONCURRENCY": ""}):
+            with (
+                self.subTest(environment=environment),
+                mock.patch.dict(runtime_profile.os.environ, environment, clear=True),
+            ):
+                self.assertEqual(runtime_profile.sizing_source("WEB_CONCURRENCY"), "auto")
+
+    def test_a_number_is_an_override_and_a_word_is_invalid(self):
+        """A value that cannot be parsed is ignored, so it must be reported."""
+        cases = {"2": "override", "two": "invalid"}
+        for value, expected in cases.items():
+            with (
+                self.subTest(value=value),
+                mock.patch.dict(
+                    runtime_profile.os.environ,
+                    {"WEB_CONCURRENCY": value},
+                    clear=True,
+                ),
+            ):
+                self.assertEqual(
+                    runtime_profile.sizing_source("WEB_CONCURRENCY"),
+                    expected,
+                )
+
+    def test_a_recorded_source_wins_over_an_inherited_value(self):
+        """Supervisord's children inherit the value emit_env wrote itself.
+
+        Without the recorded marker every supervised process would report its
+        own inherited WEB_CONCURRENCY as an operator override.
+        """
+        with mock.patch.dict(
+            runtime_profile.os.environ,
+            {"WEB_CONCURRENCY": "1", "FLOPPY_WEB_CONCURRENCY_SOURCE": "auto"},
+            clear=True,
+        ):
+            self.assertEqual(runtime_profile.sizing_source("WEB_CONCURRENCY"), "auto")
+
+    def test_report_flags_an_override_above_the_profile(self):
+        """Only an override that costs a process is worth warning about."""
+        profile = self._profile()
+        with mock.patch.dict(
+            runtime_profile.os.environ,
+            {"WEB_CONCURRENCY": "2"},
+            clear=True,
+        ):
+            report = runtime_profile.sizing_report(profile)
+            warning = runtime_profile.web_concurrency_warning(profile)
+
+        self.assertTrue(report["web_concurrency_over_profile"])
+        self.assertEqual(report["web_concurrency_source"], "override")
+        self.assertIn("WEB_CONCURRENCY=2", warning)
+
+    def test_report_is_quiet_when_nothing_is_overridden(self):
+        """A default deployment must produce no warning at all."""
+        profile = self._profile()
+        with mock.patch.dict(runtime_profile.os.environ, {}, clear=True):
+            report = runtime_profile.sizing_report(profile)
+            warning = runtime_profile.web_concurrency_warning(profile)
+
+        self.assertFalse(report["web_concurrency_over_profile"])
+        self.assertEqual(warning, "")
+
+    def test_expected_programs_follow_the_queue_plan(self):
+        """A worker that never starts must not be listed as resident."""
+        profile = self._profile()
+        with mock.patch.dict(runtime_profile.os.environ, {}, clear=True):
+            report = runtime_profile.sizing_report(profile)
+
+        self.assertIn("gunicorn", report["expected_programs"])
+        self.assertEqual(
+            "celery-discover" in report["expected_programs"],
+            report["start_discover_worker"],
+        )
+
+    def test_emit_env_exports_and_warns_about_an_override(self):
+        """The boot log is the only surface that reaches a running install."""
+        profile = self._profile()
+        stdout = StringIO()
+        stderr = StringIO()
+        with (
+            mock.patch.dict(
+                runtime_profile.os.environ,
+                {"WEB_CONCURRENCY": "2"},
+                clear=True,
+            ),
+            redirect_stdout(stdout),
+            redirect_stderr(stderr),
+        ):
+            runtime_profile.emit_env(profile)
+
+        self.assertIn("export FLOPPY_WEB_CONCURRENCY_SOURCE='override'", stdout.getvalue())
+        self.assertIn("export FLOPPY_GUNICORN_THREADS_SOURCE='auto'", stdout.getvalue())
+        self.assertIn("WEB_CONCURRENCY=2 is set explicitly", stderr.getvalue())

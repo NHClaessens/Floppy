@@ -121,26 +121,28 @@ class CeleryDispatchRoutingTests(SimpleTestCase):
             task_routes=settings.CELERY_TASK_ROUTES,
         )
 
-        def task_body():
+        def task_body(*args, **kwargs):
             return None
 
-        self.background_task = self.app.task(
-            name="Backfill item metadata",
-            ignore_result=True,
-        )(task_body)
-        self.followup_task = self.app.task(
-            name="Import from Radarr (Recurring)",
-            ignore_result=True,
-        )(task_body)
-        self.interactive_task = self.app.task(
-            name="Process media server webhook",
-            ignore_result=True,
-        )(task_body)
-        self.fallback_task = self.app.task(
-            name="Unclassified priority test task",
-            ignore_result=True,
-        )(task_body)
+        # Finalize first. Celery replays every @shared_task onto a newly
+        # finalized app, so the real implementations of these names land here
+        # -- and dispatching then reaches the real task and fails its signature
+        # check (`import_radarr_recurring() missing 1 required positional
+        # argument`). This only bites when app and integrations tests share a
+        # process, which is why running the suite serially surfaced it.
         self.app.finalize()
+
+        def _register(name):
+            # _task_from_fun returns the *existing* task when the name is
+            # already registered, so the injected real implementation has to be
+            # unregistered first or the stand-in silently never takes effect.
+            self.app.tasks.pop(name, None)
+            return self.app.task(name=name, ignore_result=True, shared=False)(task_body)
+
+        self.background_task = _register("Backfill item metadata")
+        self.followup_task = _register("Import from Radarr (Recurring)")
+        self.interactive_task = _register("Process media server webhook")
+        self.fallback_task = _register("Unclassified priority test task")
 
     def _dispatch_and_capture(self, dispatch):
         with patch.object(self.app.amqp, "send_task_message") as publish:

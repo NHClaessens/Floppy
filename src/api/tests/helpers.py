@@ -102,6 +102,8 @@ def check_complete_media_structure(test_case, item):
         "parent_id"
     ] else test_case.assertIsNone(item["parent_id"])
     test_case.assertIn("tracked", item)
+    test_case.assertIn("episodes_left", item)
+    test_case.assertIn("total_episodes_left", item)
     test_case.assertIn("consumptions_number", item)
     test_case.assertIn("consumptions", item)
     for consumption in item["consumptions"]:
@@ -116,6 +118,7 @@ def check_consumption_structure(test_case, item):
     test_case.assertIn("consumption_id", item)
     test_case.assertIn("created", item)
     test_case.assertIn("score", item)
+    test_case.assertIn("scored_at", item)
     test_case.assertIn("progress", item)
     test_case.assertIn("status", item)
     test_case.assertIn("start_date", item)
@@ -233,6 +236,7 @@ def check_media_structure(test_case, item):
     test_case.assertIn("tracked", item)
     test_case.assertIn("created_at", item)
     test_case.assertIn("score", item)
+    test_case.assertIn("scored_at", item)
     test_case.assertIn("status", item)
     test_case.assertIn("progress", item)
     test_case.assertIn("progress_scope", item)

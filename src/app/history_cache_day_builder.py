@@ -7,6 +7,7 @@ from django.apps import apps
 from django.conf import settings
 from django.core.cache import cache
 from django.db import models
+from django.db.models.functions import Coalesce, Greatest, Least
 from django.utils import formats, timezone
 
 from app import helpers
@@ -23,6 +24,7 @@ from app.history_cache_utils import (
     _resolve_genres,
     _resolve_music_genres,
     expand_history_media_types,
+    history_deferred_item_fields,
 )
 from app.history_entry_builders import (
     _attach_entry_score,
@@ -54,6 +56,24 @@ from app.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _span_may_touch_day(queryset, day_start, day_end):
+    """Narrow games/boardgames to rows whose play span can reach this day.
+
+    A superset of the exact per-day check the caller still runs: same span
+    fallbacks, ordered either way, widened by a day so converting to local
+    dates can never push a row out of the window. Without it every repeats
+    day loaded the user's whole game library (#1158).
+    """
+    first = Coalesce("start_date", "end_date", "created_at")
+    last = Coalesce("end_date", "start_date", "created_at")
+    margin = timedelta(days=1)
+    return (
+        queryset.filter(progress__gt=0)
+        .alias(span_lo=Least(first, last), span_hi=Greatest(first, last))
+        .filter(span_lo__lt=day_end + margin, span_hi__gte=day_start - margin)
+    )
 
 
 def build_history_day(user, day_key, logging_style_override=None, media_types=None):
@@ -92,19 +112,29 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
 
     # Episodes
     episodes = (
-        Episode.objects.filter(
-            related_season__user=user,
-            end_date__gte=day_start,
-            end_date__lt=day_end,
+        Episode.all_objects.filter(related_season__user=user)
+        .filter(
+            models.Q(end_date__gte=day_start, end_date__lt=day_end)
+            | (
+                models.Q(end_date__isnull=True)
+                & models.Q(start_date__gte=day_start, start_date__lt=day_end)
+            ),
         )
         .select_related(
             "item",
             "related_season__item",
             "related_season__related_tv__item",
         )
-        .order_by("-end_date")
+        .defer(
+            *history_deferred_item_fields(
+                "item",
+                "related_season__item",
+                "related_season__related_tv__item",
+            ),
+        )
+        .order_by("-end_date", "-start_date")
         if include_episode
-        else Episode.objects.none()
+        else Episode.all_objects.none()
     )
     episodes = list(episodes)
     episode_title_map = {}
@@ -126,6 +156,7 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                         ep_item.source,
                         ep_item.season_number,
                         ep_item.episode_number,
+                        ep_item.library_media_type,
                     ),
                 )
         if episode_keys:
@@ -133,6 +164,7 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
             sources = {k[1] for k in episode_keys}
             season_numbers = {k[2] for k in episode_keys}
             episode_numbers = {k[3] for k in episode_keys}
+            library_media_types = {k[4] for k in episode_keys}
             titles_qs = (
                 Item.objects.filter(
                     media_type=MediaTypes.EPISODE.value,
@@ -140,16 +172,18 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                     source__in=sources,
                     season_number__in=season_numbers,
                     episode_number__in=episode_numbers,
+                    library_media_type__in=library_media_types,
                 )
                 .exclude(title__isnull=True)
                 .exclude(title="")
             )
-            for item in titles_qs:
+            for item in titles_qs.iterator(chunk_size=500):
                 key = (
                     item.media_id,
                     item.source,
                     item.season_number,
                     item.episode_number,
+                    item.library_media_type,
                 )
                 if key not in episode_title_map:
                     episode_title_map[key] = item.title
@@ -158,6 +192,9 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
         entry = _build_episode_entry(episode, episode_title_map)
         if entry:
             entries.append(entry)
+    # Entries contain serialized data; release the episode model graph before
+    # building the other media sections of a busy day.
+    del episodes, episode_title_map
 
     # Movies
     movies_qs = (
@@ -166,27 +203,37 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
             models.Q(end_date__isnull=False) | models.Q(start_date__isnull=False),
         )
         .select_related("item")
+        .defer(*history_deferred_item_fields("item"))
         if include_movie
         else Movie.objects.none()
     )
 
-    movie_play_counts = (
-        movies_qs.values("item__media_id", "item__source")
-        .annotate(play_count=models.Count("id"))
-        .order_by()
+    movies = list(
+        movies_qs.filter(
+            models.Q(end_date__gte=day_start, end_date__lt=day_end)
+            | (
+                models.Q(end_date__isnull=True)
+                & models.Q(start_date__gte=day_start, start_date__lt=day_end)
+            ),
+        ).order_by("-end_date")
     )
-    movie_play_map = {
-        (row["item__media_id"], row["item__source"]): row["play_count"]
-        for row in movie_play_counts
-    }
 
-    movies = movies_qs.filter(
-        models.Q(end_date__gte=day_start, end_date__lt=day_end)
-        | (
-            models.Q(end_date__isnull=True)
-            & models.Q(start_date__gte=day_start, start_date__lt=day_end)
-        ),
-    ).order_by("-end_date")
+    # Play counts only for this day's titles, not the user's whole library.
+    movie_play_map = {}
+    if movies:
+        movie_play_counts = (
+            movies_qs.filter(
+                item__media_id__in={movie.item.media_id for movie in movies},
+                item__source__in={movie.item.source for movie in movies},
+            )
+            .values("item__media_id", "item__source")
+            .annotate(play_count=models.Count("id"))
+            .order_by()
+        )
+        movie_play_map = {
+            (row["item__media_id"], row["item__source"]): row["play_count"]
+            for row in movie_play_counts
+        }
 
     for movie in movies:
         entry = _build_movie_entry(movie)
@@ -222,8 +269,9 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                 ),
             )
             .select_related("item")
+            .defer(*history_deferred_item_fields("item"))
         )
-        for record in records:
+        for record in records.iterator(chunk_size=500):
             item = getattr(record, "item", None)
             if not item:
                 continue
@@ -291,7 +339,9 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                 music.id: music
                 for music in Music.objects.filter(
                     id__in=music_ids, user=user
-                ).select_related("item", "album", "track")
+                )
+                .select_related("item", "album", "track")
+                .defer(*history_deferred_item_fields("item"))
             }
             if music_ids
             else {}
@@ -303,7 +353,7 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                 album_id__in=album_ids,
                 duration_ms__isnull=False,
             ).values("album_id", "title", "duration_ms", "musicbrainz_recording_id")
-            for track_data in tracks_qs:
+            for track_data in tracks_qs.iterator(chunk_size=500):
                 title_key = (track_data["album_id"], track_data["title"])
                 track_duration_cache[title_key] = track_data["duration_ms"]
                 if track_data["musicbrainz_recording_id"]:
@@ -319,7 +369,7 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                 user=user,
                 album_id__in=album_ids,
             ).values("album_id", "score")
-            for tracker in album_trackers:
+            for tracker in album_trackers.iterator(chunk_size=500):
                 if tracker["score"] is not None:
                     album_scores[tracker["album_id"]] = tracker["score"]
 
@@ -427,6 +477,8 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                 end_date__gte=day_start,
                 end_date__lt=day_end,
             )
+            .values_list("id", "end_date", "history_id", named=True)
+            .iterator(chunk_size=500)
         )
     if podcast_history_records:
         podcast_ids = list({record.id for record in podcast_history_records})
@@ -435,7 +487,9 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
             for p in Podcast.objects.filter(
                 id__in=podcast_ids,
                 user=user,
-            ).select_related("item", "episode", "episode__show", "show")
+            )
+            .select_related("item", "episode", "episode__show", "show")
+            .defer(*history_deferred_item_fields("item"))
         }
 
         podcast_play_counts = {}
@@ -536,11 +590,12 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                     )
                 )
                 .select_related("item")
+                .defer(*history_deferred_item_fields("item"))
             )
             if include_game
             else Game.objects.none()
         )
-        for game in games:
+        for game in games.iterator(chunk_size=500):
             activity_dt = game.end_date or game.start_date or game.created_at
             played_at_local = _localize_datetime(activity_dt)
             if not played_at_local:
@@ -597,11 +652,12 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
                     )
                 )
                 .select_related("item")
+                .defer(*history_deferred_item_fields("item"))
             )
             if include_boardgame
             else BoardGame.objects.none()
         )
-        for boardgame in boardgames:
+        for boardgame in boardgames.iterator(chunk_size=500):
             activity_dt = (
                 boardgame.end_date or boardgame.start_date or boardgame.created_at
             )
@@ -646,11 +702,13 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
             entries.append(entry)
     else:
         games = (
-            Game.objects.filter(user=user).select_related("item")
+            _span_may_touch_day(Game.objects.filter(user=user), day_start, day_end)
+            .select_related("item")
+            .defer(*history_deferred_item_fields("item"))
             if include_game
             else Game.objects.none()
         )
-        for game in games:
+        for game in games.iterator(chunk_size=500):
             total_minutes = game.progress or 0
             if total_minutes <= 0:
                 continue
@@ -704,11 +762,15 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
             entries.append(entry)
 
         boardgames = (
-            BoardGame.objects.filter(user=user).select_related("item")
+            _span_may_touch_day(
+                BoardGame.objects.filter(user=user), day_start, day_end
+            )
+            .select_related("item")
+            .defer(*history_deferred_item_fields("item"))
             if include_boardgame
             else BoardGame.objects.none()
         )
-        for boardgame in boardgames:
+        for boardgame in boardgames.iterator(chunk_size=500):
             total_plays = boardgame.progress or 0
             if total_plays <= 0:
                 continue

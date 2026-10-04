@@ -15,7 +15,7 @@ from django.urls import reverse
 from app.models import Item, MediaTypes, Movie, Sources, Status
 from lists import tasks as list_tasks
 from lists.models import CustomList
-from users.home_screen import _custom_list_entries
+from users.home_screen import _custom_list_row_window
 from users.models import HomeScreenRowTypeChoices
 
 
@@ -141,12 +141,12 @@ class GetRequestsDoNotSyncInlineTests(TestCase):
         mock_delay,
         mock_sync,
     ):
-        """Home smart-list rows render from the dynamic queryset."""
+        """Home smart-list rows render saved membership and sync in the background."""
         row = self.user.home_screen_rows.create(
             media_type=MediaTypes.MOVIE.value,
             row_type=HomeScreenRowTypeChoices.CUSTOM_LIST,
             custom_list=self.smart_list,
         )
-        _custom_list_entries(self.user, row)
+        _custom_list_row_window(self.user, row, 0, 100, seed=0)
         mock_sync.assert_not_called()
         mock_delay.assert_called_once_with(self.smart_list.id)

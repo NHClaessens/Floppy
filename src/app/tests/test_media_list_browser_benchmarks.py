@@ -12,10 +12,10 @@ import time
 import unittest
 
 from django.contrib.auth import get_user_model
-from django.contrib.staticfiles.testing import StaticLiveServerTestCase
 from django.test import tag
 
 from app.models import Item, MediaTypes
+from app.tests.live_server import SerialStaticLiveServerTestCase
 from app.tests.test_query_counts import (
     seed_anime_library,
     seed_movie_library,
@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover - optional benchmark dependency
 
 
 @tag("slow", "benchmark", "playwright")
-class MediaListBrowserBenchmarkTests(StaticLiveServerTestCase):
+class MediaListBrowserBenchmarkTests(SerialStaticLiveServerTestCase):
     """Measure navigation cost and follow-up release-year requests in a browser."""
 
     @classmethod

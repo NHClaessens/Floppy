@@ -33,7 +33,7 @@
 
     <link rel="stylesheet" type="text/css" href="{% static 'css/main.css' %}{% get_static_file_mtime 'css/main.css' %}">
 
-    <script src="{% url 'javascript-catalog' %}"></script>
+    <script src="{% javascript_catalog_url %}"></script>
     <script src="{% static 'js/libraries/htmx-2.0.4.min.js' %}"></script>
     <script>
       // Boosted navigation: never serve history entries from the local
@@ -43,6 +43,7 @@
         htmx.config.refreshOnHistoryMiss = true;
       }
     </script>
+    <script src="{% static 'js/libraryFilterState.js' %}{% get_static_file_mtime 'js/libraryFilterState.js' %}"></script>
     <script defer src="{% static 'js/libraries/alpinejs-3.14.9.min.js' %}"></script>
     <script src="{% static 'js/libraries/lazysizes-5.3.2.min.js' %}" async></script>
     <script defer
@@ -154,6 +155,8 @@
         </div>
       </div>
     {% endif %}
+
+    <script src="{% static 'js/libraries/sortablejs-1.15.3.min.js' %}"></script>
 
     {% block js %}
     {% endblock js %}

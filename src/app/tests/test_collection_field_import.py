@@ -50,6 +50,12 @@ class TypeInferenceTests(TestCase):
         field_type, _ = infer_field_type(["Yes", "No", "yes"])
         self.assertEqual(field_type, CollectionFieldType.CHECKBOX)
 
+    def test_single_pass_boolean_inference_keeps_ambiguous_digits(self):
+        """Streaming inference accepts digit tokens alongside explicit booleans."""
+        field_type, options = infer_field_type(iter(["1", "No", "0", "Yes"]))
+        self.assertEqual(field_type, CollectionFieldType.CHECKBOX)
+        self.assertEqual(options, [])
+
     def test_bare_digits_are_not_checkboxes(self):
         """1/0 alone is a number, not a checkbox."""
         field_type, _ = infer_field_type(["1", "0", "1"])

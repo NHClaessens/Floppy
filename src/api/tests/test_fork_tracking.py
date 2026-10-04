@@ -296,6 +296,124 @@ class EpisodeWatchTests(FloppyApiTestCase):
         "app.models.providers.services.get_media_metadata",
         side_effect=_season_metadata_side_effect,
     )
+    def test_watch_idempotent_external_id_replay(self, _mock):
+        """A duplicate external_id returns the existing play without a second row."""
+        first = self._watch(
+            2,
+            payload={"end_date": "2024-01-01", "external_id": "evt-1"},
+        )
+        second = self._watch(
+            2,
+            payload={"end_date": "2024-06-01", "external_id": "evt-1"},
+        )
+
+        self.assertEqual(first.status_code, HTTP.CREATED)
+        self.assertEqual(second.status_code, HTTP.OK)
+        self.assertEqual(
+            first.json()["consumption_id"],
+            second.json()["consumption_id"],
+        )
+        self.assertEqual(
+            Episode.objects.filter(
+                related_season=self.season_medias[0],
+                item__episode_number=2,
+                external_id="evt-1",
+            ).count(),
+            1,
+        )
+
+    @patch(
+        "app.models.providers.services.get_media_metadata",
+        side_effect=_season_metadata_side_effect,
+    )
+    def test_same_external_id_on_another_episode_is_allowed(self, _mock):
+        """External ids are unique per episode, not across the season."""
+        first = self._watch(
+            1,
+            payload={"end_date": "2024-01-01", "external_id": "evt-1"},
+        )
+        second = self._watch(
+            2,
+            payload={"end_date": "2024-01-01", "external_id": "evt-1"},
+        )
+
+        self.assertEqual(first.status_code, HTTP.CREATED)
+        self.assertEqual(second.status_code, HTTP.CREATED)
+
+    @patch(
+        "app.models.providers.services.get_media_metadata",
+        side_effect=_season_metadata_side_effect,
+    )
+    def test_unwatch_by_external_id(self, _mock):
+        """DELETE watch with external_id targets that specific play."""
+        self._watch(1, payload={"end_date": "2024-01-01", "external_id": "a"})
+        self._watch(1, payload={"end_date": "2024-02-01", "external_id": "b"})
+
+        response = self.call_api(
+            "delete",
+            "api_media_episode_watch",
+            args=("tv", "tmdb", "1001", 1, 1),
+            params={"external_id": "a"},
+            headers=self.auth_headers,
+        )
+        self.assertEqual(response.status_code, HTTP.NO_CONTENT)
+
+        remaining = Episode.objects.filter(
+            related_season=self.season_medias[0],
+            item__episode_number=1,
+            external_id__isnull=False,
+        )
+        self.assertEqual(remaining.count(), 1)
+        self.assertEqual(remaining.first().external_id, "b")
+
+    @patch(
+        "app.models.providers.services.get_media_metadata",
+        side_effect=_season_metadata_side_effect,
+    )
+    def test_unwatch_unknown_external_id_not_found(self, _mock):
+        """DELETE watch with an external_id that matches no play returns 404."""
+        self._watch(1, payload={"end_date": "2024-01-01", "external_id": "a"})
+
+        response = self.call_api(
+            "delete",
+            "api_media_episode_watch",
+            args=("tv", "tmdb", "1001", 1, 1),
+            params={"external_id": "missing"},
+            headers=self.auth_headers,
+        )
+        self.assertEqual(response.status_code, HTTP.NOT_FOUND)
+        self.assertEqual(
+            Episode.objects.filter(
+                related_season=self.season_medias[0],
+                item__episode_number=1,
+                external_id="a",
+            ).count(),
+            1,
+        )
+
+    @patch(
+        "app.models.providers.services.get_media_metadata",
+        side_effect=_season_metadata_side_effect,
+    )
+    def test_history_response_includes_external_id(self, _mock):
+        """Episode history exposes external_id so clients can match their plays."""
+        self._watch(1, payload={"end_date": "2024-01-01", "external_id": "evt-9"})
+
+        response = self.call_api(
+            "get",
+            "api_media_episode_consumption_history",
+            args=("tv", "tmdb", "1001", 1, 1),
+            headers=self.auth_headers,
+        )
+        self.assertEqual(response.status_code, HTTP.OK)
+        results = response.json()["results"]
+        matched = [row for row in results if row["external_id"] == "evt-9"]
+        self.assertEqual(len(matched), 1)
+
+    @patch(
+        "app.models.providers.services.get_media_metadata",
+        side_effect=_season_metadata_side_effect,
+    )
     def test_drop_creates_dropped_record(self, _mock):
         """POST drop records a dropped episode without watch history."""
         response = self.call_api(
@@ -860,6 +978,45 @@ class HistoryTimelineTests(FloppyApiTestCase):
                 )
                 self.assertEqual(history_entry["title"], "Pilot")
                 self.assertEqual(history_entry["show"]["title"], "TV Show 1")
+
+    def test_flat_episode_history_uses_episode_title_in_item_and_url(self):
+        """Flattened history keeps the repaired episode title in its item and URL."""
+        episode = self.episode_medias[0]
+        episode.related_season.related_tv.item.source = Sources.TVDB.value
+        episode.related_season.related_tv.item.media_id = "81189"
+        episode.related_season.related_tv.item.save(
+            update_fields=["source", "media_id"],
+        )
+        episode.related_season.item.source = Sources.TVDB.value
+        episode.related_season.item.media_id = "81189"
+        episode.related_season.item.save(update_fields=["source", "media_id"])
+        episode.item.title = "Pilot"
+        episode.item.source = Sources.TVDB.value
+        episode.item.media_id = "81189"
+        episode.item.save(update_fields=["title", "source", "media_id"])
+        episode.end_date = datetime.datetime(2024, 5, 11, tzinfo=datetime.UTC)
+        episode.save(update_fields=["end_date"])
+        cache.clear()
+
+        response = self.call_api(
+            "get",
+            "api_history",
+            params={"flat": "1"},
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, HTTP.OK)
+        history_entry = next(
+            entry
+            for entry in response.json()["results"]
+            if entry["instance_id"] == episode.id
+        )
+        self.assertEqual(history_entry["title"], "Pilot")
+        self.assertEqual(history_entry["item"]["title"], "Pilot")
+        self.assertIn(
+            "/details/tvdb/tv/81189/pilot/season/1/episode/1",
+            history_entry["url"],
+        )
 
     def test_history_types_alias_filters_categories_before_querying(self):
         """The issue's plural types parameter excludes unrelated categories."""

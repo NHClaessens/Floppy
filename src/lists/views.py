@@ -1,10 +1,9 @@
 import json
 import logging
+from dataclasses import replace
 
 from django.contrib import messages
 from django.contrib.auth.decorators import login_not_required
-from django.core.paginator import Paginator
-from django.db.models import F, OuterRef, Subquery
 from django.http import Http404, StreamingHttpResponse
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -13,11 +12,15 @@ from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
 from app import helpers
+from app.bulk_actions import build_bulk_action_data
 from app.columns import (
     resolve_column_config,
     resolve_columns,
     resolve_default_column_config,
 )
+from app.library_query.adapters import filter_values_from_media_list_filters
+from app.library_query.spec import STATUS_MATCH_ANY
+from app.media_list_filters import parse_media_list_filters
 from app.media_list_views import MEDIA_LIST_NO_STATUS, MEDIA_LIST_NO_STATUS_LABEL
 from app.models import MediaTypes
 from app.providers import (
@@ -25,29 +28,21 @@ from app.providers import (
 )
 from app.release_years import prefill_display_release_years
 from integrations import exports
+from lists import smart_rules
 from lists import tasks as list_tasks
 from lists.forms import CustomListForm
-from lists.models import CustomList, CustomListItem
+from lists.models import CustomList
 from lists.views_helpers import (
     _adapt_list_items_for_table,
-    _attach_media_with_aggregation,
+    _attach_kometa_episode_urls,
     _build_collection_platforms_by_item_id,
     _build_list_count_trigger,
     _build_list_url_template,
     _build_media_type_breakdown,
-    _date_sort_value,
-    _filter_items_by_media_status,
-    _find_statusless_item_ids,
     _get_completed_item_ids,
-    _media_date_value,
-    _order_expression,
-    _paginate_python_sorted_items,
-    _platform_sort_value,
-    _progress_value,
-    _rating_value,
     _resolve_list_sort_direction,
     _resolve_list_table_media_type,
-    _status_value,
+    paginate_list_items,
 )
 from lists.views_smart_list import _smart_list_detail_response
 from users.models import ListDetailSortChoices, MediaStatusChoices
@@ -229,16 +224,6 @@ def list_detail(request, list_reference):
     # Build and filter base queryset
     items = custom_list.items.all()
     total_items_count = items.count()
-    # Search/type/status filters are the only things that can narrow `items`
-    # below the full list, so without them the paginator's count is always
-    # exactly total_items_count - reuse it instead of a second identical
-    # COUNT query below.
-    list_is_unfiltered = (
-        not params["search_query"]
-        and not params["media_types"]
-        and not params["status_filter"]
-    )
-
     media_type_breakdown = _build_media_type_breakdown(custom_list)
 
     # Compute completion percentage (titles completed / total titles)
@@ -250,153 +235,43 @@ def list_detail(request, list_reference):
         completed_count = len(completed_ids)
         completion_percent = round(completed_count / total_items_count * 100)
 
-    if params["search_query"]:
-        items = items.filter(title__icontains=params["search_query"])
     if params["media_types"]:
         items = items.filter(media_type__in=params["media_types"])
-    items = items.annotate(
-        list_date_added=Subquery(
-            CustomListItem.objects.filter(
-                custom_list=custom_list,
-                item_id=OuterRef("pk"),
-            )
-            .order_by("-date_added")
-            .values("date_added")[:1],
-        ),
+    elif request.GET.get("type_mode") == "subset":
+        # The filter menu's "Hide all" leaves no type selected.
+        items = items.none()
+    filtered_media_types = list(
+        items.order_by().values_list("media_type", flat=True).distinct(),
     )
-
-    # Filter by status if specified. A no-status match includes list items with
-    # no tracker row as well as rows whose current status is null.
-    if params["status_filter"]:
-        real_status_filter = tuple(
-            value
-            for value in params["status_filter"]
-            if value != MEDIA_LIST_NO_STATUS
-        )
-        matching_item_ids = set()
-        if real_status_filter:
-            matching_item_ids.update(
-                _filter_items_by_media_status(
-                    items,
-                    media_user,
-                    real_status_filter,
-                ).values_list("id", flat=True)
-            )
-
-        if MEDIA_LIST_NO_STATUS in params["status_filter"]:
-            matching_item_ids.update(
-                _find_statusless_item_ids(
-                    items,
-                    media_user,
-                )
-            )
-
-        # Filter items to only those with the specified status.
-        items = items.filter(id__in=matching_item_ids)
-    filtered_media_types = list(items.values_list("media_type", flat=True).distinct())
-
-    # Apply sorting
-    sort_mapping = {
-        "date_added": [
-            _order_expression("customlistitem__date_added", params["direction"]),
-            _order_expression("title", params["direction"]),
-            _order_expression("id", params["direction"]),
-        ],
-        "custom": ["customlistitem__date_added", "customlistitem__id"],
-        "title": [
-            _order_expression("title", params["direction"]),
-            F("season_number").asc(nulls_first=True)
-            if params["direction"] == "asc"
-            else F("season_number").desc(nulls_last=True),
-            F("episode_number").asc(nulls_first=True)
-            if params["direction"] == "asc"
-            else F("episode_number").desc(nulls_last=True),
-            _order_expression("id", params["direction"]),
-        ],
-        "media_type": [
-            _order_expression("media_type", params["direction"]),
-            _order_expression("id", params["direction"]),
-        ],
-        "rating": [
-            _order_expression("customlistitem__date_added", params["direction"]),
-        ],  # Fallback before media-based sorting
-        "release_date": [
-            _order_expression("release_datetime", params["direction"]),
-            _order_expression("title", params["direction"]),
-            _order_expression("id", params["direction"]),
-        ],
-    }
-
-    media_sort_config = {
-        "rating": {
-            "key": lambda item: _rating_value(item.media),
-            "reverse": params["direction"] == "desc",
-        },
-        "progress": {
-            "key": lambda item: _progress_value(item.media),
-            "reverse": params["direction"] == "desc",
-        },
-        "start_date": {
-            "key": lambda item: _date_sort_value(
-                _media_date_value(item.media, "start_date"),
-                params["direction"],
-            ),
-            "reverse": params["direction"] == "desc",
-        },
-        "end_date": {
-            "key": lambda item: _date_sort_value(
-                _media_date_value(item.media, "end_date"),
-                params["direction"],
-            ),
-            "reverse": params["direction"] == "desc",
-        },
-        "status": {
-            "key": lambda item: _status_value(item.media),
-            "reverse": params["direction"] == "desc",
-        },
-        "platform": {
-            "key": lambda item: _platform_sort_value(
-                item, collection_platforms_by_item_id
-            ),
-            "reverse": params["direction"] == "desc",
-        },
-    }
-
+    # The remaining filters (genre, year, rating, dates, tags...) go through
+    # the media list's own parser, so a list page accepts exactly the URL
+    # filters the media list and the API do. Type, status and search keep the
+    # list page's own handling above.
+    # A no-status match includes list items with no tracker row as well as
+    # rows whose status is null; other statuses match any of the user's rows.
+    status_filter = tuple(params["status_filter"] or ())
+    parsed_filters = replace(
+        parse_media_list_filters(request, strict=False),
+        statuses=tuple(v for v in status_filter if v != MEDIA_LIST_NO_STATUS),
+        include_no_status=MEDIA_LIST_NO_STATUS in status_filter,
+        search=params["search_query"],
+    )
+    list_filters = replace(
+        filter_values_from_media_list_filters(parsed_filters),
+        status_match=STATUS_MATCH_ANY,
+    )
+    items_page, filtered_items_count = paginate_list_items(
+        custom_list=custom_list,
+        media_user=media_user,
+        candidates=items.values("pk"),
+        filters=list_filters,
+        sort_by=params["sort_by"],
+        direction=params["direction"],
+        page=params["page"],
+    )
     collection_platforms_by_item_id = {}
-    sort_config = media_sort_config.get(params["sort_by"])
-    if sort_config:
-        if params["sort_by"] == "platform":
-            def value_getter(item, platforms):
-                return _platform_sort_value(item, platforms)
-        else:
-            def value_getter(item, _platforms):
-                return sort_config["key"](item)
-        items_page, filtered_items_count, collection_platforms_by_item_id = (
-            _paginate_python_sorted_items(
-                items,
-                media_user,
-                params["page"],
-                16,
-                value_getter,
-                reverse=sort_config["reverse"],
-                needs_collection_platforms=params["sort_by"] == "platform",
-            )
-        )
-    else:
-        # For database-backed sorts, apply ordering and paginate normally
-        items = items.order_by(
-            *sort_mapping.get(params["sort_by"], ["-customlistitem__date_added"]),
-        )
 
-        # Paginate and prepare media objects
-        paginator = Paginator(items, 16)
-        if list_is_unfiltered:
-            paginator.__dict__["count"] = total_items_count
-        items_page = paginator.get_page(params["page"])
-        filtered_items_count = paginator.count
-
-        _attach_media_with_aggregation(items_page, media_user)
-
+    _attach_kometa_episode_urls(items_page)
     prefill_display_release_years(items_page)
 
     if layout == "table":
@@ -455,6 +330,19 @@ def list_detail(request, list_reference):
         else "",
         "show_public_notes": not is_public_view or custom_list.include_notes,
         "can_edit": can_edit,
+        "enable_bulk_select": can_edit,
+        "bulk_action_data": (
+            build_bulk_action_data(
+                request.user,
+                request=request,
+                status_url=reverse("bulk_status_update"),
+                list_url=reverse("bulk_list_add"),
+                collection_url=reverse("bulk_collection_quick_add"),
+                tag_url=reverse("tag_bulk_toggle"),
+            )
+            if can_edit
+            else {}
+        ),
         "list_ordering_enabled": can_edit
         and params["sort_by"] == ListDetailSortChoices.CUSTOM,
         "is_public_view": is_public_view,
@@ -523,6 +411,18 @@ def list_detail(request, list_reference):
                 "completion_percent": completion_percent,
                 "completed_count": completed_count,
                 "media_type_breakdown": media_type_breakdown,
+                "list_filter_data": smart_rules.build_filter_data_for_items(
+                    media_user,
+                    custom_list.items.values_list("id", flat=True),
+                    [entry["value"] for entry in media_type_breakdown],
+                    # A visitor must not see the owner's private tag names.
+                    precomputed_tags=[] if is_public_view else None,
+                    include_list_options=False,
+                ),
+                "list_filter_state": {
+                    **parsed_filters.menu_state(),
+                    "media_types": params["media_types"],
+                },
             },
         )
         return render(request, "lists/list_detail.html", context)

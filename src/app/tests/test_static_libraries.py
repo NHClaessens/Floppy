@@ -107,15 +107,21 @@ class StaticLibraryContractTests(SimpleTestCase):
 
         self.assertEqual(content.count(expected_tag), 1)
 
-    def test_zxing_loads_before_barcode_scanner_helper(self):
-        """ZXing must load before the helper reads the window.ZXing export."""
-        content = self.base_template_path.read_text(encoding="utf-8")
-        zxing_tag = f"{{% static '{ZXING_ASSET}' %}}"
-        scanner_tag = "{% static 'js/barcode-scanner.js' %}"
+    def test_barcode_scanner_helper_loads_the_local_zxing_asset(self):
+        """The helper loads ZXing on first scan from the reviewed local file.
 
-        self.assertIn(zxing_tag, content)
-        self.assertIn(scanner_tag, content)
-        self.assertLess(content.index(zxing_tag), content.index(scanner_tag))
+        ZXing is not a <script> in every page's head any more; the helper's own
+        tag names the pinned asset in data-zxing-src and injects it when needed.
+        """
+        content = self.base_template_path.read_text(encoding="utf-8")
+        scanner_tag = "{% static 'js/barcode-scanner.js' %}"
+        scanner_start = content.index(scanner_tag)
+        scanner_end = content.index("</script>", scanner_start)
+
+        self.assertIn(
+            f"data-zxing-src=\"{{% static '{ZXING_ASSET}' %}}\"",
+            content[scanner_start:scanner_end],
+        )
 
     def test_configured_static_url_is_local(self):
         """Django must resolve the ZXing file without an external origin."""

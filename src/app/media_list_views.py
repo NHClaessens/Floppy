@@ -2,16 +2,18 @@ import json
 import logging
 import math
 import time
-from collections import defaultdict
-from dataclasses import dataclass
+from collections import Counter, defaultdict
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 
 from django.apps import apps as django_apps
 from django.conf import settings
 from django.core.cache import cache
+from django.core.exceptions import FieldError
 from django.core.paginator import Paginator
-from django.db.models import Count, F, Min
+from django.db.models import Count, F, Min, Q
 from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render
 from django.urls import reverse
@@ -20,24 +22,24 @@ from django.views.decorators.http import require_POST
 
 from app import cache_utils, helpers, history_cache
 from app import statistics as stats
+from app.bulk_actions import build_bulk_action_data
 from app.columns import (
     resolve_column_config,
     resolve_columns,
     resolve_default_column_config,
     sanitize_column_prefs,
 )
+from app.library_query import FilterValues, LibraryQuery, LibraryQueryExecutor
+from app.library_query.adapters import from_media_list_filters
 from app.media_list_entry_grouping import entry_grouping_is_separate
 from app.media_list_filters import (
-    MediaListFilters,
     apply_media_list_collection_filter,
     apply_media_list_progress_filter,
     apply_media_list_rating_filter,
     apply_media_list_status_filter,
+    media_list_entries_for_items,
+    parse_media_list_filters,
 )
-from app.media_list_filters import (
-    normalize_completed_date_filter as _normalize_completed_date_filter,
-)
-from app.media_list_pagination import can_paginate_in_sql
 from app.models import (
     TV,
     BasicMedia,
@@ -628,6 +630,22 @@ def build_filter_data_from_items(
     }
 
 
+def _restore_region_providers(row, region):
+    """Put a region-narrowed provider slice back under ``watch_providers``.
+
+    The query asks SQL for one region out of a blob that covers every region
+    TMDB knows, because that is all the filter menu reads. Downstream still
+    expects the field's real shape -- a mapping keyed by region -- so give it
+    that shape around the one region it will look up.
+    """
+    if "watch_providers_region" not in row:
+        return row
+    row = dict(row)
+    slice_for_region = row.pop("watch_providers_region", None)
+    row["watch_providers"] = {region: slice_for_region} if slice_for_region else {}
+    return row
+
+
 def build_filter_data_from_item_values(
     item_values,
     *,
@@ -638,7 +656,9 @@ def build_filter_data_from_item_values(
     include_providers=True,
 ):
     """Build filter data from ``Item.values()`` rows without ORM hydration."""
-    projected_items = (SimpleNamespace(**row) for row in item_values)
+    projected_items = (
+        SimpleNamespace(**_restore_region_providers(row, region)) for row in item_values
+    )
     return build_filter_data_from_items(
         projected_items,
         collection_formats_by_item_id=collection_formats_by_item_id,
@@ -646,6 +666,68 @@ def build_filter_data_from_item_values(
         region=region,
         pinned_providers=pinned_providers,
         include_providers=include_providers,
+    )
+
+
+def _log_tag_filter_result(
+    request,
+    media_type,
+    tag_values,
+    tag_mode,
+    status_filter,
+    shown,
+):
+    """Log what a tag-filtered list returned so an empty one can be explained."""
+    status_source = "url" if "status" in request.GET else "saved"
+    args = (
+        request.user.id,
+        media_type,
+        list(tag_values),
+        tag_mode,
+        list(status_filter) or ["all"],
+        status_source,
+        shown,
+    )
+    if shown:
+        logger.info(
+            "Media list tag filter: user=%s type=%s tags=%s mode=%s "
+            "status=%s (from %s) shown=%s",
+            *args,
+        )
+        return
+
+    # Empty result: compare against what the tag actually points at.
+    # Same case-insensitive tag match as the filter itself.
+    tag_match = Q()
+    for value in tag_values:
+        tag_match |= Q(tag__name__iexact=value)
+    tagged_item_ids = set(
+        ItemTag.objects.filter(
+            tag_match,
+            tag__user=request.user,
+            item__media_type=media_type,
+        ).values_list("item_id", flat=True),
+    )
+    # One status per item: separate-entry mode can give an item several rows.
+    status_by_item = {}
+    try:
+        model = django_apps.get_model(app_label="app", model_name=media_type)
+        status_by_item = dict(
+            model.objects.filter(user=request.user, item_id__in=tagged_item_ids)
+            .order_by("id")
+            .values_list("item_id", "status"),
+        )
+    except (LookupError, AttributeError, FieldError):
+        pass
+    tracked_statuses = dict(Counter(status_by_item.values()))
+    logger.warning(
+        "Media list tag filter: user=%s type=%s tags=%s mode=%s "
+        "status=%s (from %s) shown=%s | "
+        "tagged_items=%s tracked_by_status=%s untracked=%s",
+        *args,
+        len(tagged_item_ids),
+        tracked_statuses,
+        len(tagged_item_ids) - len(status_by_item),
     )
 
 
@@ -952,6 +1034,12 @@ def media_list(request, media_type):
         if comic_subview not in {"comics", "issues"}:
             comic_subview = "comics"
 
+    music_subview = None
+    if route_media_type == MediaTypes.MUSIC.value:
+        music_subview = request.GET.get("subview", "artists")
+        if music_subview not in {"artists", "albums", "tracks"}:
+            music_subview = "artists"
+
     layout, sort_filter, direction, media_type, sorted_media_sort_choices = (
         _resolve_media_list_preferences(request, route_media_type, comic_subview)
     )
@@ -993,99 +1081,115 @@ def media_list(request, media_type):
     if supports_untracked_status_filter:
         status_choices.insert(1, (MEDIA_LIST_NO_STATUS, MEDIA_LIST_NO_STATUS_LABEL))
 
-    rating_filter = request.GET.get("rating", "all")
-    # Allow "not_rated" even though it's not in display choices (toggle behavior)
-    valid_rating_filters = {"all", "rated", "not_rated"}
-    if rating_filter not in valid_rating_filters:
-        rating_filter = "all"
-
-    collection_filter = request.GET.get("collection", "all")
-    valid_collection_filters = {"all", "collected", "not_collected"}
-    if collection_filter not in valid_collection_filters:
-        collection_filter = "all"
-
-    progress_filter = (request.GET.get("progress") or "all").strip().lower()
-    valid_progress_filters = {"all", "not_caught_up", "caught_up"}
-    if (
-        progress_filter not in valid_progress_filters
-        or media_type not in PROGRESS_MEDIA_TYPES
-    ):
-        progress_filter = "all"
-
-    genre_filter = (request.GET.get("genre") or "").strip()
-    implied_genre_filter = (request.GET.get("implied_genre") or "").strip()
-    if media_type != MediaTypes.MUSIC.value:
-        implied_genre_filter = ""
-    year_filter = (request.GET.get("year") or "").strip()
-    completed_date_from = _normalize_completed_date_filter(
-        request.GET.get("completed_date_from"),
+    # One parser for the web list and the API, so a filter reaches both.
+    parsed_filters = parse_media_list_filters(request, strict=False)
+    rating_filter = parsed_filters.rating
+    collection_filter = parsed_filters.collection
+    progress_filter = (
+        parsed_filters.progress if media_type in PROGRESS_MEDIA_TYPES else "all"
     )
-    completed_date_to = _normalize_completed_date_filter(
-        request.GET.get("completed_date_to"),
+    genre_filter = parsed_filters.genre
+    implied_genre_filter = (
+        parsed_filters.implied_genre if media_type == MediaTypes.MUSIC.value else ""
     )
-    # "Completed in the last N units" is relative, so resolve it per request.
-    # Same helper the smart-list rules use, to keep one definition of the window.
-    # The raw amount/unit go back to the template so the choice round-trips;
-    # only the filtering below sees the resolved dates.
-    completed_window_raw = {
-        "completed_date_within": request.GET.get("completed_date_within", ""),
-        "completed_date_within_unit": request.GET.get("completed_date_within_unit", ""),
-    }
-    completed_window = smart_rules.resolve_relative_date_windows(completed_window_raw)
-    completed_date_within = ""
-    completed_date_within_unit = "days"
-    if completed_window.get("completed_date_from"):
-        completed_date_from = completed_window["completed_date_from"]
-        completed_date_to = completed_window["completed_date_to"]
-        completed_date_within = str(completed_window_raw["completed_date_within"]).strip()
-        completed_date_within_unit = smart_rules.normalize_relative_unit(
-            completed_window_raw["completed_date_within_unit"],
-        )
-    release_filter = (request.GET.get("release") or "all").strip().lower()
-    valid_release_filters = {"all", "released", "not_released"}
-    if release_filter not in valid_release_filters:
-        release_filter = "all"
-    source_filter = (request.GET.get("source") or "").strip()
-    media_status_filter = (request.GET.get("media_status") or "").strip()
-    language_filter = (request.GET.get("language") or "").strip()
-    country_filter = (request.GET.get("country") or "").strip()
-    platform_values = tuple(
-        dict.fromkeys(
-            value.strip() for value in request.GET.getlist("platform") if value.strip()
-        ),
-    )
-    platform_mode = (request.GET.get("platform_mode") or "or").strip().lower()
-    if platform_mode not in {"and", "or", "not"}:
-        platform_mode = "or"
+    year_filter = parsed_filters.year
+    completed_date_from = parsed_filters.completed_date_from
+    completed_date_to = parsed_filters.completed_date_to
+    # The raw window goes back to the template so the choice round-trips.
+    completed_date_within = parsed_filters.completed_date_within
+    completed_date_within_unit = parsed_filters.completed_date_within_unit
+    release_filter = parsed_filters.release
+    source_filter = parsed_filters.source
+    media_status_filter = parsed_filters.media_status
+    language_filter = parsed_filters.language
+    country_filter = parsed_filters.country
+    platform_values = parsed_filters.platforms
+    platform_mode = parsed_filters.platform_mode
     platform_filter = platform_values[0] if platform_values else ""
-    origin_filter = (request.GET.get("origin") or "").strip()
-    format_filter = (request.GET.get("format") or "").strip()
-    author_filter = (request.GET.get("author") or "").strip()
-    provider_filter = (request.GET.get("provider") or "").strip()
-    watch_provider_region = (
-        getattr(request.user, "watch_provider_region", None)
-        if request.user.is_authenticated
-        else None
-    )
-    tag_values = tuple(
-        dict.fromkeys(
-            value.strip() for value in request.GET.getlist("tag") if value.strip()
-        ),
-    )
-    tag_mode = (request.GET.get("tag_mode") or "or").strip().lower()
-    if tag_mode not in {"and", "or", "not"}:
-        tag_mode = "or"
-    if not tag_values:
-        legacy_tag_exclude = (request.GET.get("tag_exclude") or "").strip()
-        if legacy_tag_exclude:
-            tag_values = (legacy_tag_exclude,)
-            tag_mode = "not"
+    origin_filter = parsed_filters.origin
+    format_filter = parsed_filters.format
+    author_filter = parsed_filters.author
+    provider_filter = parsed_filters.provider
+    watch_provider_region = parsed_filters.provider_region or None
+    tag_values = parsed_filters.tags
+    tag_mode = parsed_filters.tag_mode
+    # Ranges the library-query engine applies; the Python-built paths below
+    # apply them through the engine too (``apply_range_filters``).
+    range_filters = {
+        name: getattr(parsed_filters, name)
+        for name in (
+            "rating_min",
+            "rating_max",
+            "release_date_from",
+            "release_date_to",
+            "date_added_from",
+            "date_added_to",
+        )
+    }
+    range_cache_key = ",".join(f"{k}={v}" for k, v in range_filters.items() if v)
 
     search_query = request.GET.get("search", "")
     try:
         page = int(request.GET.get("page", 1))
     except (ValueError, TypeError):
         page = 1
+
+    def apply_range_filters(media_items):
+        """Keep entries whose item is inside the rating and date ranges.
+
+        The Python-built paths (separate entries, time left, cached orders)
+        ask the library-query engine, so a range means the same thing as on
+        the SQL path.
+        """
+        if not range_cache_key:
+            return media_items
+        separate = entry_grouping_is_separate()
+        # One card per row: rating and date added are judged per row below,
+        # so the item-level engine only answers the release date.
+        item_ranges = {
+            name: "" if separate and not name.startswith("release") else value
+            for name, value in range_filters.items()
+        }
+        if any(item_ranges.values()):
+            allowed = LibraryQueryExecutor(
+                request.user,
+                LibraryQuery(
+                    media_types=(media_type,),
+                    filters=FilterValues(**item_ranges),
+                    within={entry.item_id for entry in media_items},
+                ),
+            ).ids()
+            media_items = [entry for entry in media_items if entry.item_id in allowed]
+        if separate:
+            media_items = [
+                entry for entry in media_items if _entry_in_row_ranges(entry.media)
+            ]
+        return media_items
+
+    def _entry_in_row_ranges(media):
+        """Check one tracker row against the ranges that belong to a row.
+
+        Rating and date added are per row, so with one card per entry the
+        item-level answer above is not enough: a 5-rated play must not show
+        under ``rating_min=8`` because another play of the title scored 9.
+        """
+        score = getattr(media, "score", None)
+        rating_min = range_filters["rating_min"]
+        rating_max = range_filters["rating_max"]
+        if rating_min or rating_max:
+            if score is None:
+                return False
+            if rating_min and score < Decimal(rating_min):
+                return False
+            if rating_max and score > Decimal(rating_max):
+                return False
+        added_from = range_filters["date_added_from"]
+        added_to = range_filters["date_added_to"]
+        if added_from or added_to:
+            added = timezone.localtime(media.created_at).date().isoformat()
+            if (added_from and added < added_from) or (added_to and added > added_to):
+                return False
+        return True
 
     def apply_rating_filter(media_items, filter_value):
         return apply_media_list_rating_filter(media_items, filter_value)
@@ -1229,44 +1333,33 @@ def media_list(request, media_type):
         "tag_excluded_ids": tag_excluded_ids,
     }
     provider_media_types = PROVIDER_MEDIA_TYPES
-    sql_media_filters = MediaListFilters(
+    sql_media_filters = replace(
+        parsed_filters,
         statuses=tuple(
             value for value in status_filter if value != MEDIA_LIST_NO_STATUS
         ),
         include_no_status=MEDIA_LIST_NO_STATUS in status_filter,
         search=search_query,
-        rating=rating_filter,
-        collection=collection_filter,
         progress=progress_filter,
-        genre=genre_filter,
         implied_genre=implied_genre_filter,
-        year=year_filter,
-        completed_date_from=completed_date_from,
-        completed_date_to=completed_date_to,
-        release=release_filter,
-        source=source_filter,
-        media_status=media_status_filter,
-        language=language_filter,
-        country=country_filter,
-        platforms=platform_values,
-        platform_mode=platform_mode,
-        origin=origin_filter,
-        format=format_filter,
-        author=author_filter,
-        provider=provider_filter,
-        provider_region=watch_provider_region or "",
         pinned_providers=tuple(request.user.pinned_watch_providers or ()),
-        tags=tag_values,
-        tag_mode=tag_mode,
         sort=sort_filter,
         direction=direction,
+        exclude=(),
         media_type=media_type,
     )
-    use_sql_media_pagination = can_paginate_in_sql(
-        sql_media_filters,
-        media_type,
-        sort_filter,
-    ) and not entry_grouping_is_separate()
+    # Every list is read through the shared library-query engine except the
+    # surfaces whose unit is not one item: separate-entry mode (one card per
+    # tracker row), TV's time-left grouping (its own cached order), and the
+    # podcast / music artist and album views (their own trackers, below).
+    _skip_generic_media_list = media_type == MediaTypes.PODCAST.value or (
+        media_type == MediaTypes.MUSIC.value and music_subview != "tracks"
+    )
+    use_sql_media_pagination = not (
+        entry_grouping_is_separate()
+        or (sort_filter == "time_left" and media_type == MediaTypes.TV.value)
+        or _skip_generic_media_list
+    )
 
     anime_library_mode = getattr(
         request.user,
@@ -1571,6 +1664,7 @@ def media_list(request, media_type):
             ),
             completed_date_from=completed_date_from,
             completed_date_to=completed_date_to,
+            range_filters=range_cache_key,
         )
         if _use_media_list_cache
         else None
@@ -1652,6 +1746,7 @@ def media_list(request, media_type):
             ),
             completed_date_from=completed_date_from,
             completed_date_to=completed_date_to,
+            range_filters=range_cache_key,
         )
         _time_left_cached_order = cache.get(_time_left_cache_key)
         if _time_left_cached_order is not None and filter_data is not None:
@@ -1672,66 +1767,80 @@ def media_list(request, media_type):
     _cached_media_list_order = None
     if use_sql_media_pagination:
         items_per_page = 32
-        safe_page = max(page, 1)
-
-        def _load_sql_page(offset):
-            return BasicMedia.objects.get_media_list(
-                user=request.user,
-                media_type=media_type,
-                status_filter=tracked_status_filter,
-                sort_filter=query_sort_filter,
-                search=search_query,
-                direction=direction,
-                list_sql_filters=list_sql_filters,
-                sql_limit=items_per_page,
-                sql_offset=offset,
-            )
-
-        page_media, page_total = _load_sql_page((safe_page - 1) * items_per_page)
-        page_paginator = Paginator(range(page_total), items_per_page)
-        media_page = page_paginator.get_page(safe_page)
-        # Paginator.get_page() clamps an out-of-range request to the last page;
-        # repeat only that one narrow SQL slice so the rendered page keeps the
-        # existing Django pagination behavior.
-        if media_page.number != safe_page:
-            page_media, page_total = _load_sql_page(
-                (media_page.number - 1) * items_per_page
-            )
-            page_paginator = Paginator(range(page_total), items_per_page)
-            media_page = page_paginator.get_page(media_page.number)
+        engine_query = from_media_list_filters(sql_media_filters, (media_type,))
+        engine = LibraryQueryExecutor(request.user, engine_query)
+        engine_total = engine.count()
+        media_page = Paginator(range(engine_total), items_per_page).get_page(max(page, 1))
+        engine_page = engine.page(
+            (media_page.number - 1) * items_per_page,
+            items_per_page,
+            total=engine_total,
+        )
+        page_entries = media_list_entries_for_items(request.user, engine_page.items)
         media_page.object_list = [
-            MediaListEntry.from_media(media) for media in page_media
+            MediaListEntry(item=entry.item, media=entry.media) for entry in page_entries
         ]
+        if media_type == MediaTypes.ANIME.value:
+            _mark_grouped_anime_route(
+                [
+                    entry.media
+                    for entry in page_entries
+                    if entry.media is not None
+                    and entry.item.media_type == MediaTypes.TV.value
+                ],
+            )
+        if sort_filter == "next_episode_air_date":
+            # The cards show the date the list is ordered by.
+            BasicMedia.objects.attach_show_season_events(
+                [entry.media for entry in page_entries if entry.media is not None],
+            )
+            for entry in page_entries:
+                if entry.media is not None:
+                    entry.media.next_episode_air_date = (
+                        BasicMedia.objects._next_episode_air_date_value(entry.media)
+                    )
         _sql_media_page = media_page
         media_list = []
         _media_list_full = []
-
         if filter_data is None:
-            filter_data_rows = list(
-                BasicMedia.objects.get_media_list_item_values(
-                    user=request.user,
-                    media_type=media_type,
-                    status_filter=tracked_status_filter,
-                    search=search_query,
-                    list_sql_filters=list_sql_filters,
-                ),
+            # The menu lists what the status and list filters leave, before
+            # the per-item filters narrow it - the same candidates the list
+            # always offered - read as narrow Item rows, not hydrated media.
+            menu_filters = replace(
+                sql_media_filters,
+                rating="all",
+                rating_min="",
+                rating_max="",
+                release_date_from="",
+                release_date_to="",
+                date_added_from="",
+                date_added_to="",
+                collection="all",
+                progress="all",
+                author="",
+                format="",
+                provider="",
+                platforms=() if media_type == MediaTypes.GAME.value else platform_values,
             )
-            if media_type == MediaTypes.GAME.value and platform_values:
-                filter_data_filters = {
-                    **list_sql_filters,
-                    "platform_values": (),
-                    "platform_mode": "or",
-                }
-                filter_data_rows = list(
-                    BasicMedia.objects.get_media_list_item_values(
-                        user=request.user,
-                        media_type=media_type,
-                        status_filter=tracked_status_filter,
-                        search=search_query,
-                        list_sql_filters=filter_data_filters,
+            provider_region_for_values = (
+                watch_provider_region
+                if media_type in provider_media_types
+                else None
+            )
+
+            def _menu_rows(filters):
+                menu_engine = LibraryQueryExecutor(
+                    request.user,
+                    from_media_list_filters(filters, (media_type,)),
+                )
+                return list(
+                    BasicMedia.objects.item_values_for_menu(
+                        Item.objects.filter(pk__in=menu_engine.filtered.values("pk")).order_by(),
+                        provider_region_for_values,
                     ),
                 )
 
+            filter_data_rows = _menu_rows(menu_filters)
             item_ids = {row["id"] for row in filter_data_rows}
             if media_type == MediaTypes.GAME.value and item_ids:
                 for item_id, collection_platform in CollectionEntry.objects.filter(
@@ -1757,7 +1866,6 @@ def media_list(request, media_type):
                         collection_formats_by_item_id[item_id].add(
                             normalized_collection_format
                         )
-
             filter_data = build_filter_data_from_item_values(
                 filter_data_rows,
                 collection_formats_by_item_id=collection_formats_by_item_id,
@@ -1787,23 +1895,13 @@ def media_list(request, media_type):
                 or request.user.pinned_watch_providers
             )
             filter_data["show_progress"] = media_type in PROGRESS_MEDIA_TYPES
-
-            tag_rows = filter_data_rows
-            if tag_included_ids is not None or tag_excluded_ids is not None:
-                tag_free_filters = {
-                    **list_sql_filters,
-                    "tag_included_ids": None,
-                    "tag_excluded_ids": None,
-                }
-                tag_rows = list(
-                    BasicMedia.objects.get_media_list_item_values(
-                        user=request.user,
-                        media_type=media_type,
-                        status_filter=tracked_status_filter,
-                        search=search_query,
-                        list_sql_filters=tag_free_filters,
-                    ),
-                )
+            # Tag counts ignore the tag filter itself, or every other tag
+            # would count 0 (#1072).
+            tag_rows = (
+                _menu_rows(replace(menu_filters, tags=()))
+                if tag_values
+                else filter_data_rows
+            )
             filter_data.update(
                 _build_media_list_tag_data(
                     request.user,
@@ -1821,14 +1919,25 @@ def media_list(request, media_type):
                     _media_list_filter_cache_key,
                 )
     elif _media_list_cached is None:
-        media_queryset = BasicMedia.objects.get_media_list(
-            user=request.user,
-            media_type=media_type,
-            status_filter=tracked_status_filter,
-            sort_filter=query_sort_filter,
-            search=search_query,
-            direction=direction,
-            list_sql_filters=list_sql_filters,
+        # Podcasts always render from PodcastShowTracker further below, and
+        # music's artists/albums subviews render from ArtistTracker/
+        # AlbumTracker — in both cases this generic media_list/filter_data
+        # pipeline is discarded, so skip materializing every episode/track
+        # here to avoid an O(row count) Python pass on large libraries (see
+        # issue #1198). Music's "tracks" subview is the one case that
+        # actually needs the per-track list built below.
+        media_queryset = (
+            BasicMedia.objects.none()
+            if _skip_generic_media_list
+            else BasicMedia.objects.get_media_list(
+                user=request.user,
+                media_type=media_type,
+                status_filter=tracked_status_filter,
+                sort_filter=query_sort_filter,
+                search=search_query,
+                direction=direction,
+                list_sql_filters=list_sql_filters,
+            )
         )
 
         # Convert to list for filtering (rating and collection filters work on lists)
@@ -2030,6 +2139,7 @@ def media_list(request, media_type):
                     _media_list_filter_cache_key,
                 )
         media_list = apply_rating_filter(media_list, rating_filter)
+        media_list = apply_range_filters(media_list)
         media_list = apply_collection_filter(
             media_list, collection_filter, request.user, media_type
         )
@@ -2414,6 +2524,16 @@ def media_list(request, media_type):
     if filter_data is not None:
         filter_data.setdefault("departments", [])
 
+    if tag_values and not _skip_generic_media_list:
+        _log_tag_filter_result(
+            request,
+            media_type,
+            tag_values,
+            tag_mode,
+            status_filter,
+            media_page.paginator.count,
+        )
+
     _layout_class = ".media-grid" if layout == "grid" else ".media-table"
     context = {
         "user": request.user,
@@ -2451,6 +2571,17 @@ def media_list(request, media_type):
         "current_provider": provider_filter,
         "current_tag": list(tag_values),
         "current_tag_mode": tag_mode,
+        # The filter menu's state, in the smart-rule vocabulary the shared
+        # libraryFilterState() reads. A relative window is shown as chosen.
+        # The filter menu's state for libraryFilterState(), with this page's
+        # adjustments (persisted status, type-gated progress and implied genre).
+        "media_list_filter_state": replace(
+            parsed_filters,
+            statuses=tuple(v for v in status_filter if v != MEDIA_LIST_NO_STATUS),
+            include_no_status=MEDIA_LIST_NO_STATUS in status_filter,
+            progress=progress_filter,
+            implied_genre=implied_genre_filter,
+        ).menu_state(),
         "enable_bulk_select": True,
         "sort_choices": sorted_media_sort_choices,
         "status_choices": status_choices,
@@ -2688,13 +2819,11 @@ def media_list(request, media_type):
             "is_album_list": False,
             "supports_critic_rating_sort": False,
         }
+        context["enable_bulk_select"] = False
 
     if media_type == MediaTypes.MUSIC.value:
         from app.models import AlbumTracker, Artist, ArtistTracker
 
-        music_subview = request.GET.get("subview", "artists")
-        if music_subview not in {"artists", "albums", "tracks"}:
-            music_subview = "artists"
         context["current_subview"] = music_subview
 
         if music_subview == "albums":
@@ -3063,6 +3192,18 @@ def media_list(request, media_type):
             context["media_list"] = artist_page
             context["is_artist_list"] = True
             context["filter_data"] = filter_data
+
+        context["enable_bulk_select"] = music_subview == "tracks"
+
+    if context.get("enable_bulk_select"):
+        context["bulk_action_data"] = build_bulk_action_data(
+            request.user,
+            request=request,
+            status_url=reverse("bulk_status_update"),
+            list_url=reverse("bulk_list_add"),
+            collection_url=reverse("bulk_collection_quick_add"),
+            tag_url=reverse("tag_bulk_toggle"),
+        )
 
     if context.get("is_artist_list", False):
         table_type = "artist"

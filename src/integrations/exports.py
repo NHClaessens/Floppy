@@ -91,8 +91,8 @@ def generate_rows(user, media_types=None, include_lists=True, include_collection
     fields = {
         # watch_providers scales with ~60 TMDB regions, is never read back on
         # import, and is fully re-fetchable via the provider backfill task.
-        "item": get_model_fields(Item, exclude={"watch_providers"}),
-        "track": get_track_fields(),
+        "item": [*get_model_fields(Item, exclude={"watch_providers"}), "episode_order_data"],
+        "track": [*get_track_fields(), "active_episode_order_data", "episode_order_history"],
         "list": get_list_fields(),
         "collection": get_collection_fields(),
         "tags": get_tag_fields(),
@@ -131,7 +131,8 @@ def generate_rows(user, media_types=None, include_lists=True, include_collection
         # for each tv/season row despite never using them, tripling the
         # episode load for large libraries and causing exports to time out
         # partway through (issue #618).
-        queryset = model.objects.filter(**filter_kwargs).select_related("item")
+        manager = model.all_objects if media_type == MediaTypes.EPISODE.value else model.objects
+        queryset = manager.filter(**filter_kwargs).select_related("item")
 
         logger.debug("Streaming %ss to CSV", media_type)
 
@@ -154,6 +155,31 @@ def generate_rows(user, media_types=None, include_lists=True, include_collection
                 + [""] * len(fields["collection"])
                 + [json.dumps(item_tags_map.get(media.item_id, []))]
             )
+
+            from integrations.episode_orders import portable_order
+
+            if media.item.episode_order_id:
+                row[1 + fields["item"].index("media_id")] = media.item.episode_order.show.media_id
+                row[1 + fields["item"].index("episode_order_data")] = json.dumps(
+                    portable_order(media.item.episode_order),
+                )
+            if media_type == MediaTypes.TV.value:
+                from app.models import EpisodeOrderChange
+
+                track_offset = 1 + len(fields["item"])
+                row[track_offset + fields["track"].index("active_episode_order_data")] = (
+                    json.dumps(portable_order(media.active_episode_order))
+                    if media.active_episode_order_id else ""
+                )
+                history = [
+                    {"order": portable_order(change.order), "mappings": change.mappings,
+                     "before_state": change.before_state, "created_at": change.created_at.isoformat()}
+                    for change in EpisodeOrderChange.objects.filter(tv=media, user=user)
+                    .select_related("order__show").order_by("created_at", "pk")
+                ]
+                row[track_offset + fields["track"].index("episode_order_history")] = (
+                    json.dumps(history) if history else ""
+                )
 
             if media_type == MediaTypes.GAME.value:
                 # calculate index of progress field
@@ -600,7 +626,10 @@ def get_track_fields():
 
     for media_type in MediaTypes.values:
         model = apps.get_model("app", media_type)
-        for field in get_model_fields(model, exclude={"watch_operation_id"}):
+        for field in get_model_fields(
+            model,
+            exclude={"watch_operation_id", "external_id"},
+        ):
             if field not in all_fields:
                 all_fields.append(field)
 
@@ -615,7 +644,7 @@ def get_track_fields():
         all_fields.insert(end_idx, "end_date")
         all_fields.insert(end_idx, "start_date")
 
-    for timestamp_field in ("created_at", "progressed_at"):
+    for timestamp_field in ("created_at", "progressed_at", "scored_at"):
         if timestamp_field in all_fields:
             all_fields.remove(timestamp_field)
             all_fields.append(timestamp_field)

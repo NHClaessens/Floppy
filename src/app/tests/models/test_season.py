@@ -548,6 +548,7 @@ class SeasonStatusTests(TestCase):
                 "image": "season_img.jpg",
             },
             {
+                "details": {"status": "Ended"},
                 "related": {
                     "seasons": [{"season_number": 1, "image": "season_img.jpg"}],
                 },

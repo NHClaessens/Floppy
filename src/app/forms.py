@@ -293,6 +293,10 @@ class RatingScaleFormMixin:
     def _apply_rating_scale(self):
         if not self.user or "score" not in self.fields:
             return
+        if not self.user.ratings_enabled:
+            # Dropping the field keeps the stored score untouched on save.
+            del self.fields["score"]
+            return
         scale_max = self.user.rating_scale_max
         self.fields["score"].widget.attrs.update(
             {
@@ -348,6 +352,7 @@ class MediaForm(RatingScaleFormMixin, forms.ModelForm):
             "start_date",
             "end_date",
             "notes",
+            "entry_source",
         ]
         widgets = {
             "score": forms.NumberInput(
@@ -367,6 +372,20 @@ class MediaForm(RatingScaleFormMixin, forms.ModelForm):
             "notes": forms.Textarea(
                 attrs={"placeholder": _("Add any notes or comments..."), "rows": "5"},
             ),
+            "entry_source": forms.TextInput(
+                attrs={
+                    "placeholder": _("e.g. Plex, Jellyfin, Theatre..."),
+                    # A plain text input's native Enter-to-submit can bypass
+                    # htmx's own submit handling (issue: Enter here fell back
+                    # to a raw form POST/navigation instead of the AJAX
+                    # save). Route Enter through the same requestSubmit()
+                    # path a real click on the submit button uses.
+                    "@keydown.enter.prevent": "$el.closest('form').requestSubmit()",
+                },
+            ),
+        }
+        labels = {
+            "entry_source": _("Source"),
         }
 
     def __init__(self, *args, **kwargs):
@@ -401,6 +420,14 @@ class MediaForm(RatingScaleFormMixin, forms.ModelForm):
             current_image = self.instance.item.image
             if current_image and current_image != settings.IMG_NONE:
                 self.initial.setdefault("image_url", current_image)
+        # Audiobookshelf and Plex covers are Floppy's own proxy paths, which the
+        # URL field rejects. Prefilling one made every save of that item fail,
+        # with the error hidden on the Metadata tab (#1316). Blank means
+        # "keep the current image".
+        if not str(self.initial.get("image_url") or "").startswith(
+            ("http://", "https://"),
+        ):
+            self.initial.pop("image_url", None)
 
     def clean_image_url(self):
         """Normalize optional image URL input."""
@@ -453,6 +480,7 @@ class MovieForm(MediaForm):
             "start_date",
             "end_date",
             "notes",
+            "entry_source",
         ]
 
 
@@ -575,7 +603,7 @@ class TvForm(MediaForm):
         """Bind form to model."""
 
         model = TV
-        fields = ["score", "status", "notes"]
+        fields = ["score", "status", "notes", "entry_source"]
 
 
 class SeasonForm(MediaForm):
@@ -597,6 +625,7 @@ class SeasonForm(MediaForm):
             "score",
             "status",
             "notes",
+            "entry_source",
         ]
 
 
@@ -617,7 +646,7 @@ class EpisodeForm(RatingScaleFormMixin, forms.ModelForm):
         """Bind form to model."""
 
         model = Episode
-        fields = ("score", "status", "start_date", "end_date", "notes")
+        fields = ("score", "status", "start_date", "end_date", "notes", "entry_source")
         widgets = {
             "score": forms.NumberInput(
                 attrs={"min": 0, "max": 10, "step": 0.1, "placeholder": "0-10"},
@@ -629,6 +658,15 @@ class EpisodeForm(RatingScaleFormMixin, forms.ModelForm):
             "notes": forms.Textarea(
                 attrs={"placeholder": _("Add any notes or comments..."), "rows": "5"},
             ),
+            "entry_source": forms.TextInput(
+                attrs={
+                    "placeholder": _("e.g. Plex, Jellyfin, Theatre..."),
+                    "@keydown.enter.prevent": "$el.closest('form').requestSubmit()",
+                },
+            ),
+        }
+        labels = {
+            "entry_source": _("Source"),
         }
 
     def __init__(self, *args, **kwargs):
@@ -1146,7 +1184,7 @@ class CollectionEntryForm(forms.ModelForm):
                 attrs={"placeholder": "9.99", "step": "0.01", "min": "0"},
             ),
             "purchase_location": forms.TextInput(
-                attrs={"placeholder": "Amazon, Steam, Best Buy"},
+                attrs={"placeholder": "Steam, NAS, Home, Storage"},
             ),
         }
 

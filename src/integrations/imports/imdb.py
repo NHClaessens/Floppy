@@ -1,8 +1,16 @@
+import json
 import logging
+import pickle
+import sqlite3
 from collections import defaultdict
+from contextlib import closing
 from csv import DictReader
+from io import TextIOWrapper
+from pathlib import Path
+from tempfile import TemporaryDirectory, TemporaryFile
 
 from django.apps import apps
+from django.db import transaction
 from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 
@@ -60,9 +68,6 @@ class IMDBImporter:
         self.mode = mode
         self.warnings = []
 
-        # Track existing media for "new" mode
-        self.existing_media = helpers.get_existing_media(user)
-
         # Track media IDs to delete in overwrite mode
         self.to_delete = defaultdict(lambda: defaultdict(set))
 
@@ -77,52 +82,100 @@ class IMDBImporter:
 
     def import_data(self):
         """Import all user data from CSV."""
-        try:
-            decoded_file = self.file.read().decode("utf-8").splitlines()
-        except UnicodeDecodeError as e:
-            msg = "Invalid file format. Please upload a CSV file."
-            raise MediaImportError(msg) from e
+        with TemporaryDirectory(prefix="floppy-imdb-") as directory:  # noqa: SIM117
+            with closing(sqlite3.connect(Path(directory) / "rows.sqlite3")) as staging:
+                staging.execute(
+                    "CREATE TABLE rows (media_id INTEGER, title TEXT, row TEXT, data TEXT)"
+                )
+                staging.execute("CREATE INDEX media_id_idx ON rows(media_id)")
+                wrapper = TextIOWrapper(self.file, encoding="utf-8", newline="")
+                try:
+                    for row in DictReader(wrapper):
+                        try:
+                            data = self._process_first_pass(row)
+                        except Exception as error:
+                            msg = f"Error processing entry: {row}"
+                            raise MediaImportUnexpectedError(msg) from error
+                        staging.execute(
+                            "INSERT INTO rows VALUES (?, ?, ?, ?)",
+                            (
+                                data["media_id"] if data else None,
+                                row.get("Title", "").strip(),
+                                json.dumps(row),
+                                json.dumps(data),
+                            ),
+                        )
+                except UnicodeDecodeError as error:
+                    msg = "Invalid file format. Please upload a CSV file."
+                    raise MediaImportError(msg) from error
+                finally:
+                    wrapper.detach()
+                total = staging.execute("SELECT COUNT(*) FROM rows").fetchone()[0]
+                # Stage validated instances before deleting any user's existing rows.
+                with TemporaryFile() as instances:
+                    for index, (raw, data, count) in enumerate(
+                        staging.execute(
+                            "SELECT r.row, r.data, counts.n FROM rows r "
+                            "LEFT JOIN (SELECT media_id, COUNT(*) n FROM rows GROUP BY media_id) counts "
+                            "ON counts.media_id=r.media_id ORDER BY r.rowid",
+                        ),
+                        start=1,
+                    ):
+                        import_progress.report(index, total, "IMDB")
+                        if count != 1:
+                            continue
+                        row = json.loads(raw)
+                        try:
+                            self._process_second_pass(row, json.loads(data))
+                        except Exception as error:
+                            msg = f"Error processing entry: {row}"
+                            raise MediaImportUnexpectedError(msg) from error
+                        for media_type, batch in self.bulk_media.items():
+                            for instance in batch:
+                                pickle.dump((media_type, instance), instances)
+                        self.bulk_media.clear()
+                    for (media_id,) in staging.execute(
+                        "SELECT media_id FROM rows WHERE media_id IS NOT NULL GROUP BY media_id HAVING COUNT(*) > 1 ORDER BY MIN(rowid)",
+                    ):
+                        titles = [
+                            row[0]
+                            for row in staging.execute(
+                                "SELECT title FROM rows WHERE media_id=? ORDER BY rowid",
+                                (media_id,),
+                            )
+                        ]
+                        self._add_duplicate_warnings(
+                            {media_id: len(titles)}, {media_id: titles}
+                        )
+                    counts = defaultdict(int)
+                    instances.seek(0)
+                    with transaction.atomic():
+                        while True:
+                            try:
+                                # Only instances written above are deserialized.
+                                media_type, instance = pickle.load(instances)  # noqa: S301
+                            except EOFError:
+                                break
+                            if self.mode == "overwrite":
+                                self.to_delete[media_type][Sources.TMDB.value].add(
+                                    str(instance.item.media_id)
+                                )
+                            self.bulk_media[media_type].append(instance)
+                            counts[media_type] += 1
+                            if sum(map(len, self.bulk_media.values())) >= 250:  # noqa: PLR2004
+                                self._flush()
+                        self._flush()
+        messages = "\n".join(dict.fromkeys(self.warnings))
+        return dict(counts), messages if self.warnings else None
 
-        reader = DictReader(decoded_file)
-        rows = list(reader)
-
-        # Track media IDs and their titles from the import file
-        media_id_counts = defaultdict(int)
-        media_id_titles = defaultdict(list)
-
-        # First pass: identify duplicates and validate entries
-        for row in rows:
-            try:
-                self._process_first_pass(row, media_id_counts, media_id_titles)
-            except Exception as error:
-                error_msg = f"Error processing entry: {row}"
-                raise MediaImportUnexpectedError(error_msg) from error
-
-        # Second pass: add non-duplicates to bulk_media
-        total = len(rows)
-        for i, row in enumerate(rows, start=1):
-            import_progress.report(i, total, "IMDB")
-            try:
-                self._process_second_pass(row, media_id_counts)
-            except Exception as error:
-                error_msg = f"Error processing entry: {row}"
-                raise MediaImportUnexpectedError(error_msg) from error
-
-        # Add consolidated warnings for duplicates
-        self._add_duplicate_warnings(media_id_counts, media_id_titles)
-
+    def _flush(self):
+        """Persist one bounded batch after the entire input validated."""
         helpers.cleanup_existing_media(self.to_delete, self.user)
         helpers.bulk_create_media(self.bulk_media, self.user)
+        self.to_delete.clear()
+        self.bulk_media.clear()
 
-        imported_counts = {
-            media_type: len(media_list)
-            for media_type, media_list in self.bulk_media.items()
-        }
-
-        deduplicated_messages = "\n".join(dict.fromkeys(self.warnings))
-        return imported_counts, deduplicated_messages if self.warnings else None
-
-    def _process_first_pass(self, row, media_id_counts, media_id_titles):
+    def _process_first_pass(self, row):
         """First pass to identify duplicate entries and validate data."""
         imdb_id = self._extract_imdb_id(row)
 
@@ -130,7 +183,7 @@ class IMDBImporter:
 
         if not imdb_id:
             self.warnings.append(f"{title}: Invalid or missing IMDB ID")
-            return
+            return None
 
         title_type = row.get("Title Type", "").strip()
 
@@ -143,7 +196,7 @@ class IMDBImporter:
                 self.warnings.append(
                     f"{title}: Unknown title type '{title_type}' - skipped",
                 )
-            return
+            return None
 
         tmdb_data = self._lookup_in_tmdb(imdb_id, title_type)
 
@@ -151,42 +204,25 @@ class IMDBImporter:
             self.warnings.append(
                 f"{title}: Couldn't find a match in {Sources.TMDB.label}",
             )
-            return
+            return None
 
+        return tmdb_data
+
+    def _process_second_pass(self, row, tmdb_data):
+        """Validate an already resolved, unique entry for disk staging."""
         media_id = tmdb_data["media_id"]
-        media_id_counts[media_id] += 1
-        media_id_titles[media_id].append(title)
-
-    def _process_second_pass(self, row, media_id_counts):
-        """Second pass to process non-duplicate entries."""
-        imdb_id = self._extract_imdb_id(row)
-        if not imdb_id:
-            return  # Already added warning in first pass
-
         title_type = row.get("Title Type", "").strip()
-        if not self._is_supported_type(title_type):
-            return  # Already added warning in first pass
-
-        tmdb_data = self._lookup_in_tmdb(imdb_id, title_type)
-        if not tmdb_data:
-            return  # Already added warning in first pass
-
-        media_id = tmdb_data["media_id"]
-
-        # Skip if this media_id appears more than once
-        if media_id_counts[media_id] > 1:
-            return
 
         media_type = IMDB_TYPE_MAPPING[title_type]
 
-        # Check if we should process this entry based on mode
-        if not helpers.should_process_media(
-            self.existing_media,
-            self.to_delete,
-            media_type,
-            Sources.TMDB.value,
-            str(media_id),
-            self.mode,
+        model = apps.get_model(app_label="app", model_name=media_type)
+        if (
+            self.mode == "new"
+            and model.objects.filter(
+                user=self.user,
+                item__source=Sources.TMDB.value,
+                item__media_id=str(media_id),
+            ).exists()
         ):
             return
 

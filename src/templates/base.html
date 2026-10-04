@@ -1,11 +1,13 @@
 {% load static %}
 {% load app_tags %}
+{% load user_tags %}
 {% load i18n %}
 
 <!DOCTYPE html>
 <html lang="{{ LANGUAGE_CODE }}"
       data-img-none="{{ IMG_NONE }}"
-      class="{% if user.is_authenticated and user.theme == 'light' %}light{% elif user.is_authenticated and user.theme == 'dark' %}dark{% endif %} bg-[var(--color-page-bg)]">
+      class="{% if user.is_authenticated and user.theme != 'system' %}{{ user.theme }}{% endif %} bg-[var(--color-page-bg)]"
+      style="{% custom_theme_style user %}">
   <head>
     {# Required meta tags #}
     <meta charset="UTF-8">
@@ -38,7 +40,7 @@
       <script type="module" src="{% static 'debug_toolbar/js/toolbar.js' %}"></script>
     {% endif %}
 
-    <script src="{% url 'javascript-catalog' %}"></script>
+    <script src="{% javascript_catalog_url %}"></script>
     <script src="{% static 'js/libraries/htmx-2.0.4.min.js' %}"></script>
     <script>
       (function() {
@@ -118,11 +120,10 @@
     <script src="{% static 'js/libraries/lazysizes-5.3.2.min.js' %}" async></script>
     <script defer
             src="{% static 'js/image-fallback.js' %}{% get_static_file_mtime 'js/image-fallback.js' %}"></script>
-    {# ZXing library for barcode decoding #}
-    <script src="{% static 'js/libraries/zxing-library-0.21.3.min.js' %}"
-            onload="console.log('ZXing library loaded');"></script>
-    <script src="{% static 'js/barcode-scanner.js' %}{% get_static_file_mtime 'js/barcode-scanner.js' %}"
-            onload="console.log('barcode-scanner.js loaded, barcodeScannerUtils available:', typeof window.barcodeScannerUtils);"></script>
+    {# Barcode scanning loads the ZXing library on first use, not on every page. #}
+    <script defer
+            src="{% static 'js/barcode-scanner.js' %}{% get_static_file_mtime 'js/barcode-scanner.js' %}"
+            data-zxing-src="{% static 'js/libraries/zxing-library-0.21.3.min.js' %}"></script>
 
     <link rel="apple-touch-icon"
           sizes="180x180"
@@ -256,28 +257,35 @@
                   </a>
                 </li>
 
-                {% url 'discover' as discover_url %}
-                <li>
-                  <a href="{{ discover_url }}"
-                     class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if request.path == discover_url %}text-[var(--color-text)] bg-[var(--color-border)]{% else %}text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]{% endif %}">
-                    {% if request.path|str_equals:discover_url %}
-                      {% include "app/icons/four-square.svg" with classes="w-5 h-5 text-[var(--color-link)] " %}
-                    {% else %}
-                      {% include "app/icons/four-square.svg" with classes="w-5 h-5" %}
-                    {% endif %}
-                    <span>{% trans "Discover" %}</span>
-                  </a>
-                </li>
+                {% if user.show_discover %}
+                  {% url 'discover' as discover_url %}
+                  <li>
+                    <a href="{{ discover_url }}"
+                       class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if request.path == discover_url %}text-[var(--color-text)] bg-[var(--color-border)]{% else %}text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]{% endif %}">
+                      {% if request.path|str_equals:discover_url %}
+                        {% include "app/icons/four-square.svg" with classes="w-5 h-5 text-[var(--color-link)] " %}
+                      {% else %}
+                        {% include "app/icons/four-square.svg" with classes="w-5 h-5" %}
+                      {% endif %}
+                      <span>{% trans "Discover" %}</span>
+                    </a>
+                  </li>
+                {% endif %}
 
                 {% get_sidebar_media_types user as sidebar_media_types %}
                 {% for item in sidebar_media_types %}
-                  <li>
-                    <a href="{% url 'medialist' media_type=item.media_type %}"
-                       class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if media_type == item.media_type %}text-[var(--color-text)] bg-[var(--color-border)]{% else %}text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]{% endif %}">
-                      {% icon item.media_type is_active=media_type|str_equals:item.media_type %}
-                      <span>{{ item.display_name }}</span>
-                    </a>
-                  </li>
+                  {% if item.saved_views %}
+                    {% url 'medialist' media_type=item.media_type as media_list_url %}
+                    {% include "app/components/sidebar_saved_views.html" with group_key=item.media_type group_url=media_list_url group_label=item.display_name group_current=media_type|str_equals:item.media_type saved_views=item.saved_views %}
+                  {% else %}
+                    <li>
+                      <a href="{% url 'medialist' media_type=item.media_type %}"
+                         class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if media_type == item.media_type %}text-[var(--color-text)] bg-[var(--color-border)]{% else %}text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]{% endif %}">
+                        {% icon item.media_type is_active=media_type|str_equals:item.media_type %}
+                        <span>{{ item.display_name }}</span>
+                      </a>
+                    </li>
+                  {% endif %}
                 {% endfor %}
               </ul>
 
@@ -329,13 +337,19 @@
                     </a>
                   </li>
 
-                  <li>
-                    <a href="{{ history_url }}"
-                       class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if request.path == history_url %}text-[var(--color-text)] bg-[var(--color-border)]{% else %}text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]{% endif %}">
-                      {% icon 'history' is_active=request.path|str_equals:history_url %}
-                      <span>{% trans "History" %}</span>
-                    </a>
-                  </li>
+                  {% get_history_saved_views user as history_saved_views %}
+                  {% if history_saved_views %}
+                    {% trans "History" as history_label %}
+                    {% include "app/components/sidebar_saved_views.html" with group_key="history" group_url=history_url group_label=history_label group_current=request.path|str_equals:history_url saved_views=history_saved_views %}
+                  {% else %}
+                    <li>
+                      <a href="{{ history_url }}"
+                         class="flex items-center space-x-3 px-4 py-2 rounded-md transition-colors duration-200 text-sm {% if request.path == history_url %}text-[var(--color-text)] bg-[var(--color-border)]{% else %}text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)]{% endif %}">
+                        {% icon 'history' is_active=request.path|str_equals:history_url %}
+                        <span>{% trans "History" %}</span>
+                      </a>
+                    </li>
+                  {% endif %}
 
                   {% url 'lists' as lists_url %}
                   <li>
@@ -454,7 +468,7 @@
                   <div class="relative grow min-w-0 max-w-2xl">
                     <form method="get"
                           action="{% url 'search' %}"
-                          x-data="{ isOpen: false, selectedType: { display: '{{ search_type|media_type_readable_plural }}', value: '{{ search_type }}' }, mediaTypes: {% get_search_media_types user as search_types %}{{ search_types }}, getPlaceholder() { return interpolate(gettext('Search %(media)s in your library or online...'), {media: this.selectedType.display}, true) }, barcodeScanning: false, barcodeError: null, barcodePreview: null, explicitSubmitTriggered: false, async handleBarcodeImage(event) { if (!event || !event.target) { console.error('[BARCODE] Invalid event or event.target'); return; } if (event.target.tagName !== 'INPUT' || event.target.type !== 'file') { console.error('[BARCODE] Event not from file input. TagName:', event.target.tagName, 'Type:', event.target.type); return; } if (event.target !== this.$refs.barcodeInput) { console.error('[BARCODE] Event not from barcode input ref'); return; } console.log('handleBarcodeImage called', event); const file = event.target.files?.[0]; if (!file) { console.log('No file selected'); return; } console.log('File selected:', file.name, file.type); this.barcodeScanning = true; this.barcodeError = null; this.barcodePreview = URL.createObjectURL(file); try { console.log('Checking for barcodeScannerUtils:', typeof window.barcodeScannerUtils); if (!window.barcodeScannerUtils) { throw new Error(gettext('Barcode scanner utilities not loaded. Please refresh the page.')); } console.log('Starting barcode decode...'); const isbn = await window.barcodeScannerUtils.decodeBarcodeFromFile(file); console.log('Decode result:', isbn); if (isbn) { const barcodeInput = event.target; let form = this.$root; if (!form || form.tagName !== 'FORM' || !form.contains(barcodeInput)) { form = barcodeInput.closest('form'); } if (!form || form.tagName !== 'FORM') { console.error('[FORM] Could not find valid form element'); return; } const searchInput = form.querySelector('input[name=q]'); const formContainsBarcodeInput = form.contains(barcodeInput); if (!searchInput || !formContainsBarcodeInput) { console.error('[FORM] Form validation failed - missing search input or barcode input not in form. Search input:', searchInput, 'Form contains barcode input:', formContainsBarcodeInput); return; } console.log('[FORM] ISBN received, form element:', form, 'tagName:', form.tagName); console.log('[FORM] Search input found:', searchInput); searchInput.value = isbn; console.log('[FORM] Set input value to:', isbn, 'Current value:', searchInput.value); this.explicitSubmitTriggered = true; console.log('[FORM] Submitting form...'); form.submit(); console.log('[FORM] Form submit called'); } else { this.barcodeError = gettext('Could not read barcode from image. Please try again or enter ISBN manually.'); } } catch (error) { console.error('Barcode scan error:', error); this.barcodeError = gettext('Error scanning barcode: ') + (error.message || gettext('Please try again.')); } finally { this.barcodeScanning = false; } }, clearBarcodeError() { this.barcodeError = null; this.barcodePreview = null; if (this.$refs.barcodeInput) { this.$refs.barcodeInput.value = ''; } }, selectType(type) { this.selectedType = type; this.isOpen = false; const input = this.$refs.searchInput; if (input && input.value.trim()) { this.$nextTick(() => this.$root.submit()); } }, handleFormSubmit(event) { if (event.currentTarget !== this.$el) { return true; } if (event.submitter && !this.$el.contains(event.submitter)) { console.log('[FORM] Submitter not in search form, allowing'); return true; } if (event.submitter && !this.$el.contains(event.submitter)) { console.log('[FORM] Submitter not in search form, allowing'); return true; } if (this.explicitSubmitTriggered) { this.explicitSubmitTriggered = false; return true; } if (event.submitter && event.submitter === this.$refs.searchButton) { return true; } if (!event.submitter) { const searchInput = this.$el.querySelector('input[name=q]'); if (searchInput && document.activeElement === searchInput) { return true; } } console.log('[FORM] Form submission prevented - not from search button or Enter key in search input'); event.preventDefault(); event.stopPropagation(); return false; }, init() { console.log('Search form Alpine.js initialized'); this.explicitSubmitTriggered = false; } }"
+                          x-data="{ isOpen: false, selectedType: { display: '{{ search_type|media_type_readable_plural }}', value: '{{ search_type }}' }, mediaTypes: {% get_search_media_types user as search_types %}{{ search_types }}, getPlaceholder() { if (this.selectedType.value === 'all') { return gettext('Search your whole library...'); } return interpolate(gettext('Search %(media)s in your library or online...'), {media: this.selectedType.display}, true) }, barcodeScanning: false, barcodeError: null, barcodePreview: null, explicitSubmitTriggered: false, async handleBarcodeImage(event) { if (!event || !event.target) { console.error('[BARCODE] Invalid event or event.target'); return; } if (event.target.tagName !== 'INPUT' || event.target.type !== 'file') { console.error('[BARCODE] Event not from file input. TagName:', event.target.tagName, 'Type:', event.target.type); return; } if (event.target !== this.$refs.barcodeInput) { console.error('[BARCODE] Event not from barcode input ref'); return; } console.log('handleBarcodeImage called', event); const file = event.target.files?.[0]; if (!file) { console.log('No file selected'); return; } console.log('File selected:', file.name, file.type); this.barcodeScanning = true; this.barcodeError = null; this.barcodePreview = URL.createObjectURL(file); try { console.log('Checking for barcodeScannerUtils:', typeof window.barcodeScannerUtils); if (!window.barcodeScannerUtils) { throw new Error(gettext('Barcode scanner utilities not loaded. Please refresh the page.')); } console.log('Starting barcode decode...'); const isbn = await window.barcodeScannerUtils.decodeBarcodeFromFile(file); console.log('Decode result:', isbn); if (isbn) { const barcodeInput = event.target; let form = this.$root; if (!form || form.tagName !== 'FORM' || !form.contains(barcodeInput)) { form = barcodeInput.closest('form'); } if (!form || form.tagName !== 'FORM') { console.error('[FORM] Could not find valid form element'); return; } const searchInput = form.querySelector('input[name=q]'); const formContainsBarcodeInput = form.contains(barcodeInput); if (!searchInput || !formContainsBarcodeInput) { console.error('[FORM] Form validation failed - missing search input or barcode input not in form. Search input:', searchInput, 'Form contains barcode input:', formContainsBarcodeInput); return; } console.log('[FORM] ISBN received, form element:', form, 'tagName:', form.tagName); console.log('[FORM] Search input found:', searchInput); searchInput.value = isbn; console.log('[FORM] Set input value to:', isbn, 'Current value:', searchInput.value); this.explicitSubmitTriggered = true; console.log('[FORM] Submitting form...'); form.submit(); console.log('[FORM] Form submit called'); } else { this.barcodeError = gettext('Could not read barcode from image. Please try again or enter ISBN manually.'); } } catch (error) { console.error('Barcode scan error:', error); this.barcodeError = gettext('Error scanning barcode: ') + (error.message || gettext('Please try again.')); } finally { this.barcodeScanning = false; } }, clearBarcodeError() { this.barcodeError = null; this.barcodePreview = null; if (this.$refs.barcodeInput) { this.$refs.barcodeInput.value = ''; } }, selectType(type) { this.selectedType = type; this.isOpen = false; const input = this.$refs.searchInput; if (input && input.value.trim()) { this.$nextTick(() => this.$root.submit()); } }, handleFormSubmit(event) { if (event.currentTarget !== this.$el) { return true; } if (event.submitter && !this.$el.contains(event.submitter)) { console.log('[FORM] Submitter not in search form, allowing'); return true; } if (event.submitter && !this.$el.contains(event.submitter)) { console.log('[FORM] Submitter not in search form, allowing'); return true; } if (this.explicitSubmitTriggered) { this.explicitSubmitTriggered = false; return true; } if (event.submitter && event.submitter === this.$refs.searchButton) { return true; } if (!event.submitter) { const searchInput = this.$el.querySelector('input[name=q]'); if (searchInput && document.activeElement === searchInput) { return true; } } console.log('[FORM] Form submission prevented - not from search button or Enter key in search input'); event.preventDefault(); event.stopPropagation(); return false; }, init() { console.log('Search form Alpine.js initialized'); this.explicitSubmitTriggered = false; } }"
                           @submit="handleFormSubmit($event)"
                           @click.away="document.getElementById('search-suggestions').innerHTML = ''">
                       <div class="flex">
@@ -557,7 +571,7 @@
                 {% endif %}
 
                 {# Mobile: theme toggle as a flex item so it can't overlap the search/media-type controls #}
-                {% if user.is_authenticated %}
+                {% if user.is_authenticated and user.theme|is_basic_theme %}
                   <button type="button"
                           onclick="floppyToggleTheme()"
                           class="lg:hidden shrink-0 p-2 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)] transition-colors duration-200 cursor-pointer"
@@ -570,7 +584,7 @@
               </div>
             </div>
 
-            {% if user.is_authenticated %}
+            {% if user.is_authenticated and user.theme|is_basic_theme %}
               <button type="button"
                       onclick="floppyToggleTheme()"
                       class="hidden lg:block absolute right-4 top-1/2 -translate-y-1/2 shrink-0 p-2 rounded-md text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-hover-dim)] transition-colors duration-200 cursor-pointer"
@@ -643,10 +657,12 @@
       <div class="w-full max-w-xl px-4 space-y-2 pointer-events-auto"></div>
     </div>
 
+    <script src="{% static 'js/libraries/sortablejs-1.15.3.min.js' %}"></script>
+
     {% block js %}
     {% endblock js %}
 
-    {% if user.is_authenticated %}
+    {% if user.is_authenticated and user.theme|is_basic_theme %}
       <script>
       function floppyToggleTheme() {
         function getCsrfCookie() {
@@ -655,12 +671,16 @@
         }
 
         const html = document.documentElement;
+        const explicitThemes = "{% explicit_theme_classes %}".split(" ");
+        const hasExplicitTheme = explicitThemes.some((theme) =>
+          html.classList.contains(theme),
+        );
         const systemPrefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
         const currentlyLight = html.classList.contains("light")
-          || (!html.classList.contains("dark") && systemPrefersLight);
+          || (!hasExplicitTheme && systemPrefersLight);
         const next = currentlyLight ? "dark" : "light";
 
-        html.classList.remove("light", "dark");
+        html.classList.remove(...explicitThemes);
         html.classList.add(next);
 
         fetch("{% url 'preferences' %}", {
@@ -810,6 +830,51 @@
     </script>
 
     <script>
+      // A transient database conflict must not turn a fragment into an error page.
+      if (!window.__floppyDatabaseRetryBound) {
+        window.__floppyDatabaseRetryBound = true;
+        const attempts = new WeakMap();
+
+        document.body.addEventListener("htmx:responseError", (event) => {
+          const xhr = event.detail.xhr;
+          const config = event.detail.requestConfig || {};
+          if (!xhr || xhr.getResponseHeader("X-Floppy-Transient-DB") !== "contention"
+              || String(config.verb || "").toLowerCase() !== "get") return;
+
+          const target = event.detail.target;
+          if (!target || !target.isConnected) return;
+          const attempt = attempts.get(target) || 0;
+          attempts.set(target, attempt + 1);
+          if (!target.hasChildNodes()) {
+            const status = document.createElement("p");
+            status.setAttribute("role", "status");
+            status.textContent = gettext("Loading. Please wait…");
+            target.append(status);
+          }
+          const retryUrl = new URL(xhr.responseURL);
+          retryUrl.searchParams.delete("org.htmx.cache-buster");
+          retryUrl.searchParams.delete("cache_bust");
+          const url = retryUrl.toString();
+          const swap = event.detail.elt?.getAttribute("hx-swap") || "innerHTML";
+          const delay = Math.min(5000, 250 * 2 ** Math.min(attempt, 5));
+          setTimeout(() => {
+            if (!target.isConnected) return;
+            if (config.boosted) {
+              window.location.replace(url);
+            } else {
+              htmx.ajax("GET", url, { target, swap });
+            }
+          }, delay);
+        });
+
+        document.body.addEventListener("htmx:afterSwap", (event) => {
+          if (event.detail.target) attempts.delete(event.detail.target);
+        });
+        try { sessionStorage.removeItem("floppy-db-retry:" + location.href); } catch (error) { /* storage disabled */ }
+      }
+    </script>
+
+    <script>
       if ("serviceWorker" in navigator) {
         window.addEventListener("load", () => {
           navigator.serviceWorker
@@ -828,9 +893,15 @@
     <script src="{% static 'js/dateTimePicker.js' %}{% get_static_file_mtime 'js/dateTimePicker.js' %}"></script>
     <script src="{% static 'js/sessionHistory.js' %}{% get_static_file_mtime 'js/sessionHistory.js' %}"></script>
     <script src="{% static 'js/episodeBulkTrackForm.js' %}{% get_static_file_mtime 'js/episodeBulkTrackForm.js' %}"></script>
+    <script src="{% static 'js/episodeOrderReview.js' %}{% get_static_file_mtime 'js/episodeOrderReview.js' %}"></script>
+    <script src="{% static 'js/matchFixReview.js' %}{% get_static_file_mtime 'js/matchFixReview.js' %}"></script>
+    <script src="{% static 'js/bulkSelection.js' %}{% get_static_file_mtime 'js/bulkSelection.js' %}"></script>
+    <script src="{% static 'js/libraryFilterState.js' %}{% get_static_file_mtime 'js/libraryFilterState.js' %}"></script>
+    <script src="{% static 'js/savedViews.js' %}{% get_static_file_mtime 'js/savedViews.js' %}"></script>
     <script src="{% static 'js/collectionCustomFields.js' %}{% get_static_file_mtime 'js/collectionCustomFields.js' %}"></script>
     <script src="{% static 'js/searchShortcut.js' %}{% get_static_file_mtime 'js/searchShortcut.js' %}"></script>
     <script src="{% static 'js/searchAutocomplete.js' %}{% get_static_file_mtime 'js/searchAutocomplete.js' %}"></script>
     <script src="{% static 'js/horizontal-scroll.js' %}{% get_static_file_mtime 'js/horizontal-scroll.js' %}"></script>
+    <script src="{% static 'js/keepPopupsOnScreen.js' %}{% get_static_file_mtime 'js/keepPopupsOnScreen.js' %}"></script>
   </body>
 </html>

@@ -8,11 +8,14 @@ itself, so a corrupted file has something real to be replaced with.
 """
 
 import logging
+import time
+from contextlib import suppress
 from pathlib import Path
 
 from celery import shared_task
 from django.conf import settings
 
+from app.memory_envelope import sample_memory
 from config.sqlite_integrity import create_live_database_snapshot
 
 logger = logging.getLogger(__name__)
@@ -32,6 +35,16 @@ def write_database_snapshot():
     if not settings.DB_SNAPSHOT_ENABLED:
         return {"status": "skipped", "reason": "disabled"}
 
+    # Both cgroup envelopes, bracketing the copy. Production's largest
+    # observed excursion -- roughly 1-2 GB to above 5 GB, decaying over hours
+    # -- coincides with this task, and the shape (a couple of GB of write I/O,
+    # no comparable process growth) points at filesystem page cache rather
+    # than at anything Python allocated. This records that rather than
+    # inferring it: the copy is written and then read back in full by
+    # PRAGMA quick_check, so a snapshot charges the cgroup roughly twice its
+    # own size in `file` unless the cache is released afterwards.
+    before = sample_memory()
+    started = time.perf_counter()
     try:
         dest_dir = Path(settings.BACKUP_DIR) / "database"
         path = create_live_database_snapshot(
@@ -47,5 +60,37 @@ def write_database_snapshot():
     if path is None:
         return {"status": "error", "reason": "snapshot could not be verified"}
 
-    logger.info("Database snapshot written to %s", path)
+    _log_snapshot_envelope(path, before, (time.perf_counter() - started) * 1000)
     return {"status": "ok", "path": str(path)}
+
+
+def _format(value) -> str:
+    """Render a possibly-unknown measurement, never as a misleading zero."""
+    return "unknown" if value is None else str(value)
+
+
+def _log_snapshot_envelope(path: Path, before, duration_ms: float) -> None:
+    """Emit one structured line tying the snapshot to the cgroup it moved.
+
+    Only the file name is logged, not the full path: BACKUP_DIR is operator
+    configuration and the name alone is enough to match this line against the
+    page_cache_release line the writer emits for the same snapshot.
+    """
+    size_bytes = None
+    with suppress(OSError):
+        size_bytes = path.stat().st_size
+    after = sample_memory()
+    logger.info(
+        "db_snapshot name=%s bytes=%s duration_ms=%.0f "
+        "cgroup_before=%s cgroup_after=%s anon_before=%s anon_after=%s "
+        "file_before=%s file_after=%s",
+        path.name,
+        _format(size_bytes),
+        duration_ms,
+        _format(before.cgroup_current_bytes),
+        _format(after.cgroup_current_bytes),
+        _format(before.cgroup_anon_bytes),
+        _format(after.cgroup_anon_bytes),
+        _format(before.cgroup_file_bytes),
+        _format(after.cgroup_file_bytes),
+    )

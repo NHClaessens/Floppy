@@ -1,4 +1,5 @@
 import datetime
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -89,6 +90,59 @@ class GamesInTopTalentAggregationTests(TestCase):
             role_type=CreditRoleType.CAST.value,
             role="Hero",
         )
+
+    def test_talent_does_not_materialize_credit_models(self):
+        # A person can have thousands of credits and a large biography. Only
+        # scalar credit rows and display fields for the winners are needed.
+        with (
+            patch.object(ItemPersonCredit, "from_db", side_effect=AssertionError),
+            patch.object(ItemStudioCredit, "from_db", side_effect=AssertionError),
+        ):
+            result = _aggregate_top_talent(
+                self.user,
+                None,
+                None,
+                limit=1,
+                schedule_missing_backfill=False,
+            )
+        self.assertEqual(result["top_actors"][0]["name"], "Bob Movie Star")
+        self.assertEqual(result["top_actresses"][0]["name"], "Alice Actor")
+        self.assertEqual(result["top_studios"][0]["name"], "Dispatch Studio")
+
+    def test_limited_rankings_preserve_ties_and_duplicate_credit_counts(self):
+        for index in range(4):
+            person = Person.objects.create(
+                source=Sources.TMDB.value,
+                source_person_id=f"tie-{index}",
+                name="Same Name",
+                gender=PersonGender.MALE.value,
+            )
+            for role in ("First character", "Second character"):
+                ItemPersonCredit.objects.create(
+                    item=self.movie_item,
+                    person=person,
+                    role_type=CreditRoleType.CAST.value,
+                    role=role,
+                )
+        complete = _aggregate_top_talent(
+            self.user,
+            None,
+            None,
+            schedule_missing_backfill=False,
+        )
+        limited = _aggregate_top_talent(
+            self.user,
+            None,
+            None,
+            limit=3,
+            schedule_missing_backfill=False,
+        )
+        for mode in ("plays", "time", "titles"):
+            expected = complete["by_sort"][mode]["top_actors"][:3]
+            self.assertEqual(limited["by_sort"][mode]["top_actors"], expected)
+            for row in expected:
+                self.assertEqual(row["plays"], 1)
+                self.assertEqual(row["unique_movies"], 1)
 
     def test_game_cast_appears_in_top_actors(self):
         result = _aggregate_top_talent(
@@ -237,6 +291,39 @@ class GamesInTopTalentAggregationTests(TestCase):
         self.assertEqual(totals["unique_titles"], 1)
         self.assertEqual(totals["unique_games"], 1)
         self.assertEqual(totals["unique_movies"], 0)
+
+    # Several media types can be selected at once (issue #1317).
+
+    def _names(self, media_type):
+        result = _aggregate_top_talent(
+            self.user,
+            start_date=None,
+            end_date=None,
+            schedule_missing_backfill=False,
+            media_type=media_type,
+        )
+        return {
+            row["name"] for row in result["top_actors"] + result["top_actresses"]
+        }
+
+    def test_movie_and_game_together_include_both_casts(self):
+        for selection in ("movie,game", ["game", "movie"]):
+            self.assertEqual(
+                self._names(selection),
+                {"Alice Actor", "Bob Movie Star"},
+            )
+
+    def test_types_without_credits_are_ignored_next_to_a_real_one(self):
+        self.assertEqual(self._names("music,movie"), {"Bob Movie Star"})
+
+    def test_only_types_without_credits_yield_no_talent(self):
+        self.assertEqual(self._names("music,book"), set())
+
+    def test_all_and_empty_mean_no_filter(self):
+        everyone = {"Alice Actor", "Bob Movie Star"}
+        self.assertEqual(self._names("all"), everyone)
+        self.assertEqual(self._names(""), everyone)
+        self.assertEqual(self._names(None), everyone)
 
 
 class NoDateEntriesInAllTimeTopTalentTests(TestCase):

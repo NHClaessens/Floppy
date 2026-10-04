@@ -14,6 +14,8 @@ SEASON_METADATA = {
     "max_progress": 2,
     "image": "s.jpg",
     "season/1": {"episodes": [{"episode_number": 1}, {"episode_number": 2}]},
+    # An ended show, so finishing its only season finishes the show.
+    "details": {"status": "Ended"},
 }
 
 

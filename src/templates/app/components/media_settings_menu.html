@@ -68,9 +68,18 @@
 
     <button class="flex items-center gap-2 w-full px-3 py-2 text-left text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] transition-colors cursor-pointer"
             type="button"
-            @click="open = false; toggleSelectMode()">
-      {% include "app/icons/tag.svg" with classes="w-4 h-4" %}
-      {% translate "Cancel Select" as media_i18n_59 %}{% translate "Select Items" as media_i18n_60 %}<span x-text="selectMode ? '{{ media_i18n_59|escapejs }}' : '{{ media_i18n_60|escapejs }}'"></span>
+            @click="open = false; saveView()">
+      {% include "app/icons/save.svg" with classes="w-4 h-4" %}
+      <span>{% translate "Save View" %}</span>
     </button>
+
+    {% if enable_bulk_select %}
+      <button class="flex items-center gap-2 w-full px-3 py-2 text-left text-sm text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] transition-colors cursor-pointer"
+              type="button"
+              @click="open = false; toggleSelectMode()">
+        {% include "app/icons/tag.svg" with classes="w-4 h-4" %}
+        {% translate "Cancel Select" as media_i18n_59 %}{% translate "Select Items" as media_i18n_60 %}<span x-text="selectMode ? '{{ media_i18n_59|escapejs }}' : '{{ media_i18n_60|escapejs }}'"></span>
+      </button>
+    {% endif %}
   </div>
 </div>

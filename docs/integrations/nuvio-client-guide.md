@@ -158,6 +158,38 @@ next request.
 **Disconnecting never deletes tracking data.** Do not offer "disconnect and
 erase" as one action.
 
+## NuvioTV's Floppy tracker
+
+NuvioTV (Settings, Trackers, Floppy) is a scrobble-only client of this API. The
+user enters their server address and the app token; NuvioTV checks it with
+`GET /api/v1/sync/connections/` and sends playback to `POST /api/v1/scrobble/`.
+
+NuvioTV only knows how far through a title it is, as a percentage, never in
+seconds. So it sends an explicit `completed` flag and no position:
+
+| NuvioTV event | Sent to Floppy | Result in Floppy |
+|---|---|---|
+| Playback starts or pauses | `start` / `pause` | Now Playing card only |
+| Stop at 80% or more | `stop`, `completed: true` | Completed, one play |
+| Stop from 1% to 80% | `stop`, `completed: false` | In Progress, never Completed |
+| Stop under 1% | Not sent | Nothing (a skim) |
+
+It identifies a title by `imdb`, `tmdb` or `tvdb` as strings, plus `anidb` for
+anime. An event with none of them, an episode with no season and episode number,
+or an episode numbered by TVDB order is not sent, because Floppy never matches by
+title.
+
+What it does not do yet: send a resume position (it has no seconds to send),
+read history or lists back, or send ratings. The Nuvio and Floppy sides of those
+are separate changes.
+
+The exact bodies it sends are the fixtures in
+`src/api/tests/test_nuviotv_scrobble_contract.py`:
+
+```bash
+SECRET=test-only scripts/test.sh api.tests.test_nuviotv_scrobble_contract
+```
+
 ## Errors
 
 | Status | Meaning | What to do |
@@ -202,7 +234,7 @@ the suite end to end.
 
 | Floppy revision | Client revision | Result | Date |
 |---|---|---|---|
-| — | — | Not yet tested | — |
+| `efbb545` | dannyvfilms/NuvioTV `13f4bb3` (unmerged fork branch) | Scrobble only. Client code ran against a live Floppy (connection check, start, early stop, finished stop) and the JVM unit tests pass. Not `verified`: the Android build was not compiled and nothing ran on a device. | 2026-10-01 |
 
 ### Nuvio Mobile — https://github.com/NuvioMedia/NuvioMobile
 

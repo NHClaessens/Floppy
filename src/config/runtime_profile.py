@@ -342,31 +342,65 @@ def by_tier(minimal, constrained, standard, profile: ResourceProfile | None = No
     return standard
 
 
+def web_concurrency_default(profile: ResourceProfile | None = None) -> int:
+    """Return the worker count this host's profile implies, ignoring the env.
+
+    Separate from :func:`web_concurrency` so an operator's override can be
+    reported against what would otherwise have been chosen.
+    """
+    # gthread handles concurrent I/O in one preloaded worker, on every tier. A
+    # second worker mostly duplicates the resident application at idle.
+    del profile
+    return 1
+
+
+def gunicorn_threads_default(profile: ResourceProfile | None = None) -> int:
+    """Return the thread count this host's profile implies, ignoring the env."""
+    return by_tier(2, 4, 4, profile)
+
+
+def _explicit_int(name: str) -> int | None:
+    """Return a positive int from the environment, or None if unusable."""
+    explicit = os.environ.get(name)
+    if not explicit:
+        return None
+    try:
+        return max(1, int(explicit))
+    except ValueError:
+        return None
+
+
+def sizing_source(name: str) -> str:
+    """Return whether a sizing variable was chosen by an operator or detected.
+
+    ``emit_env`` exports the answer it reached, because everything supervisord
+    starts inherits the ``WEB_CONCURRENCY`` it wrote and would otherwise report
+    every value as an override. An empty string is not an override: that
+    matches how the value itself is read.
+    """
+    recorded = os.environ.get(f"FLOPPY_{name}_SOURCE")
+    if recorded in ("override", "auto", "invalid"):
+        return recorded
+    explicit = os.environ.get(name)
+    if not explicit:
+        return "auto"
+    return "override" if _explicit_int(name) is not None else "invalid"
+
+
 def web_concurrency(profile: ResourceProfile | None = None) -> int:
     """Return the gunicorn worker count for this host."""
-    resolved = profile or PROFILE
-    explicit = os.environ.get("WEB_CONCURRENCY")
-    if explicit:
-        try:
-            return max(1, int(explicit))
-        except ValueError:
-            pass
-    if resolved.tier == TIER_STANDARD:
-        # gthread handles concurrent I/O in one preloaded worker. A second
-        # worker mostly duplicates the resident Django import at idle.
-        return 1
-    return 1
+    explicit = _explicit_int("WEB_CONCURRENCY")
+    if explicit is not None:
+        return explicit
+    return web_concurrency_default(profile)
 
 
 def gunicorn_threads(profile: ResourceProfile | None = None) -> int:
     """Return the gunicorn thread count per worker for this host."""
-    explicit = os.environ.get("GUNICORN_THREADS")
-    if explicit:
-        try:
-            return max(1, int(explicit))
-        except ValueError:
-            pass
-    return by_tier(2, 4, 4, profile)
+    explicit = _explicit_int("GUNICORN_THREADS")
+    if explicit is not None:
+        return explicit
+    return gunicorn_threads_default(profile)
 
 
 def celery_queue_plan(profile: ResourceProfile | None = None) -> dict[str, str]:
@@ -406,6 +440,86 @@ def celery_queue_plan(profile: ResourceProfile | None = None) -> dict[str, str]:
     }
 
 
+def sizing_report(profile: ResourceProfile | None = None) -> dict:
+    """Return the whole sizing decision as data, for every surface to read.
+
+    The preflight check, the gunicorn boot line and ``emit_env`` all describe
+    the same decision. Deriving each from this one function is what stops them
+    disagreeing, and ``expected_programs`` is built from the queue plan rather
+    than restated, so it cannot claim a worker that never starts.
+    """
+    resolved = profile or PROFILE
+    plan = celery_queue_plan(resolved)
+    web = web_concurrency(resolved)
+    web_default = web_concurrency_default(resolved)
+    web_source = sizing_source("WEB_CONCURRENCY")
+
+    programs = ["nginx", "gunicorn", "celery"]
+    if plan["start_interactive"] == "true":
+        programs.append("celery-interactive")
+    if plan["start_discover"] == "true":
+        programs.append("celery-discover")
+
+    return {
+        "tier": resolved.tier,
+        "tier_source": "override" if resolved.overridden else "detected",
+        "profile": resolved.describe(),
+        "memory_bytes": resolved.memory_bytes,
+        "available_bytes": resolved.available_bytes,
+        "swap_bytes": resolved.swap_bytes,
+        "cpus": resolved.cpus,
+        "notes": list(resolved.notes),
+        "web_concurrency": web,
+        "web_concurrency_default": web_default,
+        "web_concurrency_source": web_source,
+        "gunicorn_threads": gunicorn_threads(resolved),
+        "gunicorn_threads_default": gunicorn_threads_default(resolved),
+        "gunicorn_threads_source": sizing_source("GUNICORN_THREADS"),
+        "celery_queues": plan["queues"],
+        "celery_role": plan["role"],
+        "start_interactive_worker": plan["start_interactive"] == "true",
+        "start_discover_worker": plan["start_discover"] == "true",
+        "expected_programs": programs,
+        "web_concurrency_over_profile": web_source == "override" and web > web_default,
+    }
+
+
+def gunicorn_max_worker_memory_bytes(profile: ResourceProfile | None = None) -> int:
+    """Return the RSS at which a gunicorn worker is retired after a response.
+
+    Lives here, not in ``config/gunicorn.py``, because two callers need the
+    same number: the gunicorn hook that enforces it, and Django, whose
+    high-water instrumentation reports how close a request ended to it. A
+    ceiling the instrumentation disagreed with would misreport exactly the
+    events it exists to explain.
+
+    Zero disables retirement, and is passed through rather than replaced by a
+    default -- an operator who set it to zero meant it.
+    """
+    override = os.environ.get("FLOPPY_GUNICORN_MAX_WORKER_MEMORY_BYTES")
+    if override is not None and override.strip():
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    return by_tier(250, 320, 400, profile) * 1024 * 1024
+
+
+def web_concurrency_warning(profile: ResourceProfile | None = None) -> str:
+    """Return a one-line warning when an override costs resident memory.
+
+    Empty when there is nothing to say, so callers can print it or not.
+    """
+    report = sizing_report(profile)
+    if not report["web_concurrency_over_profile"]:
+        return ""
+    return (
+        f"WEB_CONCURRENCY={report['web_concurrency']} is set explicitly; this host"
+        f" ({report['profile']}) would use {report['web_concurrency_default']}."
+        " Each extra worker holds its own resident copy of the application."
+    )
+
+
 def emit_env(profile: ResourceProfile | None = None) -> None:
     """Print shell ``export`` lines describing the sizing decision.
 
@@ -416,14 +530,21 @@ def emit_env(profile: ResourceProfile | None = None) -> None:
     """
     resolved = profile or PROFILE
     plan = celery_queue_plan(resolved)
+    # Resolved before the exports below are written: everything supervisord
+    # starts inherits WEB_CONCURRENCY from here, so without a recorded source
+    # each of those processes would read its own inherited value as an
+    # operator override.
+    report = sizing_report(resolved)
     exports = {
         "FLOPPY_RESOURCE_TIER": resolved.tier,
         "FLOPPY_CELERY_QUEUES": plan["queues"],
         "FLOPPY_CELERY_ROLE": plan["role"],
         "FLOPPY_START_INTERACTIVE_WORKER": plan["start_interactive"],
         "FLOPPY_START_DISCOVER_WORKER": plan["start_discover"],
-        "WEB_CONCURRENCY": str(web_concurrency(resolved)),
-        "GUNICORN_THREADS": str(gunicorn_threads(resolved)),
+        "WEB_CONCURRENCY": str(report["web_concurrency"]),
+        "GUNICORN_THREADS": str(report["gunicorn_threads"]),
+        "FLOPPY_WEB_CONCURRENCY_SOURCE": report["web_concurrency_source"],
+        "FLOPPY_GUNICORN_THREADS_SOURCE": report["gunicorn_threads_source"],
     }
     for key, value in exports.items():
         # stdout is eval'd by the shell; keep it exclusively export lines.
@@ -436,3 +557,8 @@ def emit_env(profile: ResourceProfile | None = None) -> None:
         f' discover={"on(discover)" if plan["start_discover"] == "true" else "off(merged)"}'
     )
     print(summary, file=sys.stderr)  # noqa: T201  # surfaced in container logs
+    warning = web_concurrency_warning(resolved)
+    if warning:
+        # The one surface that reaches an existing install: a template default
+        # cannot un-set a value an operator already has saved.
+        print(f"[entrypoint] {warning}", file=sys.stderr)  # noqa: T201

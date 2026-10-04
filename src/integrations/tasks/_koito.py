@@ -6,12 +6,14 @@ Receive-only: these tasks read from Koito and never submit back to it.
 import logging
 import random
 import time
+from datetime import UTC, datetime
 
 from celery import current_task, shared_task
 from django.core.cache import cache
 from django.utils import timezone
 
 from app.log_safety import exception_summary
+from integrations import connection_health
 from integrations.imports.helpers import retry_on_lock
 
 logger = logging.getLogger(__name__)
@@ -26,6 +28,83 @@ KOITO_PARTIAL_SYNC_ERROR = (
 # The export is a single unpaginated response, so a chunk can take a while.
 # Sized well above the Last.fm 600s chunk lock for that reason.
 KOITO_HISTORY_IMPORT_LOCK_TIMEOUT = 60 * 60
+
+# How long a lock may sit untouched before we treat it as abandoned. A worker
+# that dies mid-import (SIGKILL, orchestrator restart, OOM) leaves the account
+# in RUNNING and the lock in place; without this the account is stuck until the
+# lock TTL expires an hour later. Keeping the TTL short enough to recover fast
+# while long enough that a slow Koito export never trips it.
+KOITO_HISTORY_IMPORT_LOCK_STALE_AFTER = 15 * 60
+
+
+def _acquire_koito_history_import_lock(account, lock_key) -> bool:
+    """Try to take the import lock, clearing a stale one first.
+
+    Returns True when the lock was acquired (fresh or reclaimed). The caller
+    must release it in a ``finally`` block. A stale lock is one whose age
+    exceeds ``KOITO_HISTORY_IMPORT_LOCK_STALE_AFTER`` -- that means the worker
+    that held it died, so we reclaim it and reset the account to a retryable
+    state so the next "Import full history" click actually starts.
+    """
+    existing = cache.get(lock_key)
+    if existing is not None:
+        started_at = _parse_iso_timestamp(existing.get("started_at"))
+        age = (timezone.now() - started_at).total_seconds() if started_at else None
+        if age is not None and age > KOITO_HISTORY_IMPORT_LOCK_STALE_AFTER:
+            logger.warning(
+                "Releasing stale Koito history import lock for user %s "
+                "(held for %ds, over %ds)",
+                account.user.id,
+                int(age),
+                KOITO_HISTORY_IMPORT_LOCK_STALE_AFTER,
+            )
+            _mark_koito_history_import_stale(account)
+            cache.delete(lock_key)
+            existing = None
+
+    if existing is not None:
+        return False
+
+    return cache.add(
+        lock_key,
+        {"started_at": timezone.now().isoformat()},
+        timeout=KOITO_HISTORY_IMPORT_LOCK_TIMEOUT,
+    )
+
+
+def _parse_iso_timestamp(value):
+    """Parse an ISO-8601 timestamp, returning None when it is unusable."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return None
+    utc = UTC
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=utc)
+    return parsed.astimezone(utc)
+
+
+def _mark_koito_history_import_stale(account):
+    """Reset an account whose import died mid-flight back to a retryable state."""
+    from integrations.models import LastFMHistoryImportStatus
+
+    account.history_import_status = LastFMHistoryImportStatus.IDLE
+    account.history_import_started_at = None
+    account.history_import_last_error_message = (
+        "Koito history import did not finish (worker died or timed out). "
+        "Click 'Import full history' again."
+    )
+    retry_on_lock(
+        lambda: account.save(
+            update_fields=[
+                "history_import_status",
+                "history_import_started_at",
+                "history_import_last_error_message",
+            ],
+        ),
+    )
 
 
 def _refresh_koito_statistics(user_id: int, affected_day_keys) -> None:
@@ -212,14 +291,18 @@ def poll_all_koito_accounts():
     """Global task to poll Koito for all connected users."""
     from integrations.models import KoitoAccount
 
-    accounts = KoitoAccount.objects.filter(
-        connection_broken=False,
-    ).select_related("user")
-    if not accounts.exists():
+    # Broken accounts are included once they are due for a re-probe: a
+    # successful sync clears the flag, a rejected one re-records it.
+    accounts = [
+        account
+        for account in KoitoAccount.objects.select_related("user")
+        if connection_health.due_for_probe(account)
+    ]
+    if not accounts:
         logger.debug("No Koito accounts to poll")
         return {"processed": 0, "errors": 0, "message": "No accounts to poll"}
 
-    logger.info("Polling Koito for %d users", accounts.count())
+    logger.info("Polling Koito for %d users", len(accounts))
 
     batch_size = 10
     processed_count = 0
@@ -252,7 +335,7 @@ def poll_all_koito_accounts():
     return {
         "processed": processed_count,
         "errors": error_count,
-        "total_accounts": accounts.count(),
+        "total_accounts": len(accounts),
         "message": f"Processed {processed_count} Koito account(s).",
     }
 
@@ -294,11 +377,7 @@ def import_koito_history(user_id, reset=False):
         )
 
     lock_key = koito_sync.get_koito_history_import_lock_key(user_id)
-    if not cache.add(
-        lock_key,
-        {"started_at": timezone.now().isoformat()},
-        timeout=KOITO_HISTORY_IMPORT_LOCK_TIMEOUT,
-    ):
+    if not _acquire_koito_history_import_lock(account, lock_key):
         logger.debug("Koito history import already running for user %s", user_id)
         return {"message": "Full Koito history import already running."}
 

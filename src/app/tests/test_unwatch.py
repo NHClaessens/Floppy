@@ -7,6 +7,7 @@ pin the opposite: after a retraction the earlier plays are still there.
 
 import datetime
 import logging
+from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
@@ -180,6 +181,41 @@ class EpisodeRetractionTests(TestCase):
             [_dt(1), _dt(5)],
         )
 
+    def test_an_open_play_is_not_taken_for_the_latest_watch(self):
+        """A play still in progress has no end date; Postgres sorts it first."""
+        self._watch(1)
+        self._watch(5)
+        open_play = Episode.objects.create(
+            item=self.episode_item,
+            related_season=self.season,
+            status=Status.IN_PROGRESS.value,
+            start_date=_dt(9),
+        )
+
+        retract_watch(self.user, self.episode_item)
+
+        remaining = Episode.objects.filter(item=self.episode_item)
+        self.assertIn(open_play, remaining)
+        self.assertEqual(
+            sorted(row.end_date for row in remaining if row.end_date),
+            [_dt(1)],
+        )
+
+        with patch(
+            "app.providers.services.get_media_metadata",
+            return_value={
+                "episodes": [{"episode_number": 1, "still_path": None}],
+                "_tvdb_episode_image_map": {},
+                "season/1": {"episodes": [{"episode_number": 1}]},
+            },
+        ):
+            self.season.unwatch(1)
+
+        self.assertEqual(
+            list(Episode.objects.filter(item=self.episode_item)),
+            [open_play],
+        )
+
     def test_an_attributable_play_is_removed_precisely(self):
         self._watch(1)
         target = self._watch(5)
@@ -191,6 +227,27 @@ class EpisodeRetractionTests(TestCase):
             self.user,
             self.episode_item,
             watch_operation_id="3f8a1c2e-0000-4000-8000-000000000001",
+        )
+
+        self.assertTrue(result.attributable)
+        remaining = Episode.objects.filter(item=self.episode_item)
+        self.assertEqual(remaining.count(), 2)
+        self.assertEqual(
+            sorted(row.end_date for row in remaining),
+            [_dt(1), _dt(9)],
+        )
+
+    def test_an_external_id_play_is_removed_precisely(self):
+        self._watch(1)
+        target = self._watch(5)
+        target.external_id = "evt-5"
+        target.save(update_fields=["external_id"])
+        self._watch(9)
+
+        result = retract_watch(
+            self.user,
+            self.episode_item,
+            external_id="evt-5",
         )
 
         self.assertTrue(result.attributable)

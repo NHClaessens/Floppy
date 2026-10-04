@@ -2,6 +2,7 @@
 
 import logging
 from collections import defaultdict
+from functools import partial
 from http import HTTPStatus
 
 import requests
@@ -10,13 +11,15 @@ from django.utils import timezone
 
 from app.models import Item, MediaTypes, Sources
 from app.providers import services
-from integrations import import_progress
+from integrations import connection_health, import_progress
 from integrations.imports.helpers import (
+    ConnectionAuthError,
     MediaImportError,
     decrypt_or_raise,
     find_item_across_buckets,
 )
 from integrations.models import RadarrInstance
+from integrations.safe_fetch import send_to_self_hosted
 from integrations.source_sync import upsert_collection_source_state
 
 logger = logging.getLogger(__name__)
@@ -30,23 +33,30 @@ class RadarrClient:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
 
-    def _request(self, path: str):
+    def _request(self, path: str, params=None, *, method="GET", json=None, timeout=20):
         try:
-            response = requests.get(
+            response = send_to_self_hosted(
+                partial(requests.request, method) if method != "GET" else requests.get,
                 f"{self.base_url}{path}",
                 headers={"X-Api-Key": self.api_key},
-                timeout=20,
+                params=params,
+                timeout=timeout,
+                **({"json": json} if json is not None else {}),
             )
         except requests.RequestException as error:
             msg = f"Could not reach Radarr: {error}"
             raise MediaImportError(msg) from error
         if response.status_code in (401, 403):
             msg = "Radarr API key is invalid or unauthorized"
-            raise MediaImportError(msg)
+            raise ConnectionAuthError(msg)
         if response.status_code >= HTTPStatus.BAD_REQUEST:
             msg = f"Radarr request failed ({response.status_code}) for {path}"
             raise MediaImportError(msg)
-        return response.json()
+        try:
+            return response.json()
+        except ValueError as error:
+            msg = "Radarr returned a response that is not JSON"
+            raise MediaImportError(msg) from error
 
     def healthcheck(self):
         """Verify connection."""
@@ -55,6 +65,32 @@ class RadarrClient:
     def movies(self):
         """Fetch movie collection rows."""
         return self._request("/api/v3/movie")
+
+    def movie_by_tmdb_id(self, tmdb_id, timeout=8):
+        """Return the Radarr movie row for a TMDB id, or None."""
+        rows = self._request("/api/v3/movie", {"tmdbId": tmdb_id}, timeout=timeout)
+        return rows[0] if rows else None
+
+    def queue(self, movie_id, timeout=8):
+        """Return the queue rows for one movie."""
+        return self._request(
+            "/api/v3/queue/details", {"movieId": movie_id}, timeout=timeout
+        )
+
+    def history(self, movie_id, timeout=8):
+        """Return the history rows for one movie."""
+        return self._request(
+            "/api/v3/history/movie", {"movieId": movie_id}, timeout=timeout
+        )
+
+    def search_movie(self, movie_id, timeout=8):
+        """Ask Radarr to search for one movie."""
+        return self._request(
+            "/api/v3/command",
+            method="POST",
+            json={"name": "MoviesSearch", "movieIds": [movie_id]},
+            timeout=timeout,
+        )
 
 
 def importer(identifier, user, mode, instance_id=None):
@@ -82,11 +118,8 @@ class RadarrImporter:
         try:
             api_key = decrypt_or_raise(self.instance.api_key)
         except MediaImportError as error:
-            self.instance.connection_broken = True
-            self.instance.last_error_message = str(error)
-            self.instance.save(
-                update_fields=["connection_broken", "last_error_message", "updated_at"],
-            )
+            # An unreadable stored key needs a reconnect as much as a rejected one.
+            connection_health.record_failure(self.instance, error, auth=True)
             raise
 
         self.client = RadarrClient(self.instance.base_url, api_key)
@@ -99,10 +132,10 @@ class RadarrImporter:
         try:
             movies = self.client.movies()
         except MediaImportError as error:
-            self.instance.connection_broken = True
-            self.instance.last_error_message = str(error)
-            self.instance.save(
-                update_fields=["connection_broken", "last_error_message", "updated_at"]
+            connection_health.record_failure(
+                self.instance,
+                error,
+                auth=isinstance(error, ConnectionAuthError),
             )
             raise
 
@@ -133,16 +166,7 @@ class RadarrImporter:
             imported_counts["updated"] += 1
 
         self.instance.last_sync_at = timezone.now()
-        self.instance.connection_broken = False
-        self.instance.last_error_message = ""
-        self.instance.save(
-            update_fields=[
-                "last_sync_at",
-                "connection_broken",
-                "last_error_message",
-                "updated_at",
-            ]
-        )
+        connection_health.record_success(self.instance, extra_fields=["last_sync_at"])
 
         return dict(imported_counts), "\n".join(dict.fromkeys(self.warnings))
 

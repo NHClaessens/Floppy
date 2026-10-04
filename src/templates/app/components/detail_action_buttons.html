@@ -5,15 +5,9 @@
 {% load humanize %}
 {% load static %}
 {% if not public_view|default:False %}
-  {% if match_item and media_type == MediaTypes.MOVIE.value or match_item and media_type == MediaTypes.TV.value %}
-    <a href="{% url 'match_fix' match_item.id %}"
-       class="mb-2 inline-flex items-center rounded-xl border border-[var(--color-surface-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] shadow-sm transition-colors hover:bg-[var(--color-surface-muted)]">
-      {% translate "Fix match" %}
-    </a>
-  {% endif %}
-  {% if not activity_subtitle and media.score_count is None and not trakt_score and not imdb_score and not mal_score and not user_medias %}
+  {% if not activity_subtitle and media.score_count is None and not trakt_score and not imdb_score and not mal_score and not opencritic_score and not user_medias %}
     <div class="order-1 mt-5 mb-6 flex flex-col gap-3 sm:order-2 sm:flex-row sm:flex-wrap sm:items-center">
-    {% elif not activity_subtitle and media.score_count is None and not trakt_score and not imdb_score and not mal_score and user_medias and not current_instance %}
+    {% elif not activity_subtitle and media.score_count is None and not trakt_score and not imdb_score and not mal_score and not opencritic_score and user_medias and not current_instance %}
       <div class="order-1 mt-5 mb-6 flex flex-col gap-3 sm:order-2 sm:flex-row sm:flex-wrap sm:items-center">
       {% else %}
         <div class="order-1 mb-6 flex flex-col gap-3 sm:order-2 sm:flex-row sm:flex-wrap sm:items-center">
@@ -146,7 +140,7 @@
                   {% for detail_link_section in detail_link_sections %}
                     <div class="{% if not forloop.first %}mt-3 border-t border-[var(--color-surface-border)] pt-3{% endif %}">
                       <div class="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]">
-                        {{ detail_link_section.title }}
+                        {% translate detail_link_section.title %}
                       </div>
                       <div class="flex flex-wrap gap-2">
                         {% for detail_link in detail_link_section.entries %}
@@ -245,6 +239,27 @@
               </div>
             </div>
 
+            {% if request.user.seerr_url and request.user.seerr_api_key and request.user.seerr_user_id and media.source == Sources.TMDB.value and media_type in "movie,tv" %}
+              <div x-data="{ seerrOpen: false }" class="flex-1 sm:flex-none">
+                <button class="inline-flex h-11 w-full items-center justify-center rounded-xl border border-[var(--color-surface-border)] bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm transition-colors duration-200 hover:bg-[var(--color-surface-muted)] cursor-pointer sm:size-11 sm:w-11"
+                        title="{% translate "Request in Seerr" %}"
+                        hx-get="{% url 'seerr_request' media_type media.media_id %}"
+                        hx-target="#{% component_id 'seerr' media %}"
+                        hx-trigger="click"
+                        @click="seerrOpen = true">{% include "app/icons/download.svg" with classes="w-4 h-4" %}</button>
+
+                <div x-show="seerrOpen"
+                @mousedown.self="seerrOpen = false"
+                     x-cloak
+                     @keydown.escape.window="seerrOpen = false"
+                     class="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+                  <div class="w-96 max-h-[90vh] px-4 md:px-0 relative z-60">
+                    <div id="{% component_id 'seerr' media %}"></div>
+                  </div>
+                </div>
+              </div>
+            {% endif %}
+
             <a class="inline-flex h-11 w-full flex-1 items-center justify-center rounded-xl border border-[var(--color-surface-border)] bg-[var(--color-surface)] text-[var(--color-text)] shadow-sm transition-colors duration-200 hover:bg-[var(--color-surface-muted)] cursor-pointer sm:size-11 sm:w-11 sm:flex-none"
                title="{% translate "View your activity history" %}"
                href="{% url 'history' %}?{% if media_type == MediaTypes.SEASON.value %}media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}&season_number={{ media.season_number }}{% elif media_type == MediaTypes.TV.value %}media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}{% elif media_type == MediaTypes.PODCAST.value and podcast_show %}media_type={{ MediaTypes.PODCAST.value }}&podcast_show={{ podcast_show.id }}{% else %}media_type={{ media_type }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}{% endif %}{% if media_type == MediaTypes.GAME.value or media_type == MediaTypes.BOARDGAME.value %}&logging_style=sessions{% endif %}">
@@ -271,7 +286,7 @@
               </button>
             </form>
           </div>
-          {% if activity_subtitle or media.score_count is not None or trakt_score or imdb_score or mal_score or user_medias and current_instance %}
+          {% if activity_subtitle or media.score_count is not None or trakt_score or imdb_score or mal_score or opencritic_score or user_medias and current_instance %}
           </div>
         {% endif %}
       </div>

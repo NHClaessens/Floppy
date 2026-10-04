@@ -392,6 +392,7 @@ class OpenAPIArtifactTests(SimpleTestCase):
                 "start_date",
                 "end_date",
                 "notes",
+                "entry_source",
             },
         )
         self.assertEqual(
@@ -403,6 +404,7 @@ class OpenAPIArtifactTests(SimpleTestCase):
                 "start_date",
                 "end_date",
                 "notes",
+                "entry_source",
                 "image_url",
             },
         )
@@ -417,14 +419,18 @@ class OpenAPIArtifactTests(SimpleTestCase):
                 "tracked",
                 "created_at",
                 "score",
+                "scored_at",
                 "status",
                 "progress",
+                "episodes_left",
+                "total_episodes_left",
                 "progress_scope",
                 "progress_unit",
                 "progressed_at",
                 "start_date",
                 "end_date",
                 "notes",
+                "source",
                 "lists",
                 "next_episode",
                 "show",
@@ -432,7 +438,16 @@ class OpenAPIArtifactTests(SimpleTestCase):
         )
         self.assertEqual(
             set(schemas["NextEpisode"]["properties"]),
-            {"season_number", "episode_number", "air_date"},
+            {
+                "season_number",
+                "episode_number",
+                "air_date",
+                "title",
+                "episode_code",
+                "image",
+                "ids",
+                "url",
+            },
         )
         self.assertEqual(
             set(schemas["Show"]["properties"]),
@@ -444,12 +459,15 @@ class OpenAPIArtifactTests(SimpleTestCase):
                 "consumption_id",
                 "created",
                 "score",
+                "scored_at",
                 "progress",
                 "progressed_at",
                 "status",
                 "start_date",
                 "end_date",
                 "notes",
+                "source",
+                "external_id",
             },
         )
         complete_keys = {
@@ -460,6 +478,8 @@ class OpenAPIArtifactTests(SimpleTestCase):
             "media_type",
             "title",
             "max_progress",
+            "episodes_left",
+            "total_episodes_left",
             "image",
             "backdrop",
             "synopsis",
@@ -478,6 +498,7 @@ class OpenAPIArtifactTests(SimpleTestCase):
             "consumptions_number",
             "consumptions",
             "lists",
+            "media_type_status",
         }
         self.assertEqual(
             set(schemas["CompleteMediaResponse"]["properties"]), complete_keys

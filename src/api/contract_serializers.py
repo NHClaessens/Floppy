@@ -3,6 +3,11 @@
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
+SCORED_AT_HELP = (
+    "When the score was last set, changed or cleared; null when never scored "
+    "or when the rating predates this field."
+)
+
 
 @extend_schema_field(
     {"oneOf": [{"type": "string"}, {"type": "integer"}]}
@@ -141,6 +146,12 @@ class MediaUpdateRequestSerializer(serializers.Serializer):
     start_date = DateOrDateTimeField(required=False, allow_null=True)
     end_date = DateOrDateTimeField(required=False, allow_null=True)
     notes = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    # How this entry was created ("plex", "jellyfin", "trakt", "manual", …).
+    # Distinct from the top-level `source` field on TrackMediaRequestSerializer,
+    # which identifies the metadata provider.
+    entry_source = serializers.CharField(
+        required=False, allow_blank=True, allow_null=True,
+    )
 
 
 class TrackedMediaUpdateRequestSerializer(MediaUpdateRequestSerializer):
@@ -155,6 +166,17 @@ class NextEpisodeSerializer(serializers.Serializer):
     season_number = serializers.IntegerField(allow_null=True)
     episode_number = serializers.IntegerField()
     air_date = serializers.DateTimeField(allow_null=True)
+    title = serializers.CharField(
+        allow_null=True,
+        help_text="The episode's own name; null when unknown, never the show's title.",
+    )
+    episode_code = serializers.CharField(
+        allow_null=True,
+        help_text="SxxEyy code, as in history entries; null without a season number.",
+    )
+    image = serializers.CharField(allow_null=True, allow_blank=True)
+    ids = serializers.DictField(child=serializers.CharField())
+    url = serializers.CharField(allow_null=True)
 
 
 class ShowSerializer(serializers.Serializer):
@@ -179,14 +201,21 @@ class TrackedMediaResponseSerializer(serializers.Serializer):
     tracked = serializers.BooleanField()
     created_at = serializers.DateTimeField(allow_null=True)
     score = serializers.FloatField(allow_null=True)
+    scored_at = serializers.DateTimeField(
+        allow_null=True,
+        help_text=SCORED_AT_HELP,
+    )
     status = serializers.IntegerField(allow_null=True)
     progress = serializers.FloatField(allow_null=True)
+    episodes_left = serializers.IntegerField(allow_null=True)
+    total_episodes_left = serializers.IntegerField(allow_null=True)
     progress_scope = serializers.CharField(allow_null=True)
     progress_unit = serializers.CharField(allow_null=True)
     progressed_at = serializers.DateTimeField(allow_null=True)
     start_date = serializers.DateTimeField(allow_null=True)
     end_date = serializers.DateTimeField(allow_null=True)
     notes = serializers.CharField(allow_blank=True, allow_null=True)
+    source = serializers.CharField(allow_blank=True, allow_null=True)
     lists = serializers.ListField(child=serializers.DictField())
     next_episode = NextEpisodeSerializer(allow_null=True)
     show = ShowSerializer(allow_null=True)
@@ -205,12 +234,26 @@ class ConsumptionResponseSerializer(serializers.Serializer):
     consumption_id = serializers.IntegerField()
     created = serializers.DateTimeField(allow_null=True)
     score = serializers.FloatField(allow_null=True)
+    scored_at = serializers.DateTimeField(
+        allow_null=True,
+        help_text=SCORED_AT_HELP,
+    )
     progress = serializers.FloatField(allow_null=True)
     progressed_at = serializers.DateTimeField(allow_null=True)
     status = serializers.IntegerField(allow_null=True)
     start_date = serializers.DateTimeField(allow_null=True)
     end_date = serializers.DateTimeField(allow_null=True)
     notes = serializers.CharField(allow_blank=True, allow_null=True)
+    source = serializers.CharField(allow_blank=True, allow_null=True)
+    external_id = serializers.CharField(allow_blank=True, allow_null=True)
+
+
+class MediaTypeStatusSerializer(serializers.Serializer):
+    """Whether the media type of this item is enabled for the user."""
+
+    media_type = serializers.CharField()
+    enabled = serializers.BooleanField()
+    message = serializers.CharField(allow_blank=True, allow_null=True)
 
 
 class CompleteMediaResponseSerializer(serializers.Serializer):
@@ -223,6 +266,8 @@ class CompleteMediaResponseSerializer(serializers.Serializer):
     media_type = serializers.CharField()
     title = serializers.CharField(allow_blank=True, allow_null=True)
     max_progress = serializers.IntegerField()
+    episodes_left = serializers.IntegerField(allow_null=True)
+    total_episodes_left = serializers.IntegerField(allow_null=True)
     image = serializers.CharField(allow_blank=True, allow_null=True)
     # FORK: 16:9 artwork
     backdrop = serializers.CharField(allow_null=True)
@@ -243,6 +288,7 @@ class CompleteMediaResponseSerializer(serializers.Serializer):
     consumptions_number = serializers.IntegerField()
     consumptions = ConsumptionResponseSerializer(many=True)
     lists = serializers.ListField(child=serializers.DictField())
+    media_type_status = MediaTypeStatusSerializer(allow_null=True)
 
 
 class EpisodeDetailsSerializer(serializers.Serializer):

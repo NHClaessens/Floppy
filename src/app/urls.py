@@ -1,6 +1,6 @@
 from django.urls import path, register_converter
 
-from app import converters, views
+from app import converters, episode_order_views, views
 from app.discover import feeds as discover_feeds
 
 register_converter(converters.MediaTypeChecker, "media_type")
@@ -8,6 +8,11 @@ register_converter(converters.SourceChecker, "source")
 
 
 urlpatterns = [
+    path(
+        "tv/<int:tv_id>/episode-ordering/",
+        episode_order_views.episode_ordering_settings,
+        name="episode_ordering_settings",
+    ),
     path(
         "image-cache/<str:token>",
         views.serve_image_cache,
@@ -60,6 +65,11 @@ urlpatterns = [
         "details/music/artist/<int:artist_id>/<slug:artist_slug>/album/<int:album_id>/<slug:album_slug>/",
         views.music_album_details,
         name="music_album_details",
+    ),
+    path(
+        "details/music/artist/<int:artist_id>/<slug:artist_slug>/album/<int:album_id>/<slug:album_slug>/track/<int:track_id>/<slug:track_slug>/",
+        views.music_track_details,
+        name="music_track_details",
     ),
     path(
         "details/music/album/<int:album_id>/releases",
@@ -172,6 +182,11 @@ urlpatterns = [
         "details/library-move-search/<int:item_id>",
         views.search_library_move_candidates,
         name="search_library_move_candidates",
+    ),
+    path(
+        "details/tv-provider-switch/<int:item_id>",
+        views.switch_tv_provider,
+        name="switch_tv_provider",
     ),
     path(
         "details/library-move/<int:item_id>",
@@ -333,6 +348,7 @@ urlpatterns = [
         name="update_artist_score",
     ),
     path("music/album/<int:album_id>/", views.album_detail, name="album_detail"),
+    path("music/track/<int:track_id>/", views.track_detail, name="track_detail"),
     path(
         "music/album/<int:album_id>/update-score/",
         views.update_album_score,
@@ -512,6 +528,16 @@ urlpatterns = [
     ),
     path("tag_item_toggle", views.tag_item_toggle, name="tag_item_toggle"),
     path("tag_bulk_toggle", views.tag_bulk_toggle, name="tag_bulk_toggle"),
+    path(
+        "bulk/status",
+        views.bulk_status_update,
+        name="bulk_status_update",
+    ),
+    path(
+        "bulk/collection",
+        views.bulk_collection_quick_add,
+        name="bulk_collection_quick_add",
+    ),
     path("tag_create", views.tag_create, name="tag_create"),
     path("tag_delete", views.tag_delete, name="tag_delete"),
 ]

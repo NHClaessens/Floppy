@@ -2,8 +2,10 @@ import calendar
 from datetime import UTC, date, timedelta
 from unittest.mock import patch
 
+import icalendar
 from django.contrib.auth import get_user_model
 from django.contrib.messages import get_messages
+from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -487,6 +489,42 @@ class CalendarViewTests(TestCase):
             response.context["available_media_types"],
         )
 
+    @patch("events.models.Event.objects.get_user_events")
+    @patch.object(get_user_model(), "update_preference")
+    def test_calendar_filter_media_types_include_season_when_tv_enabled(
+        self,
+        mock_update_preference,
+        mock_get_user_events,
+    ):
+        """Season releases should stay filterable when TV Shows is enabled, even if TV Seasons is disabled."""
+        mock_update_preference.return_value = "grid"
+
+        season_item = Item.objects.create(
+            media_id="tv-season-1",
+            source=Sources.MANUAL.value,
+            media_type=MediaTypes.SEASON.value,
+            title="Episodic Show",
+            season_number=1,
+        )
+        today = timezone.localdate()
+        mock_get_user_events.return_value = [
+            Event(
+                item=season_item,
+                datetime=timezone.make_aware(
+                    timezone.datetime(today.year, today.month, 15, 12, 0),
+                ),
+            ),
+        ]
+
+        self.user.tv_enabled = True
+        self.user.season_enabled = False
+        self.user.save(update_fields=["tv_enabled", "season_enabled"])
+
+        response = self.client.get(reverse("calendar"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(MediaTypes.SEASON.value, response.context["filter_media_types"])
+
     @patch("events.tasks.reload_calendar.delay")
     def test_reload_calendar(self, mock_reload_task):
         """Test the reload_calendar view."""
@@ -518,6 +556,8 @@ class DownloadCalendarViewTests(TestCase):
 
     def setUp(self):
         """Set up test data."""
+        # The rendered feed is cached per user; rolled-back test users reuse ids.
+        cache.clear()
         self.credentials = {"username": "caluser", "password": "testpassword"}
         self.user = get_user_model().objects.create_user(**self.credentials)
 
@@ -728,6 +768,49 @@ class DownloadCalendarViewTests(TestCase):
         self.assertIn(f"DTSTART:{expected}", body)
         self.assertIn(f"DTEND:{expected}", body)
 
+    def test_download_calendar_feed_parses_with_escaped_and_folded_summaries(self):
+        """The hand-written feed round-trips through a real iCalendar parser.
+
+        Summaries with characters that need escaping, non-ASCII text and a
+        title long enough to fold must come back exactly as stored, and no
+        physical line may exceed 75 octets.
+        """
+        titles = [
+            "Comma, Semicolon; Backslash \\ and\nNewline",
+            "Ünïcödé 映画 " * 8,
+            "A very long title " * 12,
+        ]
+        Event.objects.filter(pk=self.season_event.pk).delete()
+        for index, title in enumerate(titles):
+            item = Item.objects.create(
+                media_id=f"escape-{index}",
+                source=Sources.MANUAL.value,
+                media_type=MediaTypes.MOVIE.value,
+                title=title,
+                image="https://example.com/movie.jpg",
+            )
+            Movie.objects.create(item=item, user=self.user, status=Status.PLANNING.value)
+            Event.objects.create(item=item, datetime=timezone.now())
+
+        response = self.client.get(
+            reverse("download_calendar", kwargs={"token": self.user.token}),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        for physical_line in response.content.decode().split("\r\n"):
+            self.assertLessEqual(len(physical_line.encode()), 75)
+        calendar_file = icalendar.Calendar.from_ical(response.content)
+        summaries = {
+            str(component["SUMMARY"])
+            for component in calendar_file.walk("VEVENT")
+        }
+        self.assertLessEqual(set(titles), summaries)
+        self.assertEqual(str(calendar_file["VERSION"]), "2.0")
+        self.assertEqual(str(calendar_file["PRODID"]), "-//Floppy//EN")
+        for component in calendar_file.walk("VEVENT"):
+            self.assertTrue(component["UID"])
+            self.assertTrue(component["DTSTAMP"].dt)
+
     def test_download_calendar_allows_head_requests(self):
         """HEAD requests should be accepted for calendar clients."""
         response = self.client.head(
@@ -754,3 +837,21 @@ class DownloadCalendarViewTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 405)
+
+
+class CalendarFeedCacheTests(TestCase):
+    """Calendar apps poll the feed; a repeat fetch reuses the rendered file."""
+
+    def setUp(self):
+        cache.clear()
+        self.user = get_user_model().objects.create_user(username="feedcache")
+
+    def test_repeat_fetch_skips_the_event_query(self):
+        url = reverse("download_calendar", kwargs={"token": self.user.token})
+        self.assertEqual(self.client.get(url).status_code, 200)
+
+        with self.assertNumQueries(1):  # the token lookup only
+            response = self.client.get(url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"BEGIN:VCALENDAR", response.content)

@@ -17,7 +17,11 @@ class HorizontalScrollContractTests(SimpleTestCase):
         self.assertIn('data-horizontal-drag="true"', row)
         self.assertIn('tabindex="0"', row)
         self.assertIn('role="region"', row)
-        self.assertIn('aria-label="{% firstof row.title row.title_main %}"', row)
+        self.assertIn('aria-label="{{ translated_title_main }}"', row)
+        self.assertIn(
+            'aria-label="{{ translated_title_main }} • {{ translated_title_detail }}"',
+            row,
+        )
         # Filter arguments raise VariableDoesNotExist when the key is missing,
         # so the label must not resolve row.title_main as a `default` argument:
         # rows built outside the home screen only carry `title`. See #1139.

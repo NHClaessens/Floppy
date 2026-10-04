@@ -296,7 +296,8 @@ def fetch_hltb_search(title: str) -> dict[str, Any]:
 
 
 def _fetch_hltb_search_auth() -> dict[str, str]:
-    response = provider_services.session.get(
+    response = provider_services.resilient_request(
+        "GET",
         f"{HLTB_BASE_URL}/api/bleed/init",
         params={"t": int(timezone.now().timestamp() * 1000)},
         headers=HLTB_BROWSER_HEADERS,
@@ -323,7 +324,8 @@ def _fetch_hltb_search_auth() -> dict[str, str]:
 
 def _post_hltb_search(title: str, auth: dict[str, str]):
     payload = _build_hltb_search_payload(title, auth)
-    return provider_services.session.post(
+    return provider_services.resilient_request(
+        "POST",
         f"{HLTB_BASE_URL}/api/bleed",
         json=payload,
         headers={
@@ -377,7 +379,8 @@ def fetch_hltb_detail(hltb_id: int | str) -> dict[str, Any]:
         msg = f"Invalid HLTB id: {hltb_id!r}"
         raise ValueError(msg)
 
-    response = provider_services.session.get(
+    response = provider_services.resilient_request(
+        "GET",
         f"{HLTB_BASE_URL}/game/{normalized_id}",
         headers=HLTB_HTML_HEADERS,
         timeout=settings.REQUEST_TIMEOUT,

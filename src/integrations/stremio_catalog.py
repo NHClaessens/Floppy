@@ -6,7 +6,7 @@ from urllib.parse import parse_qsl, unquote
 
 from django.db.models import F, Max
 
-from app.models import TV, MediaTypes, Movie, Sources, Status
+from app.models import TV, MediaTypes, Movie, Season, Sources, Status
 from lists.models import CustomList, CustomListItem
 
 PAGE_SIZE = 100
@@ -79,6 +79,10 @@ TRACKED_MODELS = {
     MediaTypes.MOVIE.value: Movie,
     MediaTypes.TV.value: TV,
 }
+
+SERIES_COMPATIBLE_SMART_TYPES = frozenset(
+    {MediaTypes.TV.value, MediaTypes.SEASON.value},
+)
 
 CONFIG_SEPARATOR = ","
 
@@ -179,18 +183,70 @@ def get_catalog_spec(stremio_type, catalog_id):
     )
 
 
+def _compatible_smart_types(spec):
+    """Return the smart-list media types this catalog can actually project."""
+    return (
+        SERIES_COMPATIBLE_SMART_TYPES
+        if spec.media_type == MediaTypes.TV.value
+        else {spec.media_type}
+    )
+
+
+def _list_feeds_catalog(candidate, spec):
+    """Return whether a named-list match can actually feed this catalog.
+
+    A non-smart (manually curated) list can hold anything, and its items are
+    already filtered by media type per-item in ``list_source_items``, so it
+    always qualifies. A smart list only qualifies if its own filter admits at
+    least one of the catalog's compatible types; an empty filter means "no
+    type restriction", which also always qualifies.
+    """
+    if not candidate.is_smart:
+        return True
+    smart_types = set(candidate.smart_media_types or [])
+    if not smart_types:
+        return True
+    return bool(smart_types & _compatible_smart_types(spec))
+
+
 def select_source_list(user, spec):
-    """Select the oldest owned preferred list, then the oldest owned Watchlist."""
+    """Select the oldest owned preferred list, then the oldest owned Watchlist.
+
+    Either name-based match is skipped if it is a smart list whose own filter
+    can never admit this catalog's media type (e.g. a movie-only "Watchlist"
+    when resolving the series catalog), so a differently named smart list that
+    actually fits isn't shadowed by it.
+
+    Falls back to the oldest smart list whose own filter already matches this
+    catalog's media type, so a freshly created smart list (e.g. one filtered
+    to Seasons only) is picked up without having to be named "Series" or
+    "Watchlist".
+    """
     owned_lists = CustomList.objects.filter(owner=user)
     source_list = (
         owned_lists.filter(name__iexact=spec.preferred_list_name)
         .order_by("id")
         .first()
     )
-    if source_list is not None:
+    if source_list is not None and _list_feeds_catalog(source_list, spec):
         return source_list
 
-    return owned_lists.filter(name__iexact="Watchlist").order_by("id").first()
+    source_list = owned_lists.filter(name__iexact="Watchlist").order_by("id").first()
+    if source_list is not None and _list_feeds_catalog(source_list, spec):
+        return source_list
+
+    return select_smart_list_by_media_type(owned_lists, spec)
+
+
+def select_smart_list_by_media_type(owned_lists, spec):
+    """Return the oldest smart list whose filter fits this catalog, if any."""
+    compatible = _compatible_smart_types(spec)
+    candidates = owned_lists.filter(is_smart=True).order_by("id")
+    for candidate in candidates.iterator():
+        smart_types = set(candidate.smart_media_types or [])
+        if smart_types and smart_types.issubset(compatible):
+            return candidate
+    return None
 
 
 def catalog_display_name(user, spec):
@@ -283,13 +339,7 @@ def local_imdb_id(item):
 
 
 def catalog_readiness(user):
-    """Return per-catalog publishable/unresolved counts for the settings page.
-
-    project_catalog() already counts the items it has to drop for want of an
-    IMDb ID, but only logs it. Surfacing the same number tells users whether a
-    thin catalog is a Floppy problem they need to wait out or a list they need
-    to fill (issue #1066).
-    """
+    """Return per-catalog publishable/unresolved counts for the settings page."""
     readiness = []
     for spec in CATALOG_SPECS:
         if spec.statuses:
@@ -356,8 +406,44 @@ def list_source_items(user, spec):
         .select_related("item")
         .order_by("-date_added", "-id")
     )
+
+    seen_item_ids = set()
     for membership in memberships.iterator():
+        seen_item_ids.add(membership.item.pk)
         yield membership.item
+
+    if source_list.is_smart and spec.media_type == MediaTypes.TV.value:
+        for parent_item in smart_season_parent_items(user, source_list):
+            if parent_item.pk in seen_item_ids:
+                continue
+            seen_item_ids.add(parent_item.pk)
+            yield parent_item
+
+
+def smart_season_parent_items(user, source_list):
+    """Yield parent TV items for smart-list seasons, newest season release first."""
+    seen_item_ids = set()
+    seasons = (
+        Season.objects.filter(
+            user=user,
+            item__customlistitem__custom_list=source_list,
+            item__media_type=MediaTypes.SEASON.value,
+        )
+        .select_related("item", "related_tv__item")
+        .order_by(
+            F("item__release_datetime").desc(nulls_last=True),
+            "related_tv__item__title",
+            "related_tv__item_id",
+            "-item__customlistitem__id",
+        )
+    )
+    for season in seasons.iterator():
+        parent_item = season.related_tv.item
+        parent_item_id = parent_item.pk
+        if parent_item_id in seen_item_ids:
+            continue
+        seen_item_ids.add(parent_item_id)
+        yield parent_item
 
 
 def last_watched_queryset(model, media_type, user, statuses):

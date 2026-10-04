@@ -32,6 +32,93 @@ from app.models import (
     Status,
     Track,
 )
+from app.providers import services
+
+
+class MediaSaveProviderFailure(TestCase):
+    """A provider that cannot supply a title is a failed save, not a 500."""
+
+    def setUp(self):
+        """Create a user and log in."""
+        self.credentials = {"username": "test", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        self.client.login(**self.credentials)
+
+    def _save_with_provider_status(self, status_code):
+        error = Exception("provider said no")
+        error.response = SimpleNamespace(status_code=status_code, headers={})
+        with patch(
+            "app.save_views.ensure_item_metadata",
+            side_effect=services.ProviderAPIError(Sources.POCKETCASTS.value, error),
+        ):
+            return self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "gone-show-uuid",
+                    "source": Sources.POCKETCASTS.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "status": Status.PLANNING.value,
+                },
+                follow=True,
+            )
+
+    def test_provider_404_shows_a_message_and_saves_nothing(self):
+        response = self._save_with_provider_status(404)
+
+        self.assertEqual(response.status_code, 200)
+        page_messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("no longer has this title" in m for m in page_messages))
+        self.assertFalse(Item.objects.filter(media_id="gone-show-uuid").exists())
+
+    def test_htmx_first_save_gets_a_toast_not_a_redirect(self):
+        error = Exception("provider said no")
+        error.response = SimpleNamespace(status_code=404, headers={})
+        with patch(
+            "app.save_views.ensure_item_metadata",
+            side_effect=services.ProviderAPIError(Sources.POCKETCASTS.value, error),
+        ):
+            response = self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "gone-show-uuid",
+                    "source": Sources.POCKETCASTS.value,
+                    "media_type": MediaTypes.PODCAST.value,
+                    "status": Status.PLANNING.value,
+                },
+                HTTP_HX_REQUEST="true",
+            )
+
+        self.assertEqual(response.status_code, 502)
+        toast = json.loads(response["HX-Trigger"])["showToast"]
+        self.assertEqual(toast["type"], "error")
+        self.assertIn("no longer has this title", toast["message"])
+
+    def test_unconfigured_provider_keeps_setup_guidance(self):
+        with patch(
+            "app.save_views.ensure_item_metadata",
+            side_effect=services.ProviderNotConfiguredError(
+                Sources.IGDB.value,
+                "IGDB credentials are not set.",
+            ),
+        ):
+            response = self.client.post(
+                reverse("media_save"),
+                {
+                    "media_id": "1",
+                    "source": Sources.IGDB.value,
+                    "media_type": MediaTypes.GAME.value,
+                    "status": Status.PLANNING.value,
+                },
+            )
+
+        self.assertEqual(response.status_code, 503)
+
+    def test_provider_outage_asks_the_user_to_retry(self):
+        response = self._save_with_provider_status(503)
+
+        self.assertEqual(response.status_code, 200)
+        page_messages = [str(m) for m in response.context["messages"]]
+        self.assertTrue(any("did not respond" in m for m in page_messages))
 
 
 class CreateMedia(TestCase):
@@ -1289,7 +1376,7 @@ class EditMedia(TestCase):
 
     @patch("app.models.providers.services.get_media_metadata")
     def test_edit_episode_tracking_details(self, metadata_mock):
-        """Episode edits should persist the shared tracker fields."""
+        """Episode edits and save-as-new submissions persist the right row."""
         metadata_mock.return_value = {"season/1": {"episodes": []}}
         season_item = Item.objects.create(
             media_id="episode-edit-1",
@@ -1343,6 +1430,46 @@ class EditMedia(TestCase):
         self.assertIsNone(episode.end_date)
         self.assertEqual(episode.notes, "Paused midway")
         self.assertFalse(episode.dropped)
+        metadata_mock.return_value = {
+            "max_progress": 1,
+            "season/1": {
+                "details": {"episodes": 1},
+                "episodes": [{"episode_number": 1}],
+            },
+        }
+        operation_id = uuid4()
+        with (
+            patch("app.save_views.resolve_episode_coordinate"),
+            patch(
+                "app.save_views.fork_services_episode.resolve_or_create_season",
+                return_value=season,
+            ),
+        ):
+            response = self.client.post(
+                reverse("episode_save"),
+                {
+                    "instance_id": episode.id,
+                    "save_as_new_entry": "1",
+                    "media_id": episode_item.media_id,
+                    "source": episode_item.source,
+                    "media_type": MediaTypes.EPISODE.value,
+                    "season_number": 1,
+                    "episode_number": 1,
+                    "end_date": "2025-01-03",
+                    "notes": "Second watch",
+                    "watch_operation_id": operation_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 302)
+        history = Episode.objects.filter(item=episode_item).order_by("id")
+        self.assertEqual(history.count(), 2)
+        episode.refresh_from_db()
+        self.assertEqual(episode.notes, "Paused midway")
+        new_entry = history.exclude(pk=episode.pk).get()
+        self.assertEqual(new_entry.notes, "Second watch")
+        self.assertEqual(new_entry.end_date.date().isoformat(), "2025-01-03")
+        self.assertEqual(new_entry.watch_operation_id, operation_id)
 
     def test_edit_movie_htmx_returns_inline_detail_update(self):
         """HTMX saves should update the detail tracker in place."""

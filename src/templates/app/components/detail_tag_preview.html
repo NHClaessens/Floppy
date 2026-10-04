@@ -1,4 +1,3 @@
-
 {% load i18n %}
 <div id="{{ preview_id }}"
      {% if swap_oob %}hx-swap-oob="outerHTML"{% endif %}
@@ -6,7 +5,7 @@
   {% if detail_tag_sections %}
     {% for detail_tag_section in detail_tag_sections %}
       <div class="{% if not forloop.first %}mt-3 border-t border-[var(--color-border)] pt-3{% endif %}">
-        <div class="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]">{{ detail_tag_section.title }}</div>
+        <div class="mb-2 text-xs font-semibold uppercase tracking-[0.12em] text-[var(--color-text-muted)]">{% if detail_tag_section.title == "External links" %}{% translate "External links" %}{% else %}{% translate detail_tag_section.title %}{% endif %}</div>
         {% if detail_tag_section.entries %}
           <div class="flex flex-wrap gap-2">
             {% for detail_tag in detail_tag_section.entries %}

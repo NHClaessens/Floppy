@@ -4,6 +4,7 @@ import logging
 from http import HTTPStatus as HTTP  # noqa: N814
 
 from rest_framework import views as drf_views
+from rest_framework.exceptions import NotFound
 from rest_framework.response import Response
 
 from app.discover import tab_cache as discover_tab_cache
@@ -79,8 +80,24 @@ class CollectionSeasonView(drf_views.APIView):
         return Response({"deleted": deleted_count}, status=HTTP.OK)
 
 
+class DiscoverOffError(NotFound):
+    """Raised when the account turned Discover off."""
+
+    default_detail = "Discover is turned off for this account."
+
+
+class DiscoverEnabledMixin:
+    """404 the Discover endpoints for users who turned Discover off."""
+
+    def initial(self, request, *args, **kwargs):
+        """Reject the request after authentication when Discover is off."""
+        super().initial(request, *args, **kwargs)
+        if not request.user.show_discover:
+            raise DiscoverOffError
+
+
 # /api/v1/discover/
-class DiscoverRowsView(drf_views.APIView):
+class DiscoverRowsView(DiscoverEnabledMixin, drf_views.APIView):
     """Discover rows for a media type (mirrors the web Discover page data)."""
 
     def get(self, request):
@@ -107,7 +124,7 @@ class DiscoverRowsView(drf_views.APIView):
 
 
 # /api/v1/discover/refresh/
-class DiscoverRefreshView(drf_views.APIView):
+class DiscoverRefreshView(DiscoverEnabledMixin, drf_views.APIView):
     """Invalidate and queue a Discover refresh (mirrors refresh_discover)."""
 
     def post(self, request):
@@ -142,7 +159,7 @@ class DiscoverRefreshView(drf_views.APIView):
 
 
 # /api/v1/discover/hidden/
-class DiscoverHiddenView(drf_views.APIView):
+class DiscoverHiddenView(DiscoverEnabledMixin, drf_views.APIView):
     """List or toggle items hidden from Discover."""
 
     def get(self, request):

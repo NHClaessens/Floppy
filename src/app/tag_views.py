@@ -295,7 +295,9 @@ def tag_index(request):
             {
                 "media_type": media_type,
                 "count": row["count"],
-                "url": f"{reverse('medialist', kwargs={'media_type': media_type})}?{urlencode({'tag': tag.name})}",
+                # Empty status clears the saved status filter, which would
+                # otherwise hide tagged entries this count includes.
+                "url": f"{reverse('medialist', kwargs={'media_type': media_type})}?{urlencode({'tag': tag.name, 'status': ''})}",
             },
         )
 

@@ -19,7 +19,7 @@ from app.log_safety import exception_summary, redact_secrets
 from app.models import MediaTypes, Sources, Status
 from app.providers import services
 from app.providers.igdb import ExternalGameSource, external_game
-from integrations import import_progress, xbox_api
+from integrations import connection_health, import_progress, xbox_api
 from integrations.imports import helpers, title_matching
 from integrations.imports.helpers import MediaImportError
 from integrations.models import XboxAccount
@@ -125,7 +125,7 @@ class XboxImporter:
         try:
             self.api_key = helpers.decrypt_or_raise(self.account.api_key)
         except MediaImportError as decrypt_error:
-            self._mark_broken(str(decrypt_error))
+            self._mark_failed(str(decrypt_error), auth=True)
             raise
 
         self.existing_media = helpers.get_existing_media(user)
@@ -157,7 +157,10 @@ class XboxImporter:
                 titles.keys(),
             )
         except MediaImportError as error:
-            self._mark_broken(str(error))
+            self._mark_failed(
+                str(error),
+                auth=isinstance(error, helpers.ConnectionAuthError),
+            )
             raise
         except Exception as error:
             # xbox_api translates the failures it knows about; anything else
@@ -172,7 +175,7 @@ class XboxImporter:
                 "Xbox import failed while fetching your library "
                 f"({exception_summary(error)}). Check the logs for details."
             )
-            self._mark_broken(msg)
+            self._mark_failed(msg, auth=False)
             raise MediaImportError(msg) from error
 
         if not titles:
@@ -207,7 +210,7 @@ class XboxImporter:
                     f"All {self.lookup_failures} of {total} Xbox titles failed "
                     f"to import. First error: {self.first_failure}"
                 )
-            self._mark_broken(msg)
+            self._mark_failed(msg, auth=False)
             raise MediaImportError(msg)
 
         helpers.bulk_create_media(self.bulk_media, self.user)
@@ -256,29 +259,20 @@ class XboxImporter:
                 "OpenXBL returned no XUID for this API key. "
                 "Reconnect your Xbox account."
             )
-            raise MediaImportError(msg)
+            raise helpers.ConnectionAuthError(msg)
         return xuid
 
     def _mark_synced(self):
         """Record a successful sync on the account row."""
         self.account.last_sync_at = timezone.now()
-        self.account.connection_broken = False
-        self.account.last_error_message = ""
-        self.account.save(
-            update_fields=[
-                "last_sync_at",
-                "connection_broken",
-                "last_error_message",
-                "updated_at",
-            ],
-        )
+        connection_health.record_success(self.account, extra_fields=["last_sync_at"])
 
-    def _mark_broken(self, message):
-        """Flag the account as needing attention, storing a scrubbed reason."""
-        self.account.connection_broken = True
-        self.account.last_error_message = _safe_message(message)
-        self.account.save(
-            update_fields=["connection_broken", "last_error_message", "updated_at"],
+    def _mark_failed(self, message, *, auth):
+        """Store a scrubbed failure; only rejected credentials mark it broken."""
+        connection_health.record_failure(
+            self.account,
+            _safe_message(message),
+            auth=auth,
         )
 
     def _record_failure(self, detail):

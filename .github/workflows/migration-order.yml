@@ -1,0 +1,75 @@
+name: Migration Order
+
+# Stops two pull requests from adding clashing migrations (the same number, or
+# two leaf nodes). Each one passes CI on its own, so both used to auto-merge and
+# break latest. A pull request that touches a migration now has to contain every
+# migration already on latest. Pull requests without migrations always pass.
+#
+# Needs "migration-order" added to the required status checks of the ruleset on
+# latest. It runs on every pull request, with no path filter, so a docs or
+# workflow-only pull request still gets the (passing) result.
+#
+# When a migration lands on latest, the second job re-runs the check on every
+# open pull request, so one that was green before is held back until it has
+# merged latest again.
+
+on:
+  pull_request:
+  push:
+    branches:
+      - latest
+    paths:
+      - "src/*/migrations/**"
+
+permissions:
+  contents: read
+
+jobs:
+  migration-order:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout pull request head
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check migrations against the base branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          # Only latest has this problem; release PRs are not checked.
+          if [ "$BASE_REF" != "latest" ]; then
+            echo "Base branch is $BASE_REF; nothing to order."
+            exit 0
+          fi
+          # Fetch latest now rather than trusting the checkout, because this job
+          # can be re-run after latest has moved.
+          git fetch --no-tags origin latest
+          python3 scripts/check_migration_order.py HEAD origin/latest
+
+  recheck-open-pull-requests:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+      pull-requests: read
+    steps:
+      - name: Re-run the check on open pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh pr list --base latest --state open --json number,headRefOid \
+            --jq '.[] | "\(.number) \(.headRefOid)"' |
+          while read -r number sha; do
+            run_id=$(gh run list --workflow migration-order.yml --event pull_request \
+              --commit "$sha" --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            if [ -z "$run_id" ]; then
+              echo "#$number: no run for $sha"
+              continue
+            fi
+            echo "#$number: re-running $run_id"
+            gh run rerun "$run_id" || echo "#$number: could not re-run (still running?)"
+          done

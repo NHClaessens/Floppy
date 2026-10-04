@@ -94,6 +94,32 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1=[REDACTED]",
     ),
+    (
+        # urllib3's connection-pool debug logging writes the literal host it
+        # dials, e.g. "Starting new HTTPS connection (1): myserver.duckdns.org".
+        # For a Plex custom server URL that host is a direct route to a
+        # self-hosted server (#1274), so it is redacted the same way a
+        # credential is, independent of the keyword-name rules above.
+        re.compile(r"(?im)(Starting new \S+ connection \(\d+\):\s*)\S+"),
+        r"\1[REDACTED]",
+    ),
+    (
+        # The matching request-line log from the same logger:
+        # 'https://myserver.duckdns.org:32400 "GET /path HTTP/1.1" 200 760'.
+        # Matched by the quoted HTTP method that follows, so this does not
+        # touch an ordinary URL logged elsewhere via safe_url().
+        re.compile(
+            r'(?im)(https?://)\S+(\s+"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s)',
+        ),
+        r"\1[REDACTED]\2",
+    ),
+    (
+        # urllib3 names the host in its error text, which reaches Celery's
+        # failure line and the traceback: "HTTPSConnectionPool(host=
+        # 'myserver.duckdns.org', port=443): Read timed out." (#1307).
+        re.compile(r"(?i)(\bHTTPS?ConnectionPool\(host=)(['\"])[^'\"]*\2"),
+        r"\1\2[REDACTED]\2",
+    ),
 ]
 
 
@@ -111,6 +137,55 @@ def redact_secrets(text: str) -> str:
     for pattern, replacement in _SECRET_PATTERNS:
         redacted = pattern.sub(replacement, redacted)
     return redacted
+
+
+_REDACTED_VALUE = "[REDACTED]"
+
+# Structured payload keys that name a person, a device, or a private server
+# rather than the media event a log line exists to diagnose. Matched
+# case-insensitively on the whole key.
+_PII_FIELD_NAMES = frozenset(
+    {
+        "publicaddress",
+        "public_address",
+        "uuid",
+        "machineidentifier",
+        "machine_identifier",
+        "librarysectiontitle",
+        "library_section_title",
+    }
+)
+
+# Identity containers are redacted whole. A Plex "Account" is a person's
+# identity and a "Server" is a private server's name and machine identifier;
+# no field in either is needed to diagnose media routing. "Player" is not a
+# container because its connection and platform fields are diagnostic, so only
+# the address and device identifiers inside it are redacted.
+_PII_CONTAINER_NAMES = frozenset({"account", "server"})
+
+
+def redact_payload_pii(value: Any) -> Any:
+    """Return a copy of a structured payload with identity fields redacted.
+
+    Webhook payloads carry a person's account identity, a device's public
+    address, and a private server's name and machine identifier next to the
+    media event a log line exists to diagnose. A text rule cannot tell
+    ``Account.title`` from ``Metadata.title``, so match on structure: redact the
+    containers that are identity end to end, and the named fields everywhere
+    else. The input is not modified.
+    """
+    if isinstance(value, Mapping):
+        redacted: dict[Any, Any] = {}
+        for key, item in value.items():
+            name = str(key).strip().casefold()
+            if name in _PII_CONTAINER_NAMES or name in _PII_FIELD_NAMES:
+                redacted[key] = _REDACTED_VALUE
+            else:
+                redacted[key] = redact_payload_pii(item)
+        return redacted
+    if isinstance(value, (list, tuple)):
+        return [redact_payload_pii(item) for item in value]
+    return value
 
 
 _REDACTING_FACTORY_MARKER = "_floppy_redacts_secrets"

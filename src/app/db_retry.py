@@ -36,6 +36,18 @@ def is_lock_error(error: BaseException) -> bool:
     return any(signal in message for signal in LOCK_ERROR_SIGNALS)
 
 
+def is_contention_error(error: BaseException) -> bool:
+    """Recognize transient SQLite locks and PostgreSQL transaction conflicts."""
+    if is_lock_error(error):
+        return True
+    current = error
+    while current is not None:
+        if getattr(current, "sqlstate", None) in {"40P01", "40001", "55P03"}:
+            return True
+        current = current.__cause__
+    return False
+
+
 def is_disk_io_error(error: BaseException) -> bool:
     """Return True if the OperationalError was caused by a disk I/O error."""
     message = str(error).lower()

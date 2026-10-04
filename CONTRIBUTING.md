@@ -15,6 +15,7 @@ Our bar is practical: **make changes clean, minimal, safe, and well-understood.*
 | **Python Tooling** | Python 3.12 + `uv` | `uv sync --locked` |
 | **Tailwind CSS** | Pinned repo CLI output to `src/static/css/main.css` | `npx @tailwindcss/cli -i ./src/static/css/input.css -o ./src/static/css/main.css` |
 | **Fast Tests** | Targeted test runner | `SECRET=test-only scripts/test.sh <dotted.path>` |
+| **Faster Tests** | Skip the 141s migration replay while iterating (not for migration changes) | `FLOPPY_TEST_FAST_DB=1 SECRET=test-only scripts/test.sh <dotted.path>` |
 | **Lint / Style** | Ruff (line length 88, migrations excluded) | `uv run --no-sync ruff check src` |
 
 ---
@@ -123,7 +124,7 @@ The template requires:
    - **Disclose workflows used**: State tools and review workflows utilized (e.g., gstack QA, Ponytail review, OpenSpec, manual testing).
    > Note: A generic tool wrapper name alone ("Cursor", "Claude Code", "Copilot") is **insufficient**. You must state the underlying model.
 4. **Checks Run**: List the exact commands, tests, screenshots, or manual checks completed and their outcomes.
-5. **Screenshots**: Required for all UI, CSS, template, and visual layout changes (before/after for bug fixes, after for new UI).
+5. **Screenshots**: Required for all UI, CSS, template, and visual layout changes (before/after for bug fixes, after for new UI). A short screen recording is fine too. If an AI agent did the work, include screenshots of the running app or a link to a published artifact page showing them. If nothing visible changed, tick "No UI change" in the template.
 6. **Engineering, Security, and UX Checklist**: Confirm the plain-language checklist items in the template. The technical terms in parentheses provide context; reviewers should not need to know them in advance.
 
 ---

@@ -29,7 +29,7 @@
     "jellyfinWebhook": {
       "address": "/webhook/jellyfin/{token}",
       "title": "jellyfinWebhook",
-      "summary": "Jellyfin playback webhook.",
+      "summary": "Jellyfin playback, user-rating, and watched-toggle webhook.",
       "messages": {
         "request": {
           "$ref": "#/components/messages/jellyfinWebhookRequest"
@@ -123,7 +123,7 @@
       "channel": {
         "$ref": "#/channels/jellyfinWebhook"
       },
-      "summary": "Jellyfin playback webhook."
+      "summary": "Jellyfin playback, user-rating, and watched-toggle webhook."
     },
     "receiveEmbyWebhook": {
       "action": "receive",
@@ -181,7 +181,7 @@
       },
       "jellyfinWebhookRequest": {
         "name": "jellyfinWebhookRequest",
-        "title": "Jellyfin playback webhook.",
+        "title": "Jellyfin playback, user-rating, and watched-toggle webhook.",
         "contentType": "application/json",
         "payload": {
           "type": "object"

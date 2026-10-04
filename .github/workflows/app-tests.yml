@@ -15,6 +15,7 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  actions: read
 
 jobs:
   check-workflow-changes:
@@ -51,6 +52,8 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -84,29 +87,75 @@ jobs:
           if [ -n "${{ secrets.HARDCOVER_API }}" ]; then echo "HARDCOVER_API=${{ secrets.HARDCOVER_API }}" >> $GITHUB_ENV; fi
           if [ -n "${{ secrets.COMICVINE_API }}" ]; then echo "COMICVINE_API=${{ secrets.COMICVINE_API }}" >> $GITHUB_ENV; fi
 
+      - name: Migration hygiene
+        run: uv run --no-sync python src/manage.py check_migration_hygiene --strict
+
+      - name: Download affected map
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .floppy
+          run_id="$(gh run list \
+            --repo "${{ github.repository }}" \
+            --workflow app-tests.yml \
+            --branch latest \
+            --status success \
+            --limit 1 \
+            --json databaseId \
+            --jq '.[0].databaseId')"
+          if [ -z "$run_id" ] || [ "$run_id" = "null" ]; then
+            echo "no successful app-tests run on latest"
+            exit 0
+          fi
+          gh run download "$run_id" \
+            --repo "${{ github.repository }}" \
+            --name affected-map \
+            --dir .floppy
+
       - name: Run Tests
+        env:
+          COVERAGE_CORE: ctrace
         run: |
           # Tests tagged "network" call live provider APIs. They are slow and
           # flaky, and a pull request from a fork cannot read repository secrets,
           # so they fail there regardless of the change. Run them deliberately
           # with scripts/test.sh --network.
           #
-          # Keep this app list the same as APPS in scripts/test.sh. The runner
-          # names apps rather than discovering them, so an app that is missing
-          # here has no test on a pull request while it still passes locally.
-          # "config" holds the settings, the startup integrity check and the
-          # recovery page; "api" holds the endpoint and contract suites.
-          uv run --no-sync coverage run src/manage.py test \
-            app users integrations lists events api config \
-            --parallel --exclude-tag network
+          # A pull request runs the tests that executed the changed lines, from
+          # the map uploaded by the last successful run on latest. No map, a
+          # template or static diff, or a runner change falls through to the
+          # full app list. Push to latest and release still run that full list
+          # and record the next map.
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            scripts/test.sh --affected --include-slow
+          else
+            uv run --no-sync coverage run src/manage.py test \
+              app users integrations lists events api config \
+              --parallel --exclude-tag network
+          fi
 
       - name: Build Coverage Report
+        if: github.event_name != 'pull_request'
         run: |
           uv run --no-sync coverage combine
+          mkdir -p .floppy
+          cp .coverage .floppy/affected.coverage
           uv run --no-sync coverage report
           uv run --no-sync coverage xml
 
+      - name: Upload affected map
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: affected-map
+          path: .floppy/affected.coverage
+          retention-days: 14
+          if-no-files-found: error
+
       - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request'
         uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}

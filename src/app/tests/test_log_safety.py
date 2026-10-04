@@ -7,6 +7,7 @@ from app.log_safety import (
     exception_summary,
     install_redacting_log_record_factory,
     presence_map,
+    redact_payload_pii,
     redact_secrets,
     safe_url,
     stable_hmac,
@@ -187,6 +188,62 @@ class LogSafetyTests(SimpleTestCase):
             redact_secrets("headers={'trakt-api-key': 'floppy-web'}"),
         )
 
+    def test_redact_secrets_strips_urllib3_connection_host(self):
+        """A urllib3 debug log names the literal host it dials.
+
+        For a Plex custom server, that host is a direct route to the user's
+        self-hosted server (#1274), so it is redacted like a credential.
+        """
+        line = "Starting new HTTPS connection (1): myserver.duckdns.org:32400"
+
+        result = redact_secrets(line)
+
+        self.assertNotIn("myserver.duckdns.org", result)
+        self.assertEqual(
+            result, "Starting new HTTPS connection (1): [REDACTED]"
+        )
+
+    def test_redact_secrets_strips_urllib3_request_line_host(self):
+        line = (
+            'https://myserver.duckdns.org:32400 '
+            '"GET /library/sections?X-Plex-Token=abc HTTP/1.1" 200 760'
+        )
+
+        result = redact_secrets(line)
+
+        self.assertNotIn("myserver.duckdns.org", result)
+        self.assertEqual(
+            result,
+            'https://[REDACTED] "GET /library/sections?X-Plex-Token='
+            '[REDACTED] HTTP/1.1" 200 760',
+        )
+
+    def test_redact_secrets_strips_urllib3_connection_pool_host(self):
+        """urllib3's error text names the host in Celery failures (#1307)."""
+        line = (
+            'raised unexpected: ReadTimeout(ReadTimeoutError("HTTPSConnectionPool('
+            "host='myserver.duckdns.org', port=443): Read timed out. "
+            '(read timeout=20)"))'
+        )
+
+        result = redact_secrets(line)
+
+        self.assertNotIn("myserver.duckdns.org", result)
+        self.assertIn(
+            "HTTPSConnectionPool(host='[REDACTED]', port=443): Read timed out.",
+            result,
+        )
+
+    def test_redact_secrets_keeps_safe_url_diagnostics_intact(self):
+        """The urllib3 rules match only the third-party logger's own format.
+
+        A URL an app log line builds via ``safe_url()`` has no trailing
+        quoted HTTP method, so it must stay readable for diagnosis.
+        """
+        line = "plex sync failed for https://myserver.duckdns.org:32400/library/sections"
+
+        self.assertEqual(redact_secrets(line), line)
+
     def test_redact_secrets_strips_list_values(self):
         """Django writes form data as a QueryDict repr with list values."""
         result = redact_secrets("<QueryDict: {'password': ['plain-secret']}>")
@@ -213,6 +270,53 @@ class LogSafetyTests(SimpleTestCase):
     def test_redact_secrets_handles_empty_input(self):
         self.assertEqual(redact_secrets(""), "")
         self.assertEqual(redact_secrets(None), "")
+
+    def test_redact_payload_pii_redacts_plex_identity_fields(self):
+        """A Plex payload keeps its media event but loses the user and server."""
+        payload = {
+            "event": "media.play",
+            "owner": True,
+            "Account": {"id": 1234, "thumb": "https://plex.tv/a", "title": "alice"},
+            "Server": {"title": "Home", "uuid": "server-abc"},
+            "Player": {
+                "local": False,
+                "publicAddress": "203.0.113.9",
+                "uuid": "device-123",
+                "title": "Chromecast Google TV (HD)",
+            },
+            "Metadata": {"title": "Jumanji", "librarySectionTitle": "Movies"},
+        }
+
+        result = redact_payload_pii(payload)
+
+        self.assertEqual(result["Account"], "[REDACTED]")
+        self.assertEqual(result["Server"], "[REDACTED]")
+        self.assertEqual(result["Player"]["publicAddress"], "[REDACTED]")
+        self.assertEqual(result["Player"]["uuid"], "[REDACTED]")
+        self.assertEqual(result["Metadata"]["librarySectionTitle"], "[REDACTED]")
+        # Media identity and the event stay readable for diagnosis.
+        self.assertEqual(result["Metadata"]["title"], "Jumanji")
+        self.assertEqual(result["event"], "media.play")
+        self.assertFalse(result["Player"]["local"])
+        self.assertEqual(result["Player"]["title"], "Chromecast Google TV (HD)")
+
+    def test_redact_payload_pii_does_not_mutate_input(self):
+        payload = {"Account": {"title": "alice"}}
+
+        redact_payload_pii(payload)
+
+        self.assertEqual(payload["Account"]["title"], "alice")
+
+    def test_redact_payload_pii_walks_lists_and_leaves_scalars(self):
+        payload = {"items": [{"uuid": "x"}, {"title": "keep"}]}
+
+        result = redact_payload_pii(payload)
+
+        self.assertEqual(
+            result["items"],
+            [{"uuid": "[REDACTED]"}, {"title": "keep"}],
+        )
+        self.assertIsNone(redact_payload_pii(None))
 
     def test_record_factory_scrubs_rendered_arguments(self):
         install_redacting_log_record_factory()

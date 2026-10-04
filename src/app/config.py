@@ -134,7 +134,7 @@ MEDIA_TYPE_CONFIG = {
         "date_key": "end_date",
     },
     MediaTypes.MANGA.value: {
-        "sources": [Sources.MAL, Sources.MANGAUPDATES],
+        "sources": [Sources.MAL, Sources.MANGAUPDATES, Sources.MANGABAKA],
         "default_source": Sources.MAL,
         "unicode_icon": "📚",
         "verb": (gettext_noop("read"), gettext_noop("read")),
@@ -185,7 +185,7 @@ MEDIA_TYPE_CONFIG = {
         "unit": ("P", gettext_noop("Page")),
     },
     MediaTypes.COMIC.value: {
-        "sources": [Sources.COMICVINE],
+        "sources": [Sources.COMICVINE, Sources.GCD],
         "default_source": Sources.COMICVINE,
         "unicode_icon": "📕",
         "verb": (gettext_noop("read"), gettext_noop("read")),
@@ -199,7 +199,7 @@ MEDIA_TYPE_CONFIG = {
         "unit": ("#", gettext_noop("Issue")),
     },
     MediaTypes.COMIC_ISSUE.value: {
-        "sources": [Sources.COMICVINE],
+        "sources": [Sources.COMICVINE, Sources.GCD],
         "default_source": Sources.COMICVINE,
         "unicode_icon": "📄",
         "verb": (gettext_noop("read"), gettext_noop("read")),
@@ -279,7 +279,7 @@ COLLECTION_FIELD_CONFIG = {
             "media_type": "Format",
             "is_3d": "3D",
             "purchase_price": "Purchase Price",
-            "purchase_location": "Purchased From",
+            "purchase_location": "Location",
             "collected_at": "Collected At",
         },
         "choices": {
@@ -322,7 +322,7 @@ COLLECTION_FIELD_CONFIG = {
         "labels": {
             "media_type": "Format",
             "purchase_price": "Purchase Price",
-            "purchase_location": "Purchased From",
+            "purchase_location": "Location",
             "collected_at": "Collected At",
         },
         "choices": {
@@ -337,7 +337,7 @@ COLLECTION_FIELD_CONFIG = {
         "labels": {
             "media_type": "Format",
             "purchase_price": "Purchase Price",
-            "purchase_location": "Purchased From",
+            "purchase_location": "Location",
             "collected_at": "Collected At",
         },
         "choices": {
@@ -364,7 +364,7 @@ COLLECTION_FIELD_CONFIG = {
             "resolution": "Platform",
             "hdr": "Edition",
             "purchase_price": "Purchase Price",
-            "purchase_location": "Purchased From",
+            "purchase_location": "Location",
             "collected_at": "Collected At",
         },
         "choices": {
@@ -401,7 +401,7 @@ COLLECTION_FIELD_CONFIG = {
         "labels": {
             "media_type": "Format",
             "purchase_price": "Purchase Price",
-            "purchase_location": "Purchased From",
+            "purchase_location": "Location",
             "collected_at": "Collected At",
         },
         "choices": {

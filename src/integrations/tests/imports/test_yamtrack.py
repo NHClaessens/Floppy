@@ -249,6 +249,33 @@ class ImportYamtrackEpisodeHistoryDate(TestCase):
             datetime(2025, 11, 19, 19, 0, 5, tzinfo=UTC),
         )
 
+    def test_rewatched_episode_imports_both_watches(self):
+        """Two watches of the same episode, differing only by date, both import.
+
+        Regression test for #1183: the importer's duplicate-row check didn't
+        consider the watch date, so a rewatch of the same episode collapsed
+        into a single Episode row instead of creating a second one.
+        """
+        csv_data = """media_id,source,media_type,title,image,season_number,episode_number,score,progress,status,start_date,end_date,notes,progressed_at
+1668,tmdb,tv,Friends,https://image.url,,,,1,In progress,,,,2025-11-20T10:00:00+00:00
+1668,tmdb,season,Friends,https://image.url,1,,,1,In progress,,,,2025-11-20T10:00:00+00:00
+1668,tmdb,episode,Friends,https://image.url,1,1,,,,,2024-01-01T19:00:05+00:00,,
+1668,tmdb,episode,Friends,https://image.url,1,1,,,,,2025-11-19T19:00:05+00:00,,
+"""
+
+        counts, warnings = yamtrack.importer(BytesIO(csv_data.encode()), self.user, "new")
+
+        self.assertEqual(warnings, "")
+        self.assertEqual(
+            Episode.objects.filter(
+                related_season__user=self.user,
+                item__season_number=1,
+                item__episode_number=1,
+            ).count(),
+            2,
+        )
+        self.assertEqual(counts["episode"], 2)
+
     def test_unparseable_progressed_at_falls_back_to_import_time(self):
         """An unparseable progressed_at/end_date doesn't crash the import.
 
@@ -265,6 +292,50 @@ class ImportYamtrackEpisodeHistoryDate(TestCase):
         self.assertEqual(warnings, "")
         game = Game.objects.get(user=self.user)
         self.assertIsNotNone(game.history.get().history_date)
+
+    def test_overwrite_mode_replaces_game_sessions(self):
+        """Overwrite mode wipes old game sessions instead of appending to them.
+
+        Games have no unique(user, item) constraint - each session is its
+        own Game row, the same way a rewatched episode is its own Episode
+        row (#1183). Regression test for #1231: two session rows sharing
+        the same media_id (distinguished only by progressed_at) both got
+        queued for the overwrite-mode delete, then the second row
+        incorrectly undid the first row's queued delete, thinking it was a
+        later-batch repeat of an already-recreated item. The old session
+        survived and the new ones just piled on top of it.
+        """
+        original_csv = """media_id,source,media_type,title,image,season_number,episode_number,score,progress,status,start_date,end_date,notes,progressed_at
+1234,igdb,game,Some Game,https://image.url,,,,30,In progress,,,,2025-01-01T10:00:00+00:00
+"""
+        yamtrack.importer(BytesIO(original_csv.encode()), self.user, "new")
+        self.assertEqual(Game.objects.filter(user=self.user).count(), 1)
+
+        overwrite_csv = """media_id,source,media_type,title,image,season_number,episode_number,score,progress,status,start_date,end_date,notes,progressed_at
+1234,igdb,game,Some Game,https://image.url,,,,60,In progress,,,,2025-02-01T10:00:00+00:00
+1234,igdb,game,Some Game,https://image.url,,,,90,Completed,,,,2025-02-02T10:00:00+00:00
+"""
+        counts, warnings = yamtrack.importer(
+            BytesIO(overwrite_csv.encode()),
+            self.user,
+            "overwrite",
+        )
+
+        self.assertEqual(warnings, "")
+        self.assertEqual(counts["game"], 2)
+        games = Game.objects.filter(user=self.user)
+        self.assertEqual(games.count(), 2)
+        self.assertEqual(set(games.values_list("progress", flat=True)), {3600, 5400})
+        history_dates = {
+            game.history.get().history_date for game in games
+        }
+        self.assertEqual(
+            history_dates,
+            {
+                datetime(2025, 2, 1, 10, 0, tzinfo=UTC),
+                datetime(2025, 2, 2, 10, 0, tzinfo=UTC),
+            },
+        )
 
 
 class ImportYamtrackRaggedRows(TestCase):
@@ -488,6 +559,8 @@ class ImportYamtrackStatusNormalization(TestCase):
 class ImportYamtrackStatuslessRoundTrip(TestCase):
     """A rating-only media row survives an export/import cycle without a status."""
 
+    SCORED_AT = datetime(2021, 6, 1, 12, 0, tzinfo=UTC)
+
     def setUp(self):
         """Export a statusless, rated movie for a second user to import."""
         self.exporter = get_user_model().objects.create_user(
@@ -511,6 +584,7 @@ class ImportYamtrackStatuslessRoundTrip(TestCase):
             user=self.exporter,
             status=None,
             score=8,
+            scored_at=self.SCORED_AT,
         )
         self.csv_bytes = "".join(exports.generate_rows(self.exporter)).encode("utf-8")
 
@@ -521,6 +595,24 @@ class ImportYamtrackStatuslessRoundTrip(TestCase):
         movie = Movie.objects.get(user=self.importer_user)
         self.assertIsNone(movie.status)
         self.assertEqual(movie.score, 8)
+
+    def test_rating_time_round_trips(self):
+        """A restored rating keeps when it was given, not the import time (#1280)."""
+        yamtrack.importer(BytesIO(self.csv_bytes), self.importer_user, "new")
+
+        movie = Movie.objects.get(user=self.importer_user)
+        self.assertEqual(movie.scored_at, self.SCORED_AT)
+
+    def test_cleared_rating_time_round_trips(self):
+        """A cleared rating keeps its time, so the removal still syncs."""
+        Movie.objects.filter(user=self.exporter).update(score=None)
+        csv_bytes = "".join(exports.generate_rows(self.exporter)).encode("utf-8")
+
+        yamtrack.importer(BytesIO(csv_bytes), self.importer_user, "new")
+
+        movie = Movie.objects.get(user=self.importer_user)
+        self.assertIsNone(movie.score)
+        self.assertEqual(movie.scored_at, self.SCORED_AT)
 
 
 class ImportYamtrackTagsRoundTrip(TestCase):
@@ -902,3 +994,209 @@ class ImportYamtrackPodcastReferences(TestCase):
         self.assertIsNone(podcast.show)
         self.assertIsNone(podcast.episode)
         self.assertEqual(podcast.status, Status.COMPLETED.value)
+
+
+class ImportYamtrackSourceValidation(TestCase):
+    """Test that invalid source values are rejected during Yamtrack import."""
+
+    def setUp(self):
+        """Create user for the tests."""
+        self.credentials = {"username": "test", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        self.importer = yamtrack.YamtrackImporter(None, self.user, "new")
+
+    def _media_row(self, source):
+        """Return a minimal media row with a given source."""
+        return {
+            "media_id": "123",
+            "source": source,
+            "media_type": "movie",
+            "title": "Some Movie",
+            "image": "https://example.com/poster.jpg",
+            "season_number": "",
+            "episode_number": "",
+            "progress": "",
+            "status": "Completed",
+        }
+
+    def test_normalize_source_lowercases_and_strips(self):
+        """Source normalization mirrors the previous inline behavior."""
+        row = self._media_row("  TMDB  ")
+        self.assertEqual(self.importer._normalize_source(row), "tmdb")
+
+    def test_is_valid_source_accepts_enum_value(self):
+        """A valid enum source is accepted."""
+        row = self._media_row("tmdb")
+        self.assertTrue(self.importer.is_valid_source(row))
+
+    def test_is_valid_source_accepts_tvdb(self):
+        """TVDB is a valid enum source and must not be rejected."""
+        row = self._media_row("tvdb")
+        self.assertTrue(self.importer.is_valid_source(row))
+
+    def test_is_valid_source_rejects_garbage(self):
+        """A non-enum source is rejected and records a warning."""
+        row = self._media_row("not_a_real_source")
+        self.assertFalse(self.importer.is_valid_source(row))
+        self.assertTrue(
+            any("not_a_real_source" in w for w in self.importer.warnings),
+        )
+
+    def test_is_valid_source_allows_empty(self):
+        """An empty source is valid (resolved by title/ISBN) with no warning."""
+        row = self._media_row("")
+        self.assertTrue(self.importer.is_valid_source(row))
+        self.assertEqual(self.importer.warnings, [])
+
+    def test_invalid_source_media_row_skipped(self):
+        """A media row with an invalid source is skipped and creates no item."""
+        row = self._media_row("garbage")
+        self.importer._process_row(row)
+        self.assertEqual(Movie.objects.filter(user=self.user).count(), 0)
+        self.assertTrue(any("garbage" in w for w in self.importer.warnings))
+
+    def test_invalid_source_list_item_row_skipped(self):
+        """A list_item row with an invalid source is skipped."""
+        custom_list = CustomList.objects.create(name="Rejected", owner=self.user)
+        self.importer.list_map["rejected"] = custom_list
+        row = {
+            "row_type": "list_item",
+            "list_name": "Rejected",
+            "media_id": "123",
+            "source": "garbage",
+            "media_type": "movie",
+            "title": "Some Movie",
+            "image": "https://example.com/poster.jpg",
+            "season_number": "",
+            "episode_number": "",
+        }
+        self.importer._process_row(row)
+        self.assertEqual(
+            CustomListItem.objects.filter(custom_list=custom_list).count(),
+            0,
+        )
+        self.assertTrue(any("garbage" in w for w in self.importer.warnings))
+
+    def test_invalid_source_collection_row_skipped(self):
+        """A collection row with an invalid source is skipped, not aborting."""
+        row = self._media_row("garbage")
+        row["row_type"] = "collection"
+        self.importer._process_row(row)
+        self.assertEqual(Movie.objects.filter(user=self.user).count(), 0)
+        self.assertEqual(CollectionEntry.objects.filter(user=self.user).count(), 0)
+        self.assertTrue(any("garbage" in w for w in self.importer.warnings))
+
+    def test_invalid_source_list_item_leaves_no_list(self):
+        """A rejected list item does not provision its fallback list."""
+        row = {
+            "row_type": "list_item",
+            "list_name": "Orphan",
+            "media_id": "123",
+            "source": "garbage",
+            "media_type": "movie",
+            "title": "Some Movie",
+            "image": "https://example.com/poster.jpg",
+            "season_number": "",
+            "episode_number": "",
+        }
+        self.importer._process_row(row)
+        self.assertFalse(
+            CustomList.objects.filter(owner=self.user, name="Orphan").exists(),
+        )
+        self.assertTrue(any("garbage" in w for w in self.importer.warnings))
+
+
+class ImportYamtrackMediaIdValidation(TestCase):
+    """Non-numeric provider ids are healed by title instead of persisted (#1201).
+
+    A homemade import tool emitted UUIDs as TMDB media_ids. Those can never
+    resolve, so every metadata/genre/runtime backfill 404s and the imported
+    movies end up with no genres, breaking the genre filter.
+    """
+
+    def setUp(self):
+        """Create user for the tests."""
+        self.user = get_user_model().objects.create_user(
+            username="media-id-validation",
+            password="12345",
+        )
+
+    def _movie_csv(self, media_id, title="Some Movie"):
+        header = (
+            '"media_id","source","media_type","title","image","season_number",'
+            '"episode_number","score","progress","status","start_date","end_date",'
+            '"notes","progressed_at"\n'
+        )
+        row = (
+            f'"{media_id}","tmdb","movie","{title}",'
+            '"https://image.tmdb.org/t/p/w500/x.jpg","","","","1","Completed",'
+            '"","2024-02-09","","2024-02-09T15:30:00Z"'
+        )
+        return (header + row + "\n").encode("utf-8")
+
+    def _search_result(self, media_id="603", title="Some Movie"):
+        return {
+            "page": 1,
+            "total_results": 1,
+            "total_pages": 1,
+            "results": [
+                {
+                    "title": title,
+                    "source": "tmdb",
+                    "media_id": media_id,
+                    "image": "https://image.tmdb.org/t/p/w500/resolved.jpg",
+                },
+            ],
+        }
+
+    def test_non_numeric_tmdb_id_is_resolved_by_title(self):
+        """A UUID TMDB id is discarded and the row is matched by title."""
+        bad_id = "07b6ec19-40fb-5259-bb89-914b38eee381"
+        with patch(
+            "app.providers.services.search",
+            return_value=self._search_result(),
+        ) as mock_search:
+            yamtrack.importer(
+                BytesIO(self._movie_csv(bad_id)),
+                self.user,
+                "new",
+            )
+
+        mock_search.assert_called_once()
+        movie = Movie.objects.get(user=self.user)
+        self.assertEqual(movie.item.media_id, "603")
+        self.assertFalse(Item.objects.filter(media_id=bad_id).exists())
+
+    def test_unresolvable_title_is_skipped_with_a_warning(self):
+        """When no provider match exists the row is skipped, not persisted."""
+        with patch(
+            "app.providers.services.search",
+            return_value={
+                "page": 1,
+                "total_results": 0,
+                "total_pages": 1,
+                "results": [],
+            },
+        ):
+            counts, warnings = yamtrack.importer(
+                BytesIO(self._movie_csv("07b6ec19-40fb-5259-bb89-914b38eee381")),
+                self.user,
+                "new",
+            )
+
+        self.assertEqual(Movie.objects.filter(user=self.user).count(), 0)
+        self.assertIn("Could not resolve", warnings)
+
+    def test_numeric_tmdb_id_is_left_alone(self):
+        """A valid numeric TMDB id is not sent through title search."""
+        with patch("app.providers.services.search") as mock_search:
+            yamtrack.importer(
+                BytesIO(self._movie_csv("603")),
+                self.user,
+                "new",
+            )
+
+        mock_search.assert_not_called()
+        movie = Movie.objects.get(user=self.user)
+        self.assertEqual(movie.item.media_id, "603")
+

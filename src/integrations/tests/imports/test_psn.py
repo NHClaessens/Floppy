@@ -592,7 +592,7 @@ class ImportPSN(TestCase):
         self.assertNotIn("super-secret", self.account.last_error_message)
 
     @patch("integrations.psn_api.PSNAWP")
-    def test_rate_limit_marks_account_broken(self, mock_psnawp):
+    def test_rate_limit_records_error_without_breaking(self, mock_psnawp):
         """A PSN rate limit is reported as such, without the raw response."""
         mock_psnawp.side_effect = psnawp_exceptions.PSNAWPTooManyRequests(
             "429 from https://m.np.playstation.com/?token=super-secret",
@@ -604,10 +604,10 @@ class ImportPSN(TestCase):
         self.assertIn("PSN rate limit exceeded", str(context.exception))
         self.assertNotIn("super-secret", str(context.exception))
         self.account.refresh_from_db()
-        self.assertTrue(self.account.connection_broken)
+        self.assertFalse(self.account.connection_broken)
 
     @patch("integrations.psn_api.PSNAWP")
-    def test_transport_failure_marks_account_broken(self, mock_psnawp):
+    def test_transport_failure_records_error_without_breaking(self, mock_psnawp):
         """A bare requests failure is translated rather than left to escape."""
         mock_psnawp.side_effect = RequestsConnectionError(
             "Max retries exceeded with url: /authz?npsso=super-secret",
@@ -618,11 +618,11 @@ class ImportPSN(TestCase):
 
         self.assertIn("Could not reach PSN", str(context.exception))
         self.account.refresh_from_db()
-        self.assertTrue(self.account.connection_broken)
+        self.assertFalse(self.account.connection_broken)
         self.assertNotIn("super-secret", self.account.last_error_message)
 
     @patch("integrations.psn_api.PSNAWP")
-    def test_unexpected_fetch_failure_marks_account_broken(self, mock_psnawp):
+    def test_unexpected_fetch_failure_records_error_without_breaking(self, mock_psnawp):
         """An error psn_api doesn't model still lands as durable account state."""
         mock_psnawp.side_effect = ValueError(
             "bad payload from https://m.np.playstation.com/?npsso=super-secret",
@@ -634,7 +634,7 @@ class ImportPSN(TestCase):
         self.assertIn("ValueError", str(context.exception))
         self.assertNotIn("super-secret", str(context.exception))
         self.account.refresh_from_db()
-        self.assertTrue(self.account.connection_broken)
+        self.assertFalse(self.account.connection_broken)
         self.assertIn("ValueError", self.account.last_error_message)
         self.assertNotIn("super-secret", self.account.last_error_message)
 
@@ -646,7 +646,7 @@ class ImportPSN(TestCase):
         )
 
         importer = psn.PSNImporter(self.user, "new")
-        importer._mark_broken("x" * 5000)
+        importer._mark_failed("x" * 5000, auth=False)
 
         self.account.refresh_from_db()
         self.assertLessEqual(
@@ -740,7 +740,7 @@ class ImportPSN(TestCase):
         self.assertIn("Could not reach", str(context.exception))
         self.assertEqual(Game.objects.filter(user=self.user).count(), 0)
         self.account.refresh_from_db()
-        self.assertTrue(self.account.connection_broken)
+        self.assertFalse(self.account.connection_broken)
 
     @patch("integrations.imports.psn.services.search")
     @patch("integrations.psn_api.PSNAWP")

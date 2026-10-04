@@ -5,7 +5,7 @@ from django.utils.timezone import now
 from rest_framework import serializers
 
 from app import helpers as app_helpers
-from app.backdrops import resolve_backdrop  # FORK: horizontal artwork
+from app.backdrops import cached_backdrop_or_warm  # FORK: horizontal artwork
 from app.helpers import build_provider_ids
 from app.history_entry_builders import _serialize_show
 from app.models import (
@@ -26,6 +26,7 @@ from app.models import (
     Music,  # FORK: fork-only media type
     Podcast,  # FORK: fork-only media type
     Season,
+    Status,
 )
 from app.templatetags.app_tags import media_url
 from events.models import Event
@@ -65,6 +66,58 @@ class StatusField(serializers.Field):
         return get_media_status(getattr(obj, "status", None))
 
 
+_EPISODIC_MEDIA_TYPES = frozenset(
+    {
+        MediaTypes.TV.value,
+        MediaTypes.SEASON.value,
+        MediaTypes.ANIME.value,
+    },
+)
+_UNSET = object()
+
+
+def _episode_remaining(media, *, total_episode_count=_UNSET):
+    """Return released and provider-total episodes remaining for one media row."""
+    item = getattr(media, "item", None)
+    if item is None or getattr(item, "media_type", None) not in _EPISODIC_MEDIA_TYPES:
+        return None, None
+
+    progress = getattr(media, "progress", None)
+    if progress is None:
+        return None, None
+    try:
+        progress = max(0, int(progress))
+    except (TypeError, ValueError):
+        return None, None
+
+    def _remaining(count):
+        if count is None:
+            return None
+        try:
+            return max(0, int(count) - progress)
+        except (TypeError, ValueError):
+            return None
+
+    episodes_left = _remaining(getattr(media, "max_progress", None))
+    if total_episode_count is _UNSET:
+        total_episode_count = getattr(media, "total_episode_count", _UNSET)
+        if total_episode_count is _UNSET:
+            total_episode_count = getattr(item, "provider_episode_count", None)
+    return episodes_left, _remaining(total_episode_count)
+
+
+def _has_dropped_season(media):
+    """Return whether a TV-like media row has an excluded dropped season."""
+    item = getattr(media, "item", None)
+    if getattr(item, "media_type", None) != MediaTypes.TV.value:
+        return False
+    return any(
+        season.status == Status.DROPPED.value
+        for season in media.seasons.all()
+        if getattr(getattr(season, "item", None), "season_number", None) not in (None, 0)
+    )
+
+
 class ItemSerializer(serializers.ModelSerializer):
     """Serializer used for item details."""
 
@@ -94,7 +147,7 @@ class ItemSerializer(serializers.ModelSerializer):
 
     class Meta:  # noqa: D106
         model = Item
-        exclude = ("id",)
+        exclude = ("id", "provider_episode_count")
 
 
 class ChangesHistoryEntrySerializer(serializers.Serializer):
@@ -191,9 +244,11 @@ class CompleteEpisodeSerializer(serializers.Serializer):
             "media_type": media_type,
             "title": episode.get("name"),
             "max_progress": 1,
+            "episodes_left": None,
+            "total_episodes_left": None,
             "image": image,
             # FORK: show-level backdrop
-            "backdrop": resolve_backdrop(media_metadata),
+            "backdrop": cached_backdrop_or_warm(media_metadata),
             "synopsis": episode.get("overview"),
             "genres": media_metadata.get("genres", []),
             "score": float(episode.get("vote_average")),
@@ -217,6 +272,7 @@ class CompleteEpisodeSerializer(serializers.Serializer):
             "consumptions_number": consumptions_number,
             "consumptions": consumptions,
             "lists": lists,
+            "media_type_status": instance.get("media_type_status"),
         }
 
 
@@ -293,6 +349,7 @@ class CompleteMediaSerializer(serializers.Serializer):
                         "item": item,
                         "created_at": None,
                         "score": None,
+            "scored_at": None,
                         "status": None,
                         "progress": None,
                         "progressed_at": None,
@@ -302,6 +359,8 @@ class CompleteMediaSerializer(serializers.Serializer):
                     },
                 )()
 
+            if tracked_season is not None and season.get("max_progress") is not None:
+                tracked_season.total_episode_count = season["max_progress"]
             processed_seasons.append(
                 MediaSerializer().to_representation(tracked_season),
             )
@@ -413,6 +472,29 @@ class CompleteMediaSerializer(serializers.Serializer):
             many=True,
         )
 
+        primary_media = user_medias[0] if user_medias else None
+        if primary_media is None:
+            episode_left_values = (None, None)
+        elif hasattr(primary_media, "total_episode_count") and _has_dropped_season(
+            primary_media,
+        ):
+            episode_left_values = _episode_remaining(
+                primary_media,
+                total_episode_count=primary_media.total_episode_count,
+            )
+        else:
+            total_episode_count = media_metadata.get("max_progress")
+            if total_episode_count is None:
+                total_episode_count = getattr(
+                    primary_media,
+                    "total_episode_count",
+                    None,
+                )
+            episode_left_values = _episode_remaining(
+                primary_media,
+                total_episode_count=total_episode_count,
+            )
+
         # TODO: Check why some informations take a while to update after a change
 
         return {
@@ -430,9 +512,11 @@ class CompleteMediaSerializer(serializers.Serializer):
             "max_progress": int(media_metadata.get("max_progress"))
             if media_metadata.get("max_progress") is not None
             else 1,
+            "episodes_left": episode_left_values[0],
+            "total_episodes_left": episode_left_values[1],
             "image": media_metadata.get("image"),
             # FORK: 16:9 artwork
-            "backdrop": resolve_backdrop(media_metadata),
+            "backdrop": cached_backdrop_or_warm(media_metadata),
             "synopsis": media_metadata.get("synopsis"),
             "genres": media_metadata.get("genres"),
             "score": float(media_metadata.get("score"))
@@ -456,6 +540,7 @@ class CompleteMediaSerializer(serializers.Serializer):
             "consumptions_number": consumptions_number,
             "consumptions": consumptions,
             "lists": lists,
+            "media_type_status": instance.get("media_type_status"),
         }
 
 
@@ -487,6 +572,7 @@ class EpisodeSerializer(serializers.ModelSerializer):
                 "score": float(instance.score)
                 if getattr(instance, "score", None) is not None
                 else None,
+                "scored_at": getattr(instance, "scored_at", None),
                 "status": get_media_status(instance.status),
                 "progress": 1 if instance.end_date else 0,
                 "progress_scope": "entry",
@@ -495,6 +581,7 @@ class EpisodeSerializer(serializers.ModelSerializer):
                 "start_date": instance.start_date,
                 "end_date": instance.end_date,
                 "notes": instance.notes,
+                "source": instance.entry_source,
                 "lists": lists_by_item_id.get(item.id, []),
                 "next_episode": None,
                 "show": None,
@@ -581,6 +668,7 @@ class EpisodeSerializer(serializers.ModelSerializer):
             if hasattr(episode, "created_at")
             else None,
             "score": None,
+            "scored_at": None,
             "status": 3 if tracked else None,
             "progress": 1 if tracked else None,
             "progress_scope": "entry" if tracked else None,
@@ -677,12 +765,17 @@ class HistorySerializer(serializers.Serializer):
                 "score": float(instance.score)
                 if getattr(instance, "score", None) is not None
                 else None,
+                "scored_at": getattr(instance, "scored_at", None),
                 "progress": 1 if instance.end_date else 0,
                 "progressed_at": instance.end_date,
                 "status": get_media_status(getattr(instance, "status", None)),
                 "start_date": getattr(instance, "start_date", None),
                 "end_date": instance.end_date,
                 "notes": getattr(instance, "notes", ""),
+                "source": getattr(instance, "entry_source", ""),
+                # FORK: client-supplied play id, so a syncing client can match
+                # its own event to the stored play after a restart.
+                "external_id": getattr(instance, "external_id", None),
             }
         status = StatusField().to_representation(instance)
 
@@ -694,6 +787,7 @@ class HistorySerializer(serializers.Serializer):
             "score": float(instance.score)
             if hasattr(instance, "score") and instance.score is not None
             else None,
+            "scored_at": getattr(instance, "scored_at", None),
             "progress": instance.progress if hasattr(instance, "progress") else None,
             "progressed_at": instance.progressed_at
             if hasattr(instance, "progressed_at") and instance.progressed_at is not None
@@ -707,6 +801,9 @@ class HistorySerializer(serializers.Serializer):
             else None,
             "notes": instance.notes
             if hasattr(instance, "notes") and instance.notes is not None
+            else None,
+            "source": instance.entry_source
+            if hasattr(instance, "entry_source") and instance.entry_source is not None
             else None,
         }
 
@@ -807,6 +904,7 @@ class MediaSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         """Serialize media."""
         item = getattr(instance, "item", None)
+        episodes_left, total_episodes_left = _episode_remaining(instance)
         next_episode_by_item_id = (self.context or {}).get(
             "next_episode_by_item_id",
             {},
@@ -853,8 +951,11 @@ class MediaSerializer(serializers.ModelSerializer):
             "score": float(instance.score)
             if hasattr(instance, "score") and instance.score is not None
             else None,
+            "scored_at": getattr(instance, "scored_at", None),
             "status": StatusField().to_representation(instance),
             "progress": instance.progress if hasattr(instance, "progress") else None,
+            "episodes_left": episodes_left,
+            "total_episodes_left": total_episodes_left,
             # `progress` is always this single entry's own value (this play,
             # session, or re-watch), never a sum across a user's entries for the
             # item; `progress_unit` names what it counts so clients don't have to
@@ -875,6 +976,7 @@ class MediaSerializer(serializers.ModelSerializer):
             else None,
             "end_date": instance.end_date if hasattr(instance, "end_date") else None,
             "notes": instance.notes if hasattr(instance, "notes") else None,
+            "source": instance.entry_source if hasattr(instance, "entry_source") else None,
             "lists": lists,
             "next_episode": next_episode,
             "show": _serialize_show(show),
@@ -924,8 +1026,11 @@ class UntrackedMediaSerializer(serializers.Serializer):
             "tracked": False,
             "created_at": None,
             "score": None,
+            "scored_at": None,
             "status": None,
             "progress": None,
+            "episodes_left": None,
+            "total_episodes_left": None,
             "progress_scope": None,
             "progress_unit": None,
             "progressed_at": None,

@@ -15,7 +15,6 @@ from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 from celery.schedules import crontab
-from debug_toolbar.settings import PANELS_DEFAULTS
 from decouple import (
     Csv,
     Undefined,
@@ -26,12 +25,15 @@ from decouple import (
 from django.core.cache import CacheKeyWarning
 from django.core.exceptions import ImproperlyConfigured
 from django.db.backends.signals import connection_created
+from redis.backoff import NoBackoff
+from redis.retry import Retry
 
 from config.runtime_profile import (
     PROFILE as RESOURCE_PROFILE,
 )
 from config.runtime_profile import (
     by_tier,
+    gunicorn_max_worker_memory_bytes,
     gunicorn_threads,
     web_concurrency,
 )
@@ -244,38 +246,58 @@ USE_X_FORWARDED_PORT = config(
 
 # Application definition
 
-INSTALLED_APPS = [
-    "django.contrib.auth",
-    "django.contrib.admin",
-    "django.contrib.contenttypes",
-    "django.contrib.sessions",
-    "django.contrib.messages",
-    "django.contrib.staticfiles",
-    "app",
-    "events",
-    "integrations",
-    "lists",
-    "users",
-    "django_celery_beat",
-    "django_celery_results",
-    "django_select2",
-    "simple_history",
-    "widget_tweaks",
-    "health_check",
-    "health_check.cache",
-    "health_check.storage",
-    "health_check.contrib.migrations",
-    "health_check.contrib.celery_ping",
-    "health_check.contrib.redis",
-    "health_check.contrib.db_heartbeat",
-    "allauth",
-    "allauth.account",
-    "allauth.socialaccount",
-    "django.contrib.humanize",
-    "rest_framework",
-    "api",
-    "drf_spectacular",
-]
+_CELERY_PROCESS = os.environ.get("FLOPPY_PROCESS_ROLE") in {
+    "background",
+    "combined",
+    "interactive",
+}
+
+if _CELERY_PROCESS:
+    INSTALLED_APPS = [
+        "django.contrib.auth",
+        "django.contrib.contenttypes",
+        "app",
+        "events",
+        "integrations",
+        "lists",
+        "users",
+        "django_celery_beat",
+        "django_celery_results",
+        "simple_history",
+    ]
+else:
+    INSTALLED_APPS = [
+        "django.contrib.auth",
+        "django.contrib.admin",
+        "django.contrib.contenttypes",
+        "django.contrib.sessions",
+        "django.contrib.messages",
+        "django.contrib.staticfiles",
+        "app",
+        "events",
+        "integrations",
+        "lists",
+        "users",
+        "django_celery_beat",
+        "django_celery_results",
+        "django_select2",
+        "simple_history",
+        "widget_tweaks",
+        "health_check",
+        "health_check.cache",
+        "health_check.storage",
+        "health_check.contrib.migrations",
+        "health_check.contrib.celery_ping",
+        "health_check.contrib.redis",
+        "health_check.contrib.db_heartbeat",
+        "allauth",
+        "allauth.account",
+        "allauth.socialaccount",
+        "django.contrib.humanize",
+        "rest_framework",
+        "api",
+        "drf_spectacular",
+    ]
 
 REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": [
@@ -312,16 +334,76 @@ SPECTACULAR_SETTINGS = {
 if ENABLE_DEBUG_TOOLBAR:
     INSTALLED_APPS.append("debug_toolbar")
 
-# Slow-request instrumentation: log requests exceeding either threshold.
+# Performance instrumentation: thresholded request and task summaries.
 PERF_LOG_ENABLED = config("PERF_LOG_ENABLED", default=True, cast=bool)
 PERF_LOG_SLOW_REQUEST_MS = config("PERF_LOG_SLOW_REQUEST_MS", default=500, cast=int)
+PERF_LOG_SLOW_TASK_MS = config("PERF_LOG_SLOW_TASK_MS", default=5000, cast=int)
 PERF_LOG_QUERY_COUNT_THRESHOLD = config(
     "PERF_LOG_QUERY_COUNT_THRESHOLD",
     default=75,
     cast=int,
 )
+TRAKT_IMPORT_CHUNK_ROWS = config("TRAKT_IMPORT_CHUNK_ROWS", default=100, cast=int)
+TRAKT_IMPORT_CHUNK_TARGET_MS = config("TRAKT_IMPORT_CHUNK_TARGET_MS", default=100, cast=int)
+TRAKT_IMPORT_STAGING_BYTES = config("TRAKT_IMPORT_STAGING_BYTES", default=512 * 1024 * 1024, cast=int)
+
+# High-water memory attribution (app/memory_envelope.py). Separate from the
+# slow-request log above: that one answers "what was slow", this one answers
+# "what grew, and was it Python or page cache". Cheap enough -- two short
+# /proc reads and three cgroup reads per boundary -- to leave on in
+# production, which is the only place the excursions happen.
+MEMORY_HIGH_WATER_ENABLED = config(
+    "MEMORY_HIGH_WATER_ENABLED",
+    default=True,
+    cast=bool,
+)
+# Thresholds are deliberately generous. The events are for excursions, not
+# for a picture of normal traffic; a log full of ordinary requests is a log
+# nobody reads. These are starting points chosen to catch the known
+# production high-water events (a two-minute media list, a snapshot's page
+# cache) and are expected to be tuned once real events accumulate. None of
+# them is a memory guarantee.
+MEMORY_HIGH_WATER_DURATION_MS = config(
+    "MEMORY_HIGH_WATER_DURATION_MS",
+    default=10_000,
+    cast=int,
+)
+MEMORY_HIGH_WATER_RSS_DELTA_BYTES = config(
+    "MEMORY_HIGH_WATER_RSS_DELTA_BYTES",
+    default=32 * 1024 * 1024,
+    cast=int,
+)
+MEMORY_HIGH_WATER_HWM_DELTA_BYTES = config(
+    "MEMORY_HIGH_WATER_HWM_DELTA_BYTES",
+    default=32 * 1024 * 1024,
+    cast=int,
+)
+MEMORY_HIGH_WATER_CGROUP_DELTA_BYTES = config(
+    "MEMORY_HIGH_WATER_CGROUP_DELTA_BYTES",
+    default=128 * 1024 * 1024,
+    cast=int,
+)
+MEMORY_HIGH_WATER_CGROUP_FILE_DELTA_BYTES = config(
+    "MEMORY_HIGH_WATER_CGROUP_FILE_DELTA_BYTES",
+    default=128 * 1024 * 1024,
+    cast=int,
+)
+# A process this close to its recycle ceiling is about to be retired, and the
+# boundary that took it there is the one worth naming.
+MEMORY_HIGH_WATER_CEILING_RATIO = config(
+    "MEMORY_HIGH_WATER_CEILING_RATIO",
+    default=0.85,
+    cast=float,
+)
+# The same number config/gunicorn.py enforces, read from one definition so
+# the instrumentation cannot report against a ceiling that is not the one in
+# force. Zero means retirement is disabled.
+GUNICORN_MAX_WORKER_MEMORY_BYTES = gunicorn_max_worker_memory_bytes()
 
 MIDDLEWARE = [
+    # Outermost by intent: the samples must bracket every other middleware's
+    # allocations, not just the view's.
+    "app.memory_envelope.MemoryHighWaterMiddleware",
     "django.middleware.security.SecurityMiddleware",
     # Keep rendered HTML out of the browser's heuristic cache so template fixes
     # actually reach iOS Safari and the installed PWA (#442)
@@ -343,12 +425,13 @@ MIDDLEWARE = [
     # login page, which htmx would otherwise swap into a fragment slot (#386)
     "app.middleware.HtmxAuthRedirectMiddleware",
     "simple_history.middleware.HistoryRequestMiddleware",
-    "allauth.account.middleware.AccountMiddleware",
     "app.middleware.ProviderAPIErrorMiddleware",
     "app.middleware.ErrorCaptureMiddleware",
     # Convert HTML error responses for API requests into JSON responses
     "api.middleware.ApiJsonErrorMiddleware",
 ]
+if not _CELERY_PROCESS:
+    MIDDLEWARE.append("allauth.account.middleware.AccountMiddleware")
 
 if ENABLE_DEBUG_TOOLBAR:
     MIDDLEWARE.insert(0, "debug_toolbar.middleware.DebugToolbarMiddleware")
@@ -362,7 +445,7 @@ if FLOPPY_AUTO_LOGIN_USERNAME:
     _index = MIDDLEWARE.index("django.contrib.auth.middleware.AuthenticationMiddleware")
     MIDDLEWARE.insert(_index + 1, "app.middleware.AutoLoginMiddleware")
 
-ROOT_URLCONF = "config.urls"
+ROOT_URLCONF = "config.celery_urls" if _CELERY_PROCESS else "config.urls"
 
 TEMPLATES = [
     {
@@ -460,6 +543,12 @@ else:
             "OPTIONS": {
                 "timeout": SQLITE_BUSY_TIMEOUT_SECONDS,
             },
+            # Reuse a thread's connection across requests instead of opening
+            # one (plus the PRAGMAs below) for every request. Idle autocommit
+            # connections hold no read transaction, so WAL checkpoints are not
+            # held back. Replacing db.sqlite3 already requires stopping Floppy.
+            "CONN_MAX_AGE": 600,
+            "CONN_HEALTH_CHECKS": True,
         },
     }
 
@@ -536,6 +625,8 @@ CACHES = {
         "KEY_PREFIX": KEY_PREFIX,
         "OPTIONS": {
             "CLIENT_CLASS": "django_redis.client.DefaultClient",
+            "REDIS_CLIENT_CLASS": "app.cache_safety.CacheRedis",
+            "CONNECTION_POOL_CLASS": "app.cache_safety.CacheConnectionPool",
             # A cache is allowed to be unavailable. Without this, a slow or full
             # Redis raised out of every one of ~460 cache.get calls and took
             # page loads, webhooks and background tasks down with it (#521).
@@ -550,7 +641,7 @@ CACHES = {
             # promptly instead of blocking worker threads forever (#341).
             "SOCKET_CONNECT_TIMEOUT": config(
                 "REDIS_SOCKET_CONNECT_TIMEOUT",
-                default=5,
+                default=1,
                 cast=int,
             ),
             # Every thread that touches the cache blocks for this long when Redis
@@ -558,7 +649,7 @@ CACHES = {
             # threads x timeout. Shorter on hosts that can least afford it.
             "SOCKET_TIMEOUT": config(
                 "REDIS_SOCKET_TIMEOUT",
-                default=by_tier(4, 5, 10),
+                default=1,
                 cast=int,
             ),
             "CONNECTION_POOL_KWARGS": {
@@ -570,7 +661,10 @@ CACHES = {
                     default=by_tier(12, 20, 32),
                     cast=int,
                 ),
-                "retry_on_timeout": True,
+                # Optional cache data must not repeat a full socket timeout.
+                # Cached sessions fall back to their database source of truth.
+                "retry_on_timeout": False,
+                "retry": Retry(NoBackoff(), 0),
                 "health_check_interval": 30,
             },
         },
@@ -613,15 +707,23 @@ AUTH_PASSWORD_VALIDATORS = [
 # https://docs.djangoproject.com/en/stable/topics/logging/
 
 # Recent logs are also kept on disk (in addition to stdout) so the app can
-# offer a sanitized log download from Settings > Advanced (#510).
-LOG_DIR = config("LOG_DIR", default=str(BASE_DIR / "logs"))
+# offer a sanitized log download from Settings > Advanced (#510). They default
+# to a folder inside the data directory, which Docker users already mount, so
+# they survive the container being recreated after a crash.
+LOG_DIR = config("LOG_DIR", default=str(FLOPPY_DATA_DIR / "logs"))
 Path(LOG_DIR).mkdir(parents=True, exist_ok=True)
 LOG_FILE = str(Path(LOG_DIR) / "floppy.log")
 
 LOGGING = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "cache_cooldown": {"()": "app.cache_safety.CacheCooldownLogFilter"},
+    },
     "loggers": {
+        "django_redis.cache": {
+            "filters": ["cache_cooldown"],
+        },
         "requests_ratelimiter.requests_ratelimiter": {
             "level": "DEBUG" if DEBUG else "WARNING",
         },
@@ -649,8 +751,8 @@ LOGGING = {
         "file": {
             "class": "logging.handlers.RotatingFileHandler",
             "filename": LOG_FILE,
-            "maxBytes": 5 * 1024 * 1024,
-            "backupCount": 3,
+            "maxBytes": 10 * 1024 * 1024,
+            "backupCount": 5,
             "formatter": "verbose",
             "level": "DEBUG" if DEBUG else "INFO",
         },
@@ -667,6 +769,7 @@ LANGUAGES = [
     ("en", "English"),
     ("de", "Deutsch"),
     ("es", "Español"),
+    ("fr", "Français"),
 ]
 
 LOCALE_PATHS = [BASE_DIR / "locale"]
@@ -1038,7 +1141,13 @@ DB_SNAPSHOT_RETENTION_COUNT = config(
     cast=int,
 )
 DB_SNAPSHOT_HOUR = config("DB_SNAPSHOT_HOUR", default=2, cast=int)
-DB_SNAPSHOT_MINUTE = config("DB_SNAPSHOT_MINUTE", default=30, cast=int)
+# Deliberately not a quarter hour. The incremental metadata backfill runs on
+# crontab(minute="*/15") or "*/30" depending on tier, so the old :30 default
+# started a whole-database copy in the same minute as a bulk sweep -- one
+# filling the page cache while the other allocated. Production showed exactly
+# that pairing at 02:30. :37 collides with nothing else in the schedule below,
+# and an operator who has set DB_SNAPSHOT_MINUTE keeps their own value.
+DB_SNAPSHOT_MINUTE = config("DB_SNAPSHOT_MINUTE", default=37, cast=int)
 
 # Runtime population settings
 RUNTIME_POPULATION_DISABLED = config(
@@ -1096,7 +1205,6 @@ SHARED_DEFAULT_CREDENTIALS = {
     "IGDB_ID": "8wqmm7x1n2xxtnz94lb8mthadhtgrt",
     "BGG_API_TOKEN": "92f43ab1-d1d5-4e18-8b82-d1f56dc12927",
     "COMICVINE_API": "cdab0706269e4bca03a096fbc39920dadf7e4992",
-    "SIMKL_ID": "a973e57e85d94068315d5ac29669d85da8abc0fb7aff1d22e00e04bdf1882578",
 }
 
 TMDB_API = config(
@@ -1139,6 +1247,8 @@ MAL_API = config(
 MAL_NSFW = config("MAL_NSFW", default=False, cast=bool)
 
 MU_NSFW = config("MU_NSFW", default=False, cast=bool)
+
+MANGABAKA_NSFW = config("MANGABAKA_NSFW", default=False, cast=bool)
 
 IGDB_ID = config(
     "IGDB_ID",
@@ -1188,6 +1298,13 @@ GOOGLE_BOOKS_API_KEY = config(
     default=secret("GOOGLE_BOOKS_API_KEY_FILE", ""),
 )
 
+# RapidAPI key for OpenCritic game scores. No default: the free plan's daily
+# quota belongs to one account, so every install brings its own key.
+OPENCRITIC_API_KEY = config(
+    "OPENCRITIC_API_KEY",
+    default=secret("OPENCRITIC_API_KEY_FILE", ""),
+)
+
 COMICVINE_API = config(
     "COMICVINE_API",
     default=secret(
@@ -1195,6 +1312,11 @@ COMICVINE_API = config(
         SHARED_DEFAULT_CREDENTIALS["COMICVINE_API"],
     ),
 )
+
+# Grand Comics Database login. No default: GCD limits anonymous API access to
+# 30 requests an hour, and a login is tied to one person's account.
+GCD_USERNAME = config("GCD_USERNAME", default=secret("GCD_USERNAME_FILE", ""))
+GCD_PASSWORD = config("GCD_PASSWORD", default=secret("GCD_PASSWORD_FILE", ""))
 
 TRAKT_API = config(
     "TRAKT_API",
@@ -1228,11 +1350,14 @@ ANILIST_SECRET = config(
     ),
 )
 
+# No shared SIMKL default: the token exchange needs the app's secret, which
+# cannot ship, and a bundled ID without it only fails after the user approves
+# on SIMKL (#1318). Operators or users supply both.
 SIMKL_ID = config(
     "SIMKL_ID",
     default=secret(
         "SIMKL_ID_FILE",
-        SHARED_DEFAULT_CREDENTIALS["SIMKL_ID"],
+        "",
     ),
 )
 SIMKL_SECRET = config(
@@ -1308,14 +1433,21 @@ DEBUG_TOOLBAR_CONFIG = {
     ),
     "ROOT_TAG_EXTRA_ATTRS": "hx-preserve",
 }
-DEBUG_TOOLBAR_PANELS = [
-    panel
-    for panel in PANELS_DEFAULTS
-    if (
-        DEBUG_TOOLBAR_INCLUDE_TEMPLATES_PANEL
-        or panel != "debug_toolbar.panels.templates.TemplatesPanel"
-    )
-]
+if ENABLE_DEBUG_TOOLBAR:
+    # Imported here rather than at module scope: debug_toolbar is a runtime
+    # dependency, so a top-level import loads it into every long-lived process
+    # -- gunicorn and all three Celery roles -- even though the toolbar only
+    # ever runs with DEBUG on.
+    from debug_toolbar.settings import PANELS_DEFAULTS
+
+    DEBUG_TOOLBAR_PANELS = [
+        panel
+        for panel in PANELS_DEFAULTS
+        if (
+            DEBUG_TOOLBAR_INCLUDE_TEMPLATES_PANEL
+            or panel != "debug_toolbar.panels.templates.TemplatesPanel"
+        )
+    ]
 
 SELECT2_CACHE_BACKEND = "default"
 SELECT2_JS = [
@@ -1370,6 +1502,29 @@ CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 # Retry forever rather than exit: the container restarts into the same
 # situation, so giving up only turns a slow Redis into a crash loop.
 CELERY_BROKER_CONNECTION_MAX_RETRIES = 0
+
+# ``integrations.tasks`` keeps its historical public re-exports lazy so web
+# workers do not load every importer while resolving URLs. Celery workers still
+# import every task implementation explicitly and retain the same task names.
+if os.environ.get("FLOPPY_PROCESS_ROLE") == "interactive":
+    CELERY_IMPORTS = (
+        "app.tasks_interactive",
+        "integrations.tasks._plex_sections",
+        "integrations.tasks._webhook",
+    )
+else:
+    CELERY_IMPORTS = (
+        "integrations.tasks._change_log",
+        "integrations.tasks._jellyfin_pull",
+        "integrations.tasks._koito",
+        "integrations.tasks._lastfm",
+        "integrations.tasks._media_imports",
+        "integrations.tasks._plex_collection",
+        "integrations.tasks._plex_sections",
+        "integrations.tasks._receipts",
+        "integrations.tasks._state_sync",
+        "integrations.tasks._webhook",
+    )
 CELERY_REDIS_RETRY_ON_TIMEOUT = True
 
 CELERY_WORKER_HIJACK_ROOT_LOGGER = False
@@ -1387,11 +1542,36 @@ CELERY_WORKER_MAX_TASKS_PER_CHILD = config(
     cast=int,
 )
 # A hard RSS ceiling per child: Celery retires the child after the task that
-# crosses it finishes. Unset on standard hosts, where a large import legitimately
-# needs the headroom and there is memory to spare.
+# crosses it finishes, so no task is lost to it.
+#
+# Standard hosts had no ceiling at all, on the reasoning that a large import
+# needs the headroom and there is memory to spare. The second half of that has
+# stopped being the goal: a child that grew during one import then stays
+# resident until max_tasks_per_child recycles it, which on a warm-idle install
+# can be days. The ceiling here is several times a freshly started child (~100
+# MiB of imports) so an import still has room to work, while the creep an idle
+# instance accumulates is returned to the OS.
+#
+# The interactive worker gets its own, much lower ceiling. One number cannot
+# serve both: the background ceiling has to clear a large import, and a child
+# that only runs webhooks and cache refreshes never comes close to it, so it
+# is never retired and its creep is never returned. Production showed exactly
+# that -- an interactive child at 215 MiB after three hours, still under the
+# 400 MiB background ceiling and still climbing. Retiring this child is cheap:
+# Celery retires it after the task that crossed the ceiling finishes, and its
+# tasks are short. Sized at roughly three times a fresh interactive child
+# (~50 MiB; its CELERY_IMPORTS are a third of the background worker's). A
+# statistics rebuild large enough to cross it will retire the child every time
+# it runs -- which is the right trade: that rebuild's memory is then returned
+# rather than held against the next webhook.
+_INTERACTIVE_ROLE = os.environ.get("FLOPPY_PROCESS_ROLE") == "interactive"
 CELERY_WORKER_MAX_MEMORY_PER_CHILD = config(
     "CELERY_WORKER_MAX_MEMORY_PER_CHILD",
-    default=by_tier(180 * 1024, 250 * 1024, 0),
+    default=(
+        by_tier(120 * 1024, 140 * 1024, 160 * 1024)
+        if _INTERACTIVE_ROLE
+        else by_tier(180 * 1024, 250 * 1024, 400 * 1024)
+    ),
     cast=int,
 )
 if not CELERY_WORKER_MAX_MEMORY_PER_CHILD:
@@ -1422,6 +1602,10 @@ if not CELERY_TASK_SOFT_TIME_LIMIT:
 # interactive work strands it behind every background batch.
 CELERY_TASK_PRIORITY_INTERACTIVE = 0
 CELERY_TASK_PRIORITY_FOLLOWUP = 3
+# A background Statistics sync yields to webhooks (0) but, on the minimal-tier
+# combined worker, still drains ahead of FOLLOWUP imports and backfills: at 3 a
+# chunk of the old refresh run could wait behind them indefinitely (#1272).
+CELERY_TASK_PRIORITY_STATISTICS_SYNC = 1
 CELERY_TASK_PRIORITY_DEFAULT = 5
 CELERY_TASK_PRIORITY_BACKGROUND = 9
 # Celery copies task_default_priority onto every task before it consults the
@@ -1429,6 +1613,24 @@ CELERY_TASK_PRIORITY_BACKGROUND = 9
 # priorities during apply_async() and Beat dispatch. The route table below
 # supplies both the explicit classes and the default fallback instead.
 CELERY_TASK_DEFAULT_PRIORITY = None
+
+# Statistics sync (docs/architecture/statistics-sync.md). One sync task works
+# for at most this many seconds, then queues its own follow-up, so the
+# single-slot interactive worker is never held for a whole All Time rebuild.
+STATISTICS_SYNC_TASK_BUDGET_SECONDS = config(
+    "STATISTICS_SYNC_TASK_BUDGET_SECONDS", default=10, cast=int
+)
+# Days built per prefetch slice inside a sync.
+STATISTICS_SYNC_SLICE_DAYS = config("STATISTICS_SYNC_SLICE_DAYS", default=25, cast=int)
+# The heavy ranges (Last 90 Days .. All Time) are rebuilt once changes have
+# been quiet this long, and never trail by more than the max delay. Hot ranges
+# (Today .. Last 30 Days) rebuild on every sync.
+STATISTICS_SYNC_HEAVY_SETTLE_SECONDS = config(
+    "STATISTICS_SYNC_HEAVY_SETTLE_SECONDS", default=90, cast=int
+)
+STATISTICS_SYNC_HEAVY_MAX_DELAY_SECONDS = config(
+    "STATISTICS_SYNC_HEAVY_MAX_DELAY_SECONDS", default=600, cast=int
+)
 
 CELERY_RESULT_EXTENDED = True
 CELERY_RESULT_BACKEND = config("CELERY_RESULT_BACKEND", default=None) or REDIS_URL
@@ -1489,6 +1691,29 @@ CELERY_TASK_ROUTES = {
         "queue": "interactive",
         "priority": CELERY_TASK_PRIORITY_INTERACTIVE,
     },
+    # Retired chunk-run name; drains queued messages into a sync.
+    "app.tasks.continue_statistics_refresh_task": {
+        "queue": "interactive",
+        "priority": CELERY_TASK_PRIORITY_STATISTICS_SYNC,
+    },
+    # Budget-bounded, and yields to webhooks. See
+    # docs/architecture/statistics-sync.md.
+    "app.tasks.statistics_sync_task": {
+        "queue": "interactive",
+        "priority": CELERY_TASK_PRIORITY_STATISTICS_SYNC,
+    },
+    # Rebuilds a talent section the viewer already sees a stale copy of; same
+    # priority as the sync so webhook scrobbles still run first.
+    "Refresh statistics talent fragment": {
+        "queue": "interactive",
+        "priority": CELERY_TASK_PRIORITY_STATISTICS_SYNC,
+    },
+    # Cheap (one query, then enqueues). On the interactive worker so a long
+    # import on the background worker cannot delay recovery of lost syncs.
+    "Reconcile statistics sync": {
+        "queue": "interactive",
+        "priority": CELERY_TASK_PRIORITY_STATISTICS_SYNC,
+    },
     # History cache rebuilds now bound their inline work (see
     # refresh_history_cache in history_cache_reader.py), but they're kept off the
     # interactive queue as defense-in-depth so an unanticipated slow rebuild can
@@ -1524,9 +1749,14 @@ CELERY_TASK_ROUTES = {
     # background tasks so a backlog of low-priority work doesn't delay them.
     "Import from Radarr (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
     "Import from Sonarr (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
+    "Import from Mylar3 (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
+    "Import from Kapowarr (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
     "Import from Audiobookshelf (Recurring)": {
         "priority": CELERY_TASK_PRIORITY_FOLLOWUP,
     },
+    "Import from Kavita (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
+    "Import from Komga (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
+    "Import from Hardcover Account": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
     "Import from Pocket Casts (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
     "Import from GPodder (Recurring)": {"priority": CELERY_TASK_PRIORITY_FOLLOWUP},
     "Migrate TV shows to preferred metadata provider": {
@@ -1631,6 +1861,13 @@ CELERY_BEAT_SCHEDULE = {
     # A control-command reply (control.revoke, the celery_ping health check)
     # can write a malformed Kombu Redis binding at any point during uptime,
     # not just at startup, so this bounds how long a bad entry survives (#588).
+    # The Statistics sync's safety net: finds users whose ranges trail their
+    # changes (lost/starved sync messages, midnight rollover, first build after
+    # an upgrade or a cache flush) and queues a sync.
+    "reconcile_statistics_sync": {
+        "task": "Reconcile statistics sync",
+        "schedule": 60,
+    },
     "repair_celery_broker_bindings": {
         "task": "Repair Celery broker bindings",
         "schedule": 60 * 15,
@@ -1755,6 +1992,11 @@ CELERY_BEAT_SCHEDULE = {
     "sync_mal_ratings": {
         "task": "Sync MAL ratings from API",
         "schedule": crontab(hour=5, minute=15),  # every day at 5:15 AM
+    },
+    "backfill_opencritic_scores": {
+        "task": "Backfill OpenCritic scores",
+        # Only spends quota in the hour before the daily reset; other runs no-op.
+        "schedule": crontab(minute="*/20"),
     },
 }
 

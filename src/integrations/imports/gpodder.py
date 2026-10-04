@@ -12,7 +12,7 @@ from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from django.utils.text import slugify
 
-from app import history_cache
+import events
 from app.models import (
     Item,
     MediaTypes,
@@ -23,7 +23,7 @@ from app.models import (
     Sources,
     Status,
 )
-from integrations import gpodder_api, import_progress, podcast_rss
+from integrations import connection_health, gpodder_api, import_progress, podcast_rss
 from integrations import models as integration_models
 from integrations.imports.helpers import MediaImportError, decrypt_or_raise
 
@@ -48,6 +48,7 @@ class GPodderImporter:
         self.user = user
         self.mode = mode
         self.warnings = []
+        self.created_item_ids = []
         try:
             self.account = user.gpodder_account
         except integration_models.GPodderAccount.DoesNotExist as exc:
@@ -61,11 +62,7 @@ class GPodderImporter:
                 password=decrypt_or_raise(self.account.password),
             )
         except MediaImportError as error:
-            self.account.connection_broken = True
-            self.account.last_error_message = str(error)
-            self.account.save(
-                update_fields=["connection_broken", "last_error_message", "updated_at"],
-            )
+            connection_health.record_failure(self.account, str(error), auth=True)
             raise
         self._seen_fingerprints = set()
         self._episode_cache = {}
@@ -81,11 +78,7 @@ class GPodderImporter:
                 update_fields=["connection_broken", "last_error_message", "updated_at"]
             )
         except gpodder_api.GPodderAuthError as exc:
-            self.account.connection_broken = True
-            self.account.last_error_message = str(exc)[:500]
-            self.account.save(
-                update_fields=["connection_broken", "last_error_message", "updated_at"]
-            )
+            connection_health.record_failure(self.account, str(exc), auth=True)
             raise MediaImportError(str(exc)) from exc
         except gpodder_api.GPodderClientError as exc:
             self.account.last_error_message = str(exc)[:500]
@@ -101,7 +94,6 @@ class GPodderImporter:
                 exc,
             )
 
-        subscriptions = self._load_subscriptions()
         is_full_resync = (
             self.account.last_full_resync_at is None
             or timezone.now() - self.account.last_full_resync_at
@@ -112,6 +104,16 @@ class GPodderImporter:
             since=None if is_full_resync else self.account.episode_actions_since,
             device=self.account.device_filter,
         )
+        # Subscriptions mean one RSS download per feed. An incremental poll with
+        # no listening activity has nothing to match against them, so skip it;
+        # the daily full resync still refreshes the catalog.
+        if is_full_resync or any(
+            action.get("action") == "play" and self._has_listening_activity(action)
+            for action in actions
+        ):
+            subscriptions = self._load_subscriptions()
+        else:
+            subscriptions = {}
 
         imported_counts = defaultdict(int)
         sorted_actions = sorted(
@@ -148,10 +150,15 @@ class GPodderImporter:
             ],
         )
 
-        history_cache.invalidate_history_cache(self.user.id, force=True)
-        from app import statistics_cache
-
-        statistics_cache.schedule_all_ranges_refresh(self.user.id)
+        # Each play is saved through the ORM, so its post_save signal marks the
+        # touched history and statistics days, and import_media skips its
+        # library-wide catch-up for this importer (#1158). New episode items
+        # still need calendar events; imports suppress the per-item trigger.
+        if self.created_item_ids:
+            events.tasks.reload_calendar.apply_async(
+                kwargs={"item_ids": self.created_item_ids},
+                countdown=3,
+            )
         return dict(imported_counts), self.warnings
 
     def _load_subscriptions(self):
@@ -172,8 +179,9 @@ class GPodderImporter:
             rss_metadata = {}
             rss_episodes = []
             try:
-                rss_metadata = podcast_rss.fetch_show_metadata_from_rss(raw_feed_url)
-                rss_episodes = podcast_rss.fetch_episodes_from_rss(raw_feed_url)
+                rss_metadata, rss_episodes = podcast_rss.fetch_feed_from_rss(
+                    raw_feed_url
+                )
             except Exception as exc:
                 self.warnings.append(
                     f"Failed to refresh RSS feed {raw_feed_url}: {exc}"
@@ -439,12 +447,14 @@ class GPodderImporter:
         if episode.published:
             defaults["release_datetime"] = episode.published
 
-        item, _ = Item.objects.get_or_create(
+        item, created = Item.objects.get_or_create(
             media_id=episode.episode_uuid,
             source=Sources.GPODDER.value,
             media_type=MediaTypes.PODCAST.value,
             defaults=defaults,
         )
+        if created:
+            self.created_item_ids.append(item.id)
         update_fields = []
         if item.title != episode.title:
             item.title = episode.title

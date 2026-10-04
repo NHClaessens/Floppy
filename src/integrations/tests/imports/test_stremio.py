@@ -1385,20 +1385,31 @@ class ImportStremioTests(TestCase):
         self.assertFalse(self.account.connection_broken)
         self.assertEqual(self.account.last_error_message, "")
 
-    def test_api_error_marks_connection_broken(self):
-        """An API failure marks the account broken."""
+    def test_invalid_session_marks_connection_broken(self):
+        """Stremio's "Session does not exist" means the auth key is dead."""
+        response = {"error": {"message": "Session does not exist", "code": 1}}
         with (
-            patch(
-                "integrations.imports.stremio.get_library_items",
-                side_effect=helpers.MediaImportError("Stremio API error: bad session"),
-            ),
-            self.assertRaises(helpers.MediaImportError),
+            patch("integrations.imports.stremio.services.api_request", return_value=response),
+            self.assertRaises(helpers.ConnectionAuthError),
         ):
             stremio.importer(None, self.user, "new")
 
         self.account.refresh_from_db()
         self.assertTrue(self.account.connection_broken)
-        self.assertIn("bad session", self.account.last_error_message)
+        self.assertIn("Session does not exist", self.account.last_error_message)
+
+    def test_other_api_error_records_error_without_breaking(self):
+        """Any other envelope error says nothing about the auth key."""
+        response = {"error": {"message": "Internal error", "code": 26}}
+        with (
+            patch("integrations.imports.stremio.services.api_request", return_value=response),
+            self.assertRaises(helpers.MediaImportError),
+        ):
+            stremio.importer(None, self.user, "new")
+
+        self.account.refresh_from_db()
+        self.assertFalse(self.account.connection_broken)
+        self.assertIn("Internal error", self.account.last_error_message)
 
     def test_importer_requires_account(self):
         """Importing without a connected account raises."""

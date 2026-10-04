@@ -1189,3 +1189,33 @@ class PocketCastsChangedUuidReconciliationTests(TestCase):
         # Anchored: 60 min duration - 40 min progress = 20 min remaining.
         self.assertEqual(podcast.end_date, self.sync_start + timedelta(minutes=20))
         self.assertFalse(podcast.is_end_date_inferred)
+
+
+class PocketCastsRefreshTokenApiTests(TestCase):
+    """A real error ``Response`` is falsy, so the 401 check must not rely on truth."""
+
+    def _response(self, status_code):
+        # A real Response, not a MagicMock: ``Response.__bool__`` is
+        # ``response.ok``, which is exactly what the check used to trip over.
+        response = requests.Response()
+        response.status_code = status_code
+        response._content = b"denied"
+        response.url = f"{pocketcasts_api.POCKETCASTS_API_BASE_URL}/user/refresh"
+        return response
+
+    @patch("integrations.pocketcasts_api.requests.post")
+    def test_rejected_refresh_token_raises_auth_error(self, mock_post):
+        mock_post.return_value = self._response(401)
+
+        with self.assertRaises(pocketcasts_api.PocketCastsAuthError):
+            pocketcasts_api.refresh_token("stale")
+
+    @patch("integrations.pocketcasts_api.requests.post")
+    def test_server_error_raises_client_error_with_status(self, mock_post):
+        mock_post.return_value = self._response(503)
+
+        with self.assertRaises(pocketcasts_api.PocketCastsClientError) as ctx:
+            pocketcasts_api.refresh_token("token")
+
+        self.assertNotIsInstance(ctx.exception, pocketcasts_api.PocketCastsAuthError)
+        self.assertIn("503", str(ctx.exception))

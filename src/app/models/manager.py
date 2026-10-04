@@ -25,7 +25,8 @@ from django.db.models import (
     When,
     Window,
 )
-from django.db.models.functions import Lower, RowNumber
+from django.db.models.fields.json import KeyTransform
+from django.db.models.functions import RowNumber
 from django.utils import timezone
 
 import events
@@ -33,40 +34,22 @@ import users
 from app.models.choices import MediaTypes, Sources, Status
 from app.models.discovery import ItemTag
 from app.models.item import Item
+from integrations.import_scope import ImportScopedQuerySet
 
 logger = logging.getLogger(__name__)
 
 MIN_PLAUSIBLE_YEAR = 1900
 
-# FORK (#1004): sort keys the SQL fast path (get_media_list(sql_limit=...))
-# can express directly. Split into raw-column sorts (never touched by
-# _aggregate_item_data, so the deduped row's own column already matches the
-# Python API path's `_sort_value` semantics) and aggregated sorts (need a
-# window annotation mirroring _aggregate_item_data's cross-entry semantics
-# to match _sort_value's aggregated_start_date/aggregated_end_date/
-# aggregated_score/aggregated_progress exactly). Kept here, not in
-# media_list_pagination.py, since this module is the only place that knows
-# how each key is actually satisfied in SQL.
-SQL_SORTABLE_RAW_FIELDS = {
-    "": "item__title",
-    "title": "item__title",
-    "date_added": "created_at",
-    "added": "created_at",
-    "created_at": "created_at",
-    "release_date": "item__release_datetime",
-    "release_datetime": "item__release_datetime",
-    "critic_rating": "item__provider_rating",
-    "popularity": "item__trakt_popularity_rank",
-    "id": "item__media_id",
-    "itemid": "item__media_id",
-    "mediaid": "item__media_id",
-    "source": "item__source",
-    "type": "item__media_type",
-}
+# How long a show whose season lookup failed is left to the database episode
+# count before the provider is asked again during page rendering.
+SEASON_MAX_PROGRESS_RETRY_SECONDS = 10 * 60
+
+# Sort keys whose value aggregates an item's rows the way
+# _aggregate_item_data does; ``_aggregated_sort_subquery`` expresses them in
+# SQL for the library-query engine's sort registry.
 SQL_SORTABLE_AGGREGATED_KEYS = frozenset(
     {"start_date", "started", "end_date", "ended", "score", "progress", "plays"},
 )
-SQL_SORTABLE_KEYS = frozenset(SQL_SORTABLE_RAW_FIELDS) | SQL_SORTABLE_AGGREGATED_KEYS
 
 _MEDIA_LIST_DEFERRED_ITEM_FIELDS = (
     "item__isbn",
@@ -92,6 +75,52 @@ _MEDIA_LIST_DEFERRED_ITEM_FIELDS = (
 )
 
 
+def _media_list_deferred_item_fields(*, needs_watch_providers):
+    """Return the item columns a media list never reads.
+
+    watch_providers is the largest column on the table -- TMDB's availability
+    for every region it knows, around 146 KiB a title -- and no media-list
+    template renders it; only the detail page does. Loading it for a page of
+    entries cost ~590 MiB of JSON decoding on a 1,400-title library. The one
+    list-side reader is the provider filter, so it is kept only when that
+    filter is active. Deferring is also the safe way round: an unforeseen
+    reader loads the column late rather than seeing it missing.
+    """
+    if needs_watch_providers:
+        return _MEDIA_LIST_DEFERRED_ITEM_FIELDS
+    return (*_MEDIA_LIST_DEFERRED_ITEM_FIELDS, "item__watch_providers")
+
+
+# Exactly what _aggregate_item_data reads off a duplicate entry. "item" is the
+# foreign key column, not the related row: the aggregation never touches
+# entry.item, and selecting the id alone is what keeps a whole-library
+# aggregation from hydrating a whole library of Items.
+_AGGREGATION_FIELDS = (
+    "item",
+    "progress",
+    "status",
+    "score",
+    "start_date",
+    "end_date",
+    "progressed_at",
+    "created_at",
+)
+
+
+def _aggregation_projection(model):
+    """Return the aggregation fields this model actually stores as columns.
+
+    Not every tracking model spells all of them as concrete fields -- TV
+    derives ``progress`` from its episodes rather than storing it -- and
+    ``only()`` rejects a name that is not a field. Intersecting keeps the
+    projection narrow without needing a per-model list to be maintained
+    alongside the aggregation that reads it. A derived attribute is still
+    readable afterwards; it is simply not something to select.
+    """
+    concrete = {field.name for field in model._meta.concrete_fields}
+    return tuple(name for name in _AGGREGATION_FIELDS if name in concrete)
+
+
 def _normalize_media_list_filter_value(value):
     return str(value or "").strip().lower()
 
@@ -113,50 +142,62 @@ def _filter_queryset_by_item_json_array_ci(
     item_json_field: str,
     normalized_target: str,
 ):
-    """Match Item JSON string arrays with case-insensitive element compare."""
+    """Match Item JSON string arrays with case-insensitive element compare.
+
+    The raw SQL is attached to an ``Item`` queryset and the media queryset is
+    narrowed by the ids it yields, rather than correlating an EXISTS back to
+    the media table. Raw SQL cannot see Django's table aliasing: the previous
+    version referenced the media table by its real name, so the moment the
+    media queryset was nested as a subquery - which
+    ``get_media_list_item_values`` does, via
+    ``Item.objects.filter(pk__in=queryset.values("item_id"))`` - Django
+    aliased that table to ``U0`` and the reference no longer resolved
+    ("no such column: app_movie.item_id"). Referring only to the column of
+    the queryset's own table keeps it alias-independent.
+    """
     if not normalized_target:
         return queryset
-    media_table = queryset.model._meta.db_table
-    item_table = Item._meta.db_table
+    return queryset.filter(
+        item_id__in=item_ids_with_json_array_value_ci(item_json_field, normalized_target),
+    )
+
+
+def item_ids_with_json_array_value_ci(item_json_field: str, normalized_target: str):
+    """Return an ``Item`` id subquery for a case-insensitive JSON-array match.
+
+    ``normalized_target`` must already be trimmed and lower-cased; stored
+    elements are compared the same way. Only the column of the
+    ``Item`` table itself is referenced, so the subquery stays valid wherever
+    Django nests it (see ``_filter_queryset_by_item_json_array_ci``).
+    """
     col = Item._meta.get_field(item_json_field).column
-    mt = connection.ops.quote_name(media_table)
-    it = connection.ops.quote_name(item_table)
     cc = connection.ops.quote_name(col)
-    id_col = connection.ops.quote_name("id")
-    item_fk = connection.ops.quote_name("item_id")
     if connection.vendor == "postgresql":
         where_sql = f"""
             EXISTS (
                 SELECT 1 FROM jsonb_array_elements_text(
-                    COALESCE(
-                        (SELECT {it}.{cc}::jsonb FROM {it}
-                         WHERE {it}.{id_col} = {mt}.{item_fk}),
-                        '[]'::jsonb
-                    )
+                    COALESCE({cc}::jsonb, '[]'::jsonb)
                 ) AS _arr_el
-                WHERE LOWER(_arr_el::text) = %s
+                WHERE LOWER(TRIM(_arr_el::text)) = %s
             )
         """
     elif connection.vendor == "sqlite":
         where_sql = f"""
             EXISTS (
-                SELECT 1 FROM json_each(
-                    COALESCE(
-                        (SELECT {it}.{cc} FROM {it}
-                         WHERE {it}.{id_col} = {mt}.{item_fk}),
-                        '[]'
-                    )
-                )
-                WHERE LOWER(json_each.value) = %s
+                SELECT 1 FROM json_each(COALESCE({cc}, '[]'))
+                WHERE LOWER(TRIM(json_each.value)) = %s
             )
         """
     else:
-        kw = {f"item__{item_json_field}__contains": [normalized_target]}
-        return queryset.filter(**kw)
-    return queryset.extra(where=[where_sql], params=[normalized_target])
+        kw = {f"{item_json_field}__contains": [normalized_target]}
+        return Item.objects.filter(**kw).values("id")
+    return Item.objects.extra(
+        where=[where_sql],
+        params=[normalized_target],
+    ).values("id")
 
 
-class MediaManager(models.Manager):
+class MediaManager(models.Manager.from_queryset(ImportScopedQuerySet)):
     """Custom manager for media models."""
 
     def get_historical_models(self):
@@ -362,33 +403,14 @@ class MediaManager(models.Manager):
         direction=None,
         *,
         list_sql_filters=None,
-        sql_limit=None,
-        sql_offset=None,
+        needs_watch_providers=False,
     ):
         """Get a media list by type with filtering and sorting.
 
-        `sql_limit`/`sql_offset` are opt-in (#1004): every existing caller
-        omits them and gets the full list back exactly as before. Passing
-        both switches to a SQL-paginated fast path — filter, dedup, sort,
-        and LIMIT/OFFSET all happen in the database instead of materializing
-        every matching row — and the return value becomes `(entries, total)`
-        instead of a bare list. Only pass these when the caller has already
-        confirmed the request has no Python-only filter or sort in play (see
-        app/media_list_pagination.py's can_paginate_in_sql).
+        Pages are served by ``app.library_query``; this full-list form remains
+        for the surfaces whose unit is not one item (separate-entry mode, TV's
+        time-left grouping).
         """
-        if sql_limit is not None:
-            return self._get_paginated_media_list_sql(
-                user,
-                media_type,
-                status_filter,
-                sort_filter,
-                self.resolve_direction(sort_filter, direction),
-                search,
-                list_sql_filters,
-                sql_limit,
-                sql_offset or 0,
-            )
-
         model = apps.get_model(app_label="app", model_name=media_type)
         direction = self.resolve_direction(sort_filter, direction)
         dup_state = {}
@@ -459,7 +481,9 @@ class MediaManager(models.Manager):
                 ),
             ).filter(row_number=1)
 
-        queryset = queryset.select_related("item").defer(*_MEDIA_LIST_DEFERRED_ITEM_FIELDS)
+        queryset = queryset.select_related("item").defer(
+            *_media_list_deferred_item_fields(needs_watch_providers=needs_watch_providers),
+        )
         queryset = self._apply_prefetch_related(queryset, media_type, list_mode=True)
 
         requires_presort_aggregation = sort_filter in (
@@ -485,6 +509,9 @@ class MediaManager(models.Manager):
         # can materialize fresh model instances and drop dynamic aggregated attrs.
         return self._aggregate_duplicate_data(queryset, user, media_type, dup_state)
 
+    # The view spells an unconfigured region this way; keep one spelling.
+    UNSET_WATCH_PROVIDER_REGION = "UNSET"
+
     def get_media_list_item_values(
         self,
         user,
@@ -493,6 +520,7 @@ class MediaManager(models.Manager):
         search=None,
         *,
         list_sql_filters=None,
+        provider_region=None,
     ):
         """Return narrow Item projections for a media-list filter menu.
 
@@ -551,7 +579,11 @@ class MediaManager(models.Manager):
         item_queryset = Item.objects.filter(
             pk__in=queryset.values("item_id")
         ).order_by()
-        return item_queryset.values(
+        return self.item_values_for_menu(item_queryset, provider_region)
+
+    def item_values_for_menu(self, item_queryset, provider_region=None):
+        """Return the narrow ``Item`` rows a media-list filter menu reads."""
+        fields = [
             "id",
             "media_id",
             "media_type",
@@ -560,7 +592,6 @@ class MediaManager(models.Manager):
             "release_datetime",
             "genres",
             "implied_genres",
-            "watch_providers",
             "country",
             "languages",
             "platforms",
@@ -568,128 +599,39 @@ class MediaManager(models.Manager):
             "authors",
             "source",
             "status",
-        )
+        ]
+        # watch_providers holds TMDB's availability for every region it knows
+        # -- around 139 of them, and roughly 146 KiB per item. The filter menu
+        # reads exactly one region out of it, so selecting the column meant
+        # carrying about 204 MiB for a 1,400-title movie list and discarding
+        # 138/139 of it. Ask SQL for the one region instead, and ask for
+        # nothing at all where no provider filter is shown.
+        if provider_region and provider_region != self.UNSET_WATCH_PROVIDER_REGION:
+            return item_queryset.values(*fields).annotate(
+                watch_providers_region=KeyTransform(
+                    provider_region,
+                    "watch_providers",
+                    output_field=models.JSONField(),
+                ),
+            )
+        return item_queryset.values(*fields)
 
-    def _get_paginated_media_list_sql(
-        self,
-        user,
-        media_type,
-        status_filter,
-        sort_filter,
-        direction,
-        search,
-        list_sql_filters,
-        sql_limit,
-        sql_offset,
+    def _aggregated_sort_subquery(
+        self, model, user, media_type, sort_key, outer_ref="item_id",
     ):
-        """Filter, dedup, sort, and paginate a media list entirely in SQL.
-
-        Mirrors get_media_list's status/search/list_sql_filters handling and
-        row_number dedup exactly, but sorts via a correlated subquery scoped
-        to the item's user (all of that item's entries, any status) instead
-        of get_media_list's window-function dedup annotation — which only
-        sees the status-filtered rows — so aggregated sort keys match
-        _sort_value's aggregated_start_date/aggregated_end_date/
-        aggregated_score/aggregated_progress semantics exactly, not just the
-        entries that happen to match the current status filter. Prefetching
-        and duplicate-aggregation (for display, not sorting) only run on the
-        sliced page, not the full candidate set — that's the whole point.
-        """
-        model = apps.get_model(app_label="app", model_name=media_type)
-        queryset = model.objects.filter(user=user.id)
-
-        if isinstance(status_filter, (list, tuple, set, frozenset)):
-            status_filters = [
-                value
-                for value in status_filter
-                if value and value != users.models.MediaStatusChoices.ALL
-            ]
-        elif status_filter and status_filter != users.models.MediaStatusChoices.ALL:
-            status_filters = [status_filter]
-        else:
-            status_filters = []
-        if status_filters:
-            queryset = queryset.filter(status__in=status_filters)
-        else:
-            queryset = queryset.exclude(status__isnull=True)
-
-        if search:
-            queryset = queryset.filter(
-                models.Q(item__title__icontains=search)
-                | models.Q(item__media_id__icontains=search),
-            )
-
-        queryset = self._apply_list_sql_filters(
-            queryset, user, media_type, list_sql_filters or {}
-        )
-
-        queryset = queryset.annotate(
-            row_number=Window(
-                expression=RowNumber(),
-                partition_by=[F("item")],
-                order_by=F("created_at").desc(),
-            ),
-        ).filter(row_number=1)
-
-        # The web list applies status filters to the latest aggregated status,
-        # rather than merely to whichever duplicate happened to survive the
-        # display-row deduplication.  Keep that behavior in the SQL path too.
-        # The correlated subquery is scoped to the user's complete history so
-        # an older row in another status cannot make a duplicate visible.
-        if status_filters:
-            activity = Case(
-                When(end_date__isnull=False, then=F("end_date")),
-                When(progressed_at__isnull=False, then=F("progressed_at")),
-                default=F("created_at"),
-                output_field=models.DateTimeField(),
-            )
-            latest_status = (
-                model.objects.filter(item_id=OuterRef("item_id"), user=user.id)
-                .annotate(_activity=activity)
-                .order_by("-_activity", "-id")
-                .values("status")[:1]
-            )
-            queryset = queryset.annotate(_latest_status=Subquery(latest_status)).filter(
-                _latest_status__in=status_filters
-            )
-
-        sort_key = sort_filter or "title"
-        agg_subquery = self._aggregated_sort_subquery(model, user, media_type, sort_key)
-        if agg_subquery is not None:
-            queryset = queryset.annotate(_fast_sort_key=agg_subquery)
-            order_expr = F("_fast_sort_key")
-        elif sort_key in ("", "title"):
-            order_expr = Lower("item__title")
-        else:
-            raw_field = SQL_SORTABLE_RAW_FIELDS.get(sort_key, "item__title")
-            order_expr = F(raw_field)
-
-        title_tiebreak = Lower("item__title")
-        is_desc = direction == "desc"
-        queryset = queryset.select_related("item").defer(*_MEDIA_LIST_DEFERRED_ITEM_FIELDS)
-        queryset = queryset.order_by(
-            order_expr.desc(nulls_last=True) if is_desc else order_expr.asc(nulls_last=True),
-            title_tiebreak.desc() if is_desc else title_tiebreak.asc(),
-            F("item_id").desc() if is_desc else F("item_id").asc(),
-        )
-
-        total = queryset.count()
-        queryset = queryset[sql_offset : sql_offset + sql_limit]
-        queryset = self._apply_prefetch_related(queryset, media_type, list_mode=True)
-        return self._aggregate_duplicate_data(queryset, user, media_type, {}), total
-
-    def _aggregated_sort_subquery(self, model, user, media_type, sort_key):
         """Return a Subquery matching _aggregate_item_data's per-item semantics.
 
         Correlated by item_id + user only (not status) — an item tracked as
         IN_PROGRESS can have an older DROPPED entry with an earlier
         start_date that should still win, exactly like the Python aggregation
         this replaces. Returns None for raw-column sort keys, which the
-        caller orders on directly instead.
+        caller orders on directly instead. ``outer_ref`` names the outer
+        column holding the item id: ``item_id`` on a tracker queryset,
+        ``pk`` on an ``Item`` queryset.
         """
         if sort_key not in SQL_SORTABLE_AGGREGATED_KEYS:
             return None
-        base = model.objects.filter(item_id=OuterRef("item_id"), user=user.id)
+        base = model.objects.filter(item_id=OuterRef(outer_ref), user=user.id)
 
         if sort_key in ("start_date", "started"):
             inner = base.order_by().values("item_id").annotate(agg=Min("start_date"))
@@ -747,16 +689,39 @@ class MediaManager(models.Manager):
             # Using all statuses is intentional: an item filtered as IN_PROGRESS may have
             # a more-recent COMPLETED entry that should determine its aggregated_status.
             #
-            # _aggregate_item_data only reads scalar fields (progress, status, dates,
-            # score) and item.media_type off these entries, so this intentionally
-            # skips _apply_prefetch_related: the events/tags/seasons/episodes
-            # prefetch bundle it would pull in is for the *displayed* media_list,
-            # not this internal aggregation pass, and re-fetching it here was
-            # doubling those queries for every list page.
-            all_media = model.objects.filter(
-                user=user.id,
-                item_id__in=queried_item_ids,
-            ).select_related("item")
+            # _aggregate_item_data reads scalar fields off these entries and
+            # nothing else: item.media_type is read from the *displayed* row,
+            # which the caller's own queryset already select_related. So this
+            # skips _apply_prefetch_related (that events/tags/seasons/episodes
+            # bundle belongs to the displayed list, and re-fetching it here was
+            # doubling those queries for every page), and it projects only the
+            # columns the aggregation reads.
+            #
+            # The projection is the memory fix. This filter is by item id, not
+            # by page, so on a list that is not paginated in SQL it returns a
+            # row for every tracked title -- and with select_related("item") it
+            # hydrated a full Item for each one, including synopsis and the
+            # ~146 KiB watch_providers blob the surrounding querysets are
+            # careful to defer. One SQL query, hundreds of MiB of JSON
+            # decoding: exactly the shape production showed on
+            # /medialist/movie, two minutes of wall time across eleven queries.
+            all_media = (
+                model.objects.filter(
+                    user=user.id,
+                    item_id__in=queried_item_ids,
+                )
+                .only(*_aggregation_projection(model))
+                # Media's default ordering is ["user", "item", "-created_at"],
+                # which makes the database join users_user and app_item purely
+                # to sort a result set that is about to be grouped into a dict
+                # by item id. Only the order *within* a group is observable
+                # here -- _aggregate_item_data breaks an activity tie by
+                # keeping the entry it saw first -- and within a group both
+                # leading keys are constant: the filter pins one user, and the
+                # group key is the item. So "-created_at" alone produces the
+                # identical grouping, without the joins or the sort.
+                .order_by("-created_at")
+            )
 
             # Group media by item_id
             media_by_item = {}
@@ -857,7 +822,7 @@ class MediaManager(models.Manager):
         # Store the number of repeats for display
         display_media.repeats = len(all_media_entries)
 
-    def _apply_prefetch_related(self, queryset, media_type, list_mode=False):
+    def _apply_prefetch_related(self, queryset, media_type, list_mode=False, *, compact_episodes=False):
         """Apply appropriate prefetch_related based on media type.
 
         list_mode=True narrows the episode queryset to only the fields required
@@ -867,23 +832,63 @@ class MediaManager(models.Manager):
         TV = apps.get_model("app", "TV")
         Season = apps.get_model("app", "Season")
         Episode = apps.get_model("app", "Episode")
+        episode_qs = Episode.objects.select_related("item")
+        if compact_episodes and (queryset.model == TV or media_type == MediaTypes.SEASON.value):
+            # Window sorting runs over every watch. Joining the catalogue here
+            # copies its wide JSON/text columns into every intermediate row.
+            # Fetch Items only after the window has selected its representatives.
+            episode_qs = Episode.objects.prefetch_related(
+                Prefetch("item", queryset=Item.objects.defer("watch_providers")),
+            )
+            # Read-only card/ranking graphs need per-identity counts and date
+            # bounds, not one Python Episode/Item pair per historical watch.
+            partition = [F("related_season_id"), F("item_id")]
+            aggregates = {
+                "_card_total_count": Count("pk"),
+                "_card_completed_count": Count("pk", filter=Q(status=Status.COMPLETED.value)),
+                "_card_dropped_count": Count("pk", filter=Q(status=Status.DROPPED.value)),
+                "_card_first_end": Min("end_date"),
+                "_card_last_end": Max("end_date"),
+            }
+            season_lookup = "related_season__related_tv_id" if queryset.model == TV else "related_season_id"
+            # Different Items sharing one episode number can interleave in
+            # next-air-date ordering. Keep their raw rows rather than change
+            # tie semantics during identity correction or alternate ordering.
+            ambiguous_seasons = (
+                Episode.objects.filter(**{f"{season_lookup}__in": queryset.order_by().values("pk")})
+                .order_by().values("related_season_id", "item__episode_number")
+                .annotate(item_count=Count("item_id", distinct=True))
+                .filter(item_count__gt=1).values("related_season_id")
+            )
+            episode_qs = episode_qs.annotate(
+                **{name: Window(expression, partition_by=partition) for name, expression in aggregates.items()},
+                _card_position=Window(RowNumber(), partition_by=partition, order_by=F("pk").asc()),
+                _card_is_summary=Case(
+                    When(related_season_id__in=Subquery(ambiguous_seasons), then=models.Value(False)),
+                    When(related_season__rewatch_started_at__isnull=True, then=models.Value(True)),
+                    default=models.Value(False), output_field=models.BooleanField(),
+                ),
+            ).filter(Q(_card_is_summary=False) | Q(_card_position=1))
         # Apply media-specific prefetches
         if media_type == MediaTypes.TV.value or (
             media_type == MediaTypes.ANIME.value and queryset.model == TV
         ):
-            episode_qs = Episode.objects.select_related("item")
             if list_mode:
                 # Load only the fields accessed in the list path:
-                # ep.item.episode_number, ep.end_date, and ep.status. Deferring
-                # the remaining ~30 Item columns cuts Django object
-                # instantiation time proportionally for large libraries.
+                # ep.item.episode_number, ep.item.release_datetime (the
+                # next-episode air date falls back to it), ep.end_date, and
+                # ep.status. Deferring the remaining ~30 Item columns cuts
+                # Django object instantiation time proportionally for large
+                # libraries.
                 episode_qs = episode_qs.only(
                     "id",
                     "end_date",
                     "status",
+                    "created_at",
                     "related_season_id",
                     "item__id",
                     "item__episode_number",
+                    "item__release_datetime",
                 )
             return queryset.prefetch_related(
                 Prefetch(
@@ -921,7 +926,7 @@ class MediaManager(models.Manager):
             return base_queryset.select_related("related_tv__item").prefetch_related(
                 Prefetch(
                     "episodes",
-                    queryset=Episode.objects.select_related("item"),
+                    queryset=episode_qs,
                 ),
             )
 
@@ -939,6 +944,62 @@ class MediaManager(models.Manager):
             return self._sort_season_media_list(queryset, sort_filter, direction)
 
         return self._sort_generic_media_list(queryset, sort_filter, direction)
+
+    def _season_events_by_show(self, shows):
+        """Return ``{(media_id, source): [event, ...]}`` for shows' season events.
+
+        One query for all the shows, ordered by season then episode. Only what
+        the next-episode date reads is loaded from each event's item.
+        """
+        shows = set(shows)
+        events_by_show = defaultdict(list)
+        media_ids = sorted({media_id for media_id, _source in shows})
+        for start in range(0, len(media_ids), 500):
+            season_events = (
+                events.models.Event.objects.filter(
+                    item__media_id__in=media_ids[start : start + 500],
+                    item__source__in={source for _media_id, source in shows},
+                    item__media_type=MediaTypes.SEASON.value,
+                    item__season_number__gt=0,
+                    content_number__isnull=False,
+                )
+                .select_related("item")
+                .only(
+                    "content_number",
+                    "datetime",
+                    "item__media_id",
+                    "item__source",
+                    "item__season_number",
+                    "item__release_datetime",
+                )
+                .order_by("item__season_number", "content_number")
+            )
+            for event in season_events:
+                key = (event.item.media_id, event.item.source)
+                if key in shows:
+                    events_by_show[key].append(event)
+        return events_by_show
+
+    def attach_show_season_events(self, medias):
+        """Load the season events `_next_episode_air_date_value` may need, in bulk.
+
+        Without this, each show that has watched everything it has tracked so
+        far costs its own events query (and a query per event for its item).
+        """
+        tv_medias = [
+            media
+            for media in medias
+            if getattr(getattr(media, "item", None), "media_type", None)
+            == MediaTypes.TV.value
+        ]
+        events_by_show = self._season_events_by_show(
+            [(media.item.media_id, media.item.source) for media in tv_medias],
+        )
+        for media in tv_medias:
+            media.prefetched_show_season_events = events_by_show.get(
+                (media.item.media_id, media.item.source),
+                [],
+            )
 
     def _next_episode_air_date_value(self, media):
         """Return the air datetime for the next episode in watch order."""
@@ -987,7 +1048,17 @@ class MediaManager(models.Manager):
                     getattr(getattr(episode, "item", None), "episode_number", 0) or 0
                 ),
             )
-            return episodes
+            # Preserve the old watch-row sequence for next-air-date lookup,
+            # but carry only the prefix containing the requested position.
+            # Repeated watches of one Item have the same release datetime.
+            prefix = []
+            needed = progress_index + 1
+            for episode in episodes:
+                count = episode._card_total_count if getattr(episode, "_card_is_summary", False) else 1
+                prefix.extend([episode] * min(count, needed - len(prefix)))
+                if len(prefix) >= needed:
+                    break
+            return prefix
 
         media_type = getattr(item, "media_type", None)
         progress_index = _progress_index()
@@ -1027,18 +1098,16 @@ class MediaManager(models.Manager):
                     for season in seasons
                     if getattr(season, "item", None) is not None
                 }
-                untracked_events = (
-                    events.models.Event.objects.filter(
-                        item__media_id=item.media_id,
-                        item__source=item.source,
-                        item__media_type=MediaTypes.SEASON.value,
-                        item__season_number__gt=0,
-                        content_number__isnull=False,
-                    )
-                    .exclude(item__season_number__in=tracked_season_numbers)
-                    .order_by("item__season_number", "content_number")
+                show_events = getattr(media, "prefetched_show_season_events", None)
+                if show_events is None:
+                    show_events = self._season_events_by_show(
+                        [(item.media_id, item.source)],
+                    ).get((item.media_id, item.source), [])
+                candidates.extend(
+                    event
+                    for event in show_events
+                    if event.item.season_number not in tracked_season_numbers
                 )
-                candidates.extend(untracked_events)
 
             if progress_index >= len(candidates):
                 return None
@@ -1090,6 +1159,8 @@ class MediaManager(models.Manager):
         with_dates = []
         without_dates = []
 
+        media_items = list(media_items)
+        self.attach_show_season_events(media_items)
         for media in media_items:
             next_episode_air_date = self._next_episode_air_date_value(media)
             media.next_episode_air_date = next_episode_air_date
@@ -1645,7 +1716,10 @@ class MediaManager(models.Manager):
                 [
                     event
                     for event in getattr(media.item, "prefetched_events", [])
+                    # Digital and physical dates are per region, so only the
+                    # main release counts as a card's next event.
                     if event.datetime > current_time
+                    and not getattr(event, "release_type", "")
                 ],
                 key=lambda e: e.datetime,
             )
@@ -1790,28 +1864,7 @@ class MediaManager(models.Manager):
             # For seasons, use metadata max_progress instead of database annotation
             # The metadata value is more accurate as it reflects the actual total episodes
             # from the provider, not just episodes with release_datetime set
-            from app.providers import services
-
-            for season in media_list:
-                try:
-                    season_metadata = services.get_media_metadata(
-                        MediaTypes.SEASON.value,
-                        season.item.media_id,
-                        season.item.source,
-                        [season.item.season_number],
-                    )
-                    # Use metadata max_progress if available, otherwise fall back to annotation
-                    metadata_max_progress = season_metadata.get("max_progress")
-                    if metadata_max_progress is not None:
-                        season.max_progress = metadata_max_progress
-                    else:
-                        # Fall back to database annotation if metadata doesn't have max_progress
-                        self._annotate_season_released_episodes(
-                            [season], current_datetime
-                        )
-                except Exception:
-                    # If metadata fetch fails, fall back to database annotation
-                    self._annotate_season_released_episodes([season], current_datetime)
+            self._annotate_season_metadata_max_progress(media_list, current_datetime)
             return
 
         if media_type == MediaTypes.BOOK.value:
@@ -1871,6 +1924,101 @@ class MediaManager(models.Manager):
             if media.item.id in manual_item_ids:
                 continue
             media.max_progress = max_progress_dict.get(media.item.id)
+            # AniList returns no airing schedule for many finished series, and a
+            # new entry has no events until its calendar task runs, so a finished
+            # anime falls back to the provider's episode count (#1254).
+            if (
+                media.max_progress is None
+                and media_type == MediaTypes.ANIME.value
+                and media.item.status == "Finished"
+            ):
+                media.max_progress = media.item.provider_episode_count
+
+    def annotate_episode_progress(self, media_list, media_type=None):
+        """Annotate released and provider-total episode counts in bulk.
+
+        The API needs both the released count used by ``episodes_left`` and the
+        provider's full count.  Season max-progress historically performs a
+        provider lookup per row, which is appropriate for some web sorting
+        paths but not for an API page.  This method deliberately uses the
+        local release/event queries for seasons and the persisted provider
+        count for the full denominator.
+        """
+        media_list = list(media_list)
+        media_by_type = defaultdict(list)
+        for media in media_list:
+            item = getattr(media, "item", None)
+            item_type = getattr(item, "media_type", None)
+            if item_type in {
+                MediaTypes.TV.value,
+                MediaTypes.SEASON.value,
+                MediaTypes.ANIME.value,
+            }:
+                if item_type == MediaTypes.SEASON.value:
+                    route_type = MediaTypes.SEASON.value
+                elif media_type == MediaTypes.ANIME.value:
+                    route_type = MediaTypes.ANIME.value
+                else:
+                    route_type = media_type or item_type
+                if route_type == MediaTypes.ANIME.value:
+                    media_by_type[MediaTypes.ANIME.value].append(media)
+                else:
+                    media_by_type[item_type].append(media)
+
+        current_datetime = timezone.now()
+        for route_type, typed_media in media_by_type.items():
+            if route_type == MediaTypes.SEASON.value:
+                self._annotate_season_released_episodes(
+                    typed_media,
+                    current_datetime,
+                )
+            else:
+                self.annotate_max_progress(typed_media, route_type)
+            self._annotate_total_episode_count(typed_media, route_type)
+
+        return media_list
+
+    def _annotate_total_episode_count(self, media_list, media_type):
+        """Annotate provider totals, excluding dropped TV seasons."""
+        for media in media_list:
+            item = getattr(media, "item", None)
+            total = getattr(item, "provider_episode_count", None)
+
+            if media_type == MediaTypes.TV.value or (
+                media_type == MediaTypes.ANIME.value
+                and getattr(item, "media_type", None) == MediaTypes.TV.value
+            ):
+                seasons = list(media.seasons.all())
+                main_seasons = [
+                    season
+                    for season in seasons
+                    if getattr(season.item, "season_number", None) not in (None, 0)
+                ]
+                dropped_seasons = [
+                    season
+                    for season in main_seasons
+                    if season.status == Status.DROPPED.value
+                ]
+                if dropped_seasons:
+                    active_counts = [
+                        getattr(season.item, "provider_episode_count", None)
+                        for season in main_seasons
+                        if season.status != Status.DROPPED.value
+                    ]
+                    total = (
+                        sum(active_counts)
+                        if all(count is not None for count in active_counts)
+                        else None
+                    )
+                elif total is None:
+                    season_counts = [
+                        getattr(season.item, "provider_episode_count", None)
+                        for season in main_seasons
+                    ]
+                    if season_counts and all(count is not None for count in season_counts):
+                        total = sum(season_counts)
+
+            media.total_episode_count = total
 
     def _annotate_tv_released_episodes(self, tv_list, current_datetime):
         """Annotate TV shows with the number of released episodes."""
@@ -1964,6 +2112,83 @@ class MediaManager(models.Manager):
                         details,
                         fallback_max_progress=None,
                     )
+
+    def _annotate_season_metadata_max_progress(self, season_list, current_datetime):
+        """Annotate seasons with the provider's episode count.
+
+        The provider count is more accurate than the database annotation: it
+        reflects every episode, not only those with a release date stored. A
+        list renders many seasons of the same show, so provider-backed seasons
+        are read with one bundle call per show rather than one per season.
+        A show whose lookup failed is not retried for a while, so a slow or
+        unreachable provider costs one attempt, not one per season per render.
+        """
+        from django.core.cache import cache
+
+        from app.providers import services
+
+        batched_sources = {Sources.TMDB.value, Sources.TVDB.value}
+        seasons_by_show = defaultdict(list)
+        fallback = []
+
+        def annotate_from_season_lookup(season):
+            item = season.item
+            try:
+                season_metadata = services.get_media_metadata(
+                    MediaTypes.SEASON.value,
+                    item.media_id,
+                    item.source,
+                    [item.season_number],
+                )
+            except Exception:
+                fallback.append(season)
+                return
+            metadata_max_progress = season_metadata.get("max_progress")
+            if metadata_max_progress is None:
+                fallback.append(season)
+            else:
+                season.max_progress = metadata_max_progress
+
+        for season in season_list:
+            item = season.item
+            if item.source in batched_sources and item.season_number is not None:
+                seasons_by_show[(item.source, item.media_id)].append(season)
+            else:
+                annotate_from_season_lookup(season)
+
+        for (source, media_id), seasons in seasons_by_show.items():
+            failed_key = f"season_max_progress_failed:{source}:{media_id}"
+            if cache.get(failed_key):
+                fallback.extend(seasons)
+                continue
+            season_numbers = sorted({season.item.season_number for season in seasons})
+            try:
+                bundle = services.get_media_metadata(
+                    "tv_with_seasons",
+                    media_id,
+                    source,
+                    season_numbers,
+                )
+            except Exception:
+                cache.set(failed_key, True, SEASON_MAX_PROGRESS_RETRY_SECONDS)
+                fallback.extend(seasons)
+                continue
+            for season in seasons:
+                season_data = bundle.get(f"season/{season.item.season_number}")
+                metadata_max_progress = (
+                    season_data.get("max_progress")
+                    if isinstance(season_data, dict)
+                    else None
+                )
+                if metadata_max_progress is None:
+                    # Not answered by the bundle: ask for the season on its
+                    # own, as before, so the result never differs from a
+                    # direct read.
+                    annotate_from_season_lookup(season)
+                else:
+                    season.max_progress = metadata_max_progress
+
+        self._annotate_season_released_episodes(fallback, current_datetime)
 
     def _annotate_season_released_episodes(self, season_list, current_datetime):
         """Annotate seasons with the number of released episodes."""
@@ -2230,6 +2455,7 @@ class MediaManager(models.Manager):
         season_number=None,
         episode_number=None,
         library_media_type=None,
+        annotate_progress=True,
     ):
         """Filter user media object with prefetch_related applied."""
         queryset = self.filter_media(
@@ -2243,7 +2469,8 @@ class MediaManager(models.Manager):
         )
         queryset = self._apply_prefetch_related(queryset, media_type)
         queryset = queryset.select_related("item")
-        self.annotate_max_progress(queryset, media_type)
+        if annotate_progress:
+            self.annotate_max_progress(queryset, media_type)
 
         return queryset
 
@@ -2254,6 +2481,7 @@ class MediaManager(models.Manager):
         source,
         season_numbers=None,
         library_media_type=None,
+        annotate_progress=True,
     ):
         """Return tracked season consumptions for a show."""
         queryset = self.filter_media_prefetch(
@@ -2262,6 +2490,7 @@ class MediaManager(models.Manager):
             MediaTypes.SEASON.value,
             source,
             library_media_type=library_media_type,
+            annotate_progress=annotate_progress,
         )
 
         if season_numbers is not None:

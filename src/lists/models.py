@@ -118,6 +118,7 @@ class CustomList(models.Model):
         ("local", "Local"),
         ("trakt", "Trakt"),
         ("mdblist", "MDBList"),
+        ("wetrakr", "WeTrakr"),
     ]
 
     VISIBILITY_CHOICES = [
@@ -338,7 +339,12 @@ class CustomList(models.Model):
         if prefetched_list_items:
             first_item = prefetched_list_items[0].item
         if first_item is None:
-            first_item = self.items.first()
+            membership = (
+                self.customlistitem_set.select_related("item")
+                .order_by("date_added", "pk")
+                .first()
+            )
+            first_item = membership.item if membership else None
         if not first_item:
             return settings.IMG_NONE
 

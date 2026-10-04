@@ -1,10 +1,11 @@
-from datetime import UTC
+from datetime import UTC, timedelta
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase
 from django.urls import reverse
+from django.utils import timezone
 from django_celery_beat.models import IntervalSchedule, PeriodicTask
 
 from app.models import Music
@@ -476,3 +477,36 @@ class LastFMSyncHelperTests(TestCase):
             int(music.end_date.astimezone(UTC).timestamp()),
             newer_uts,
         )
+
+
+class LastFMFanOutProbeTests(TestCase):
+    """The scheduled poll re-probes a broken account instead of skipping it forever."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="lastfm-probe")
+        self.account = LastFMAccount.objects.create(
+            user=self.user,
+            lastfm_username="listener",
+            connection_broken=True,
+        )
+
+    def _failed_ago(self, delta):
+        self.account.last_failed_at = timezone.now() - delta
+        self.account.save(update_fields=["last_failed_at"])
+
+    @patch("integrations.tasks._lastfm._run_incremental_lastfm_sync")
+    def test_broken_account_is_reprobed_once_due(self, mock_run):
+        mock_run.return_value = {"status": "success"}
+        self._failed_ago(timedelta(hours=2))
+
+        tasks.poll_all_lastfm_scrobbles()
+
+        mock_run.assert_called_once()
+
+    @patch("integrations.tasks._lastfm._run_incremental_lastfm_sync")
+    def test_recently_rejected_account_waits_for_next_probe(self, mock_run):
+        self._failed_ago(timedelta(minutes=5))
+
+        tasks.poll_all_lastfm_scrobbles()
+
+        mock_run.assert_not_called()

@@ -2,6 +2,7 @@
 
 import logging
 from collections import Counter, defaultdict
+from heapq import nsmallest
 from types import SimpleNamespace
 
 from django.conf import settings
@@ -20,6 +21,7 @@ from app.models import (
     Movie,
     Person,
     PersonGender,
+    Studio,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,9 +114,11 @@ def _tv_episode_play_rows(user, start_date, end_date, *, is_all_time=None):
         season_item_ids,
     )
     if season_item_ids:
-        for credit in ItemPersonCredit.objects.filter(
-            item_id__in=season_item_ids
-        ).iterator():
+        for credit in (
+            ItemPersonCredit.objects.filter(item_id__in=season_item_ids)
+            .values_list("item_id", "role_type", "department", "role", named=True)
+            .iterator(chunk_size=500)
+        ):
             if credit.role_type == CreditRoleType.CAST.value:
                 season_items_with_cast_credits.add(credit.item_id)
                 continue
@@ -345,8 +349,15 @@ def _get_person_talent_totals_from_context(user, person, context):
     person_credits = ItemPersonCredit.objects.filter(
         item_id__in=played_item_ids,
         person_id=person.id,
+    ).values_list(
+        "item_id",
+        "role_type",
+        "department",
+        "role",
+        "sort_order",
+        named=True,
     )
-    for credit in person_credits:
+    for credit in person_credits.iterator(chunk_size=500):
         item_media_type = item_media_type_by_id.get(credit.item_id)
         if not item_media_type:
             continue
@@ -563,6 +574,31 @@ def get_person_talent_totals(
     return _get_person_talent_totals_from_context(user, person, context)
 
 
+TALENT_MEDIA_TYPES = frozenset(
+    {
+        MediaTypes.MOVIE.value,
+        MediaTypes.TV.value,
+        MediaTypes.ANIME.value,
+        MediaTypes.GAME.value,
+    }
+)
+
+
+def _normalize_talent_media_types(media_type, allowed=TALENT_MEDIA_TYPES):
+    """Turn "tv", "tv,movie" or a collection into a set of `allowed` types.
+
+    Returns None (no filtering) for None/"all"/empty input. Types without
+    cast/crew data (books, music, ...) are dropped, so a selection made only of
+    them yields an empty set and therefore no talent.
+    """
+    if media_type in (None, "", "all"):
+        return None
+    if isinstance(media_type, str):
+        media_type = media_type.split(",")
+    selected = {str(value).strip() for value in media_type} & allowed
+    return frozenset(selected)
+
+
 def _aggregate_top_talent(
     user,
     start_date,
@@ -575,8 +611,9 @@ def _aggregate_top_talent(
 ):
     """Aggregate top cast/crew/studio rollups from watched movie and TV plays.
 
-    media_type restricts the aggregation to one of "movie", "tv", "anime", or
-    "game" — None/"all" (the default) keeps the unfiltered cross-type rollup.
+    media_type restricts the aggregation to "movie", "tv", "anime", and/or
+    "game": one value, or several as a comma-separated string or a collection.
+    None/"all" (the default) keeps the unfiltered cross-type rollup.
     `is_all_time` defaults to inferring "all time" from start_date/end_date
     both being None; callers that must pass concrete bounds for other
     reasons (e.g. day-list-derived aware datetimes) while still meaning "all
@@ -666,24 +703,23 @@ def _aggregate_top_talent(
             _calculate_game_time_in_range(game, start_date, end_date) or 0
         )
 
-    if media_type not in (None, "all"):
-        if media_type == MediaTypes.MOVIE.value:
+    selected_types = _normalize_talent_media_types(media_type)
+    if selected_types is not None:
+        if MediaTypes.MOVIE.value not in selected_types:
+            movie_play_counts = Counter()
+            movie_watch_minutes = Counter()
+        if MediaTypes.GAME.value not in selected_types:
+            game_play_counts = Counter()
+            game_watch_minutes = Counter()
+        selected_show_types = selected_types & {
+            MediaTypes.TV.value,
+            MediaTypes.ANIME.value,
+        }
+        if not selected_show_types:
             episode_play_rows = []
             season_item_ids = set()
             tv_item_ids = set()
-            game_play_counts = Counter()
-            game_watch_minutes = Counter()
-        elif media_type == MediaTypes.GAME.value:
-            movie_play_counts = Counter()
-            movie_watch_minutes = Counter()
-            episode_play_rows = []
-            season_item_ids = set()
-            tv_item_ids = set()
-        elif media_type in (MediaTypes.TV.value, MediaTypes.ANIME.value):
-            movie_play_counts = Counter()
-            movie_watch_minutes = Counter()
-            game_play_counts = Counter()
-            game_watch_minutes = Counter()
+        elif len(selected_show_types) == 1:
             # TV and Anime share the same related_tv FK chain in
             # _tv_episode_play_rows, so the split can only happen here once
             # each show's own Item.media_type is known.
@@ -693,21 +729,12 @@ def _aggregate_top_talent(
             tv_item_ids = {
                 item_id
                 for item_id in tv_item_ids
-                if show_media_type_by_id.get(item_id) == media_type
+                if show_media_type_by_id.get(item_id) in selected_show_types
             }
             episode_play_rows = [
                 row for row in episode_play_rows if row[2] in tv_item_ids
             ]
             season_item_ids = {row[1] for row in episode_play_rows if row[1]}
-        else:
-            # No cast/crew data exists for other media types (books, music, etc).
-            movie_play_counts = Counter()
-            movie_watch_minutes = Counter()
-            episode_play_rows = []
-            season_item_ids = set()
-            tv_item_ids = set()
-            game_play_counts = Counter()
-            game_watch_minutes = Counter()
 
     if not movie_play_counts and not episode_play_rows and not game_play_counts:
         by_sort = {mode: _empty_talent_bucket() for mode in valid_sort_modes}
@@ -733,35 +760,45 @@ def _aggregate_top_talent(
         | episode_item_ids
         | game_item_ids
     )
-    item_rows = list(
+    item_media_type_by_id = {}
+    item_source_by_id = {}
+    for item_id, media_type_value, source in (
         Item.objects.filter(
             id__in=played_item_ids,
-        ).values_list("id", "media_type", "media_id", "source"),
-    )
-    item_media_type_by_id = {
-        item_id: media_type for item_id, media_type, _media_id, _source in item_rows
-    }
-    item_source_by_id = {
-        item_id: source for item_id, _media_type, _media_id, source in item_rows
-    }
+        )
+        .values_list("id", "media_type", "source")
+        .iterator(chunk_size=500)
+    ):
+        item_media_type_by_id[item_id] = media_type_value
+        item_source_by_id[item_id] = source
 
     cast_actor_ids_by_item = defaultdict(set)
     cast_actress_ids_by_item = defaultdict(set)
     director_ids_by_item = defaultdict(set)
     writer_ids_by_item = defaultdict(set)
     studio_ids_by_item = defaultdict(set)
+    person_names = {}
+    studio_names = {}
     people_by_id = {}
     studios_by_id = {}
 
+    # Project only aggregation fields. A cached select_related queryset keeps a
+    # separate Person instance (including biography) alive for every credit.
     person_credits = ItemPersonCredit.objects.filter(
         item_id__in=played_item_ids
-    ).select_related("person")
-    for credit in person_credits:
-        person = credit.person
-        if not person:
-            continue
-        people_by_id[person.id] = person
-
+    ).values_list(
+        "item_id",
+        "person_id",
+        "role_type",
+        "role",
+        "department",
+        "sort_order",
+        "person__gender",
+        "person__name",
+        named=True,
+    )
+    for credit in person_credits.iterator(chunk_size=500):
+        person_names[credit.person_id] = credit.person__name.lower()
         if credit.role_type == CreditRoleType.CAST.value:
             item_media_type = item_media_type_by_id.get(credit.item_id)
             if (
@@ -773,29 +810,24 @@ def _aggregate_top_talent(
                 )
             ):
                 continue
-            cast_bucket = _cast_bucket_for_person(person)
-            if cast_bucket == "actor":
-                cast_actor_ids_by_item[credit.item_id].add(person.id)
+            if credit.person__gender == PersonGender.FEMALE.value:
+                cast_actress_ids_by_item[credit.item_id].add(credit.person_id)
             else:
-                cast_actress_ids_by_item[credit.item_id].add(person.id)
+                cast_actor_ids_by_item[credit.item_id].add(credit.person_id)
             continue
-
         if credit.role_type == CreditRoleType.CREW.value:
             if _is_director_credit(credit):
-                director_ids_by_item[credit.item_id].add(person.id)
+                director_ids_by_item[credit.item_id].add(credit.person_id)
             if _is_writer_credit(credit):
-                writer_ids_by_item[credit.item_id].add(person.id)
+                writer_ids_by_item[credit.item_id].add(credit.person_id)
 
     studio_item_ids = movie_item_ids | show_item_ids | game_item_ids
     studio_credits = ItemStudioCredit.objects.filter(
         item_id__in=studio_item_ids
-    ).select_related("studio")
-    for credit in studio_credits:
-        studio = credit.studio
-        if not studio:
-            continue
-        studios_by_id[studio.id] = studio
-        studio_ids_by_item[credit.item_id].add(studio.id)
+    ).values_list("item_id", "studio_id", "studio__name")
+    for item_id, studio_id, name in studio_credits.iterator(chunk_size=500):
+        studio_names[studio_id] = name.lower()
+        studio_ids_by_item[item_id].add(studio_id)
 
     tv_items_with_usable_credits = credit_helpers.usable_credits_backfill_item_ids(
         tv_item_ids
@@ -1011,8 +1043,7 @@ def _aggregate_top_talent(
         unique_games = len(game_items_by_person.get(person_id, set()))
         unique_shows = len(show_items_by_person.get(person_id, set()))
         unique_titles = unique_movies + unique_games + unique_shows
-        person = people_by_id.get(person_id)
-        name_key = person.name.lower() if person else ""
+        name_key = person_names.get(person_id, "")
         if mode == "time":
             return (-minutes, -plays, -unique_titles, name_key)
         if mode == "titles":
@@ -1032,8 +1063,7 @@ def _aggregate_top_talent(
         unique_games = len(game_items_by_studio.get(studio_id, set()))
         unique_shows = len(show_items_by_studio.get(studio_id, set()))
         unique_titles = unique_movies + unique_games + unique_shows
-        studio = studios_by_id.get(studio_id)
-        name_key = studio.name.lower() if studio else ""
+        name_key = studio_names.get(studio_id, "")
         if mode == "time":
             return (-minutes, -plays, -unique_titles, name_key)
         if mode == "titles":
@@ -1048,7 +1078,8 @@ def _aggregate_top_talent(
         show_items_by_person,
         mode,
     ):
-        ranked = sorted(
+        ranked = nsmallest(
+            limit,
             counter_obj.items(),
             key=lambda row: _person_sort_key(
                 row[0],
@@ -1059,8 +1090,14 @@ def _aggregate_top_talent(
                 show_items_by_person,
                 mode,
             ),
-        )[:limit]
+        )
         payload = []
+        missing_ids = {person_id for person_id, _ in ranked} - people_by_id.keys()
+        people_by_id.update(
+            Person.objects.filter(pk__in=missing_ids)
+            .only("name", "image", "source", "source_person_id")
+            .in_bulk()
+        )
         for person_id, plays in ranked:
             person = people_by_id.get(person_id)
             if not person:
@@ -1096,7 +1133,8 @@ def _aggregate_top_talent(
         show_items_by_studio,
         mode,
     ):
-        ranked = sorted(
+        ranked = nsmallest(
+            limit,
             counter_obj.items(),
             key=lambda row: _studio_sort_key(
                 row[0],
@@ -1107,8 +1145,14 @@ def _aggregate_top_talent(
                 show_items_by_studio,
                 mode,
             ),
-        )[:limit]
+        )
         payload = []
+        missing_ids = {studio_id for studio_id, _ in ranked} - studios_by_id.keys()
+        studios_by_id.update(
+            Studio.objects.filter(pk__in=missing_ids)
+            .only("name", "logo", "source", "source_studio_id")
+            .in_bulk()
+        )
         for studio_id, plays in ranked:
             studio = studios_by_id.get(studio_id)
             if not studio:

@@ -222,7 +222,7 @@ class CustomListManagerTest(TestCase):
         self.assertTrue(smart_list.items.filter(id=item.id).exists())
 
     def test_collect_matching_item_ids_fast_paths_simple_status_rules(self):
-        """Status-only smart rules should not build extra collection/rating scans."""
+        """Status-only smart rules are answered in SQL, without scanning items."""
         completed_item = Item.objects.create(
             title="Completed Movie",
             media_id="4567",
@@ -256,19 +256,9 @@ class CustomListManagerTest(TestCase):
             self.user,
         )
 
-        with (
-            patch(
-                "lists.smart_rules._collection_filter_context",
-                side_effect=AssertionError("collection context should not be built"),
-            ),
-            patch(
-                "lists.smart_rules._filter_item_ids_by_rating",
-                side_effect=AssertionError("rating filter scan should not run"),
-            ),
-            patch(
-                "lists.smart_rules._matches_item_filters",
-                side_effect=AssertionError("simple status rules should not scan items"),
-            ),
+        with patch(
+            "app.library_query.executor.LibraryQueryExecutor._scan",
+            side_effect=AssertionError("simple status rules should not scan items"),
         ):
             matched_ids = smart_rules.collect_matching_item_ids(
                 self.user, normalized_rules

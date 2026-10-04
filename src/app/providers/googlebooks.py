@@ -3,7 +3,6 @@
 import re
 
 import requests
-from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.cache import cache
 
@@ -197,6 +196,11 @@ def _publication_year(date_value):
 
 def _description(description):
     """Strip markup from an optional Google Books description."""
+    # Imported here, not at module scope: beautifulsoup4 is only needed to
+    # flatten an HTML description, so importing it at module scope would
+    # keep it resident in every process that touches this provider.
+    from bs4 import BeautifulSoup
+
     if not description:
         return "No synopsis available."
     text = BeautifulSoup(str(description), "html.parser").get_text(separator=" ")

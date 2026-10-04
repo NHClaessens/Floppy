@@ -4,6 +4,7 @@ from http import HTTPStatus as HTTP  # noqa: N814
 from unittest.mock import patch
 
 from django.urls import reverse
+from kombu.exceptions import OperationalError as KombuOperationalError
 
 from integrations.upload_staging import discard_staged_upload
 
@@ -29,6 +30,24 @@ class ImportDispatchTests(FloppyApiTestCase):
         kwargs = mock_delay.call_args.kwargs
         self.assertEqual(kwargs["user_id"], self.user1.id)
         self.assertEqual(kwargs["mode"], "new")
+
+    @patch("api.fork_views_integrations.tasks.import_mal.delay")
+    def test_unreachable_broker_is_a_503_naming_redis(self, mock_delay):
+        """#1263. A dead broker was an unhandled 500 on username imports."""
+        mock_delay.side_effect = KombuOperationalError(
+            "Error -2 connecting to redis:6379. Name does not resolve."
+        )
+        with self.assertLogs("api.fork_views_integrations", level="ERROR"):
+            response = self.call_api(
+                "post",
+                "api_import_dispatch",
+                args=("mal",),
+                payload={"username": "someone", "mode": "new"},
+                headers=self.auth_headers,
+            )
+
+        self.assertEqual(response.status_code, HTTP.SERVICE_UNAVAILABLE)
+        self.assertIn("cannot reach Redis", response.json()["detail"])
 
     def test_username_missing_rejected(self):
         """Missing usernames return 400."""

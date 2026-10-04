@@ -29,7 +29,15 @@ logger = logging.getLogger(__name__)
 
 @shared_task(name="Cleanup task results", ignore_result=True)
 def cleanup_task_results(batch_size=5000):
-    """Remove expired and abandoned durable task-status rows in small batches."""
+    """Remove expired and abandoned durable task-status rows in small batches.
+
+    Also closes import runs whose task was killed before it could say so.
+    """
+    from integrations.tasks._import_helpers import close_abandoned_import_runs
+
+    # Same housekeeping cadence: a killed import leaves no other record.
+    close_abandoned_import_runs()
+
     batch_size = max(int(batch_size), 0)
     if not batch_size:
         return 0
@@ -112,12 +120,15 @@ from app.tasks_anime_library_repair import (  # noqa: E402
     convert_anime_library_shape_task,
     repair_duplicated_anime_libraries_task,
 )
+from app.tasks_backdrops import warm_backdrops_task  # noqa: E402, F401
 from app.tasks_backfill_state import (  # noqa: E402
     EXTERNAL_IDS_BACKFILL_VERSION,
     GENRE_BACKFILL_VERSION,
     METADATA_BACKFILL_BASE_DELAY_SECONDS,
     METADATA_BACKFILL_MAX_ATTEMPTS,
     METADATA_BACKFILL_MAX_DELAY_SECONDS,
+    RELEASE_BACKFILL_VERSION,
+    STATUS_BACKFILL_VERSION,
     WATCH_PROVIDERS_BACKFILL_VERSION,
     _add_user_day_key,
     _apply_backfill_state_filters,
@@ -126,8 +137,10 @@ from app.tasks_backfill_state import (  # noqa: E402
     _filter_backfill_item_ids,
     _normalize_item_ids,
     _record_backfill_failure,
+    _record_backfill_pending,
     _record_backfill_success,
     _schedule_metadata_statistics_refresh,
+    is_terminal_backfill_error,
 )
 from app.tasks_bulk_plays import (  # noqa: E402
     bulk_episode_plays_task,
@@ -195,6 +208,13 @@ from app.tasks_igdb_ratings import (  # noqa: E402
     reconcile_igdb_rating_backfill,
 )
 from app.tasks_imdb import refresh_imdb_game_credits_from_datasets  # noqa: E402
+from app.tasks_interactive import (  # noqa: E402
+    continue_statistics_refresh_task,  # noqa: F401
+    reconcile_statistics_sync_task,  # noqa: F401
+    refresh_statistics_cache_task,  # noqa: F401
+    resolve_playback_image,  # noqa: F401
+    statistics_sync_task,  # noqa: F401
+)
 from app.tasks_mal import sync_mal_ratings_from_api  # noqa: E402
 from app.tasks_metadata_cache import (  # noqa: E402
     _clear_item_metadata_cache,
@@ -209,6 +229,10 @@ from app.tasks_music import (  # noqa: E402
     populate_album_tracks_batch,
     prefetch_album_covers_batch,
     prefetch_artist_images_batch,
+)
+from app.tasks_opencritic import (  # noqa: E402
+    backfill_opencritic_scores,  # noqa: F401
+    refresh_item_opencritic_score,  # noqa: F401
 )
 from app.tasks_podcast import (  # noqa: E402
     PODCAST_WEBSITE_BACKFILL_VERSION,
@@ -264,6 +288,7 @@ from app.tasks_trakt import (  # noqa: E402
 )
 from app.tasks_tv_provider_migration import (  # noqa: E402
     migrate_tv_shows_to_preferred_provider_task,
+    move_user_tv_library_task,
 )
 from app.tasks_watch_state import (  # noqa: E402
     backfill_user_watch_state,
@@ -275,10 +300,12 @@ RELEASE_BACKFILL_SOURCES = (
     Sources.TVDB.value,
     Sources.MAL.value,
     Sources.MANGAUPDATES.value,
+    Sources.MANGABAKA.value,
     Sources.IGDB.value,
     Sources.OPENLIBRARY.value,
     Sources.HARDCOVER.value,
     Sources.COMICVINE.value,
+    Sources.GCD.value,
     Sources.BGG.value,
     Sources.MUSICBRAINZ.value,
 )
@@ -322,7 +349,7 @@ HISTORY_COVERAGE_REPAIR_REQUEUE_SECONDS = 15
 
 def _release_items_queryset():
     stale_tv_cutoff = timezone.now() - TRACKED_TMDB_TV_REFRESH_STALE_AFTER
-    return Item.objects.filter(
+    queryset = Item.objects.filter(
         Q(
             release_datetime__isnull=True,
             media_type__in=RELEASE_BACKFILL_MEDIA_TYPES,
@@ -338,6 +365,14 @@ def _release_items_queryset():
             tv__isnull=False,
         ),
     ).distinct()
+    # An item whose provider id does not resolve can never grow a release date,
+    # so without this it stayed at the front of the queue - ordered by oldest
+    # metadata_fetched_at - and was re-fetched on every single cycle.
+    return _apply_backfill_state_filters(
+        queryset,
+        MetadataBackfillField.RELEASE.value,
+        strategy_version=RELEASE_BACKFILL_VERSION,
+    )
 
 
 def count_release_backfill_items() -> int:
@@ -345,10 +380,15 @@ def count_release_backfill_items() -> int:
 
 
 def _status_items_queryset():
-    return Item.objects.filter(
+    queryset = Item.objects.filter(
         status="",
         media_type__in=STATUS_BACKFILL_MEDIA_TYPES,
         metadata_fetched_at__isnull=False,
+    )
+    return _apply_backfill_state_filters(
+        queryset,
+        MetadataBackfillField.STATUS.value,
+        strategy_version=STATUS_BACKFILL_VERSION,
     )
 
 
@@ -451,9 +491,10 @@ def _schedule_discover_refresh_for_movie_items(items: list[Item]) -> None:
 
     user_ids = sorted(
         set(
-            Movie.objects.filter(item_id__in=movie_item_ids).values_list(
-                "user_id", flat=True
-            ),
+            Movie.objects.filter(
+                item_id__in=movie_item_ids,
+                user__show_discover=True,
+            ).values_list("user_id", flat=True),
         ),
     )
     if not user_ids:
@@ -497,12 +538,81 @@ def _schedule_discover_refresh_for_movie_items(items: list[Item]) -> None:
             )
 
 
-@shared_task(name="Resolve live playback image")
-def resolve_playback_image(user_id: int):
-    """Resolve artwork for a cached live playback state in the background."""
-    from app import live_playback
+@shared_task(name="Post playback webhook", ignore_result=True)
+def post_playback_webhook(user_id: int):
+    """POST the user's live playback state to their configured webhook.
 
-    live_playback.resolve_state_image(user_id)
+    Its own task, not part of the webhook that triggered it: a slow or dead
+    endpoint must not delay or fail the playback state write that just
+    succeeded. Nothing retries — a now-playing push is superseded by the next
+    event, so a stale redelivery is worse than a miss.
+    """
+    import hashlib
+    import hmac
+    import json
+
+    import requests
+
+    from api.fork_views_playback import build_now_playing_payload
+    from users.models import User
+
+    user = User.objects.filter(pk=user_id).first()
+    if not user or not user.playback_webhook_url:
+        return
+
+    payload = build_now_playing_payload(user) or {"active": False}
+
+    # Serialised once, here, and sent as raw bytes. Signing a payload and then
+    # letting `requests` re-encode it with `json=` is the classic way to ship a
+    # signature the receiver cannot reproduce: the bytes on the wire have to be
+    # the bytes that were signed.
+    body = json.dumps(payload, separators=(",", ":")).encode()
+    headers = {"Content-Type": "application/json"}
+    secret = user.get_playback_webhook_secret()
+    if secret:
+        signature = hmac.new(
+            secret.encode(),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+        # `sha256=<hex>`, the GitHub webhook convention, so existing receiver
+        # code and libraries verify it without a bespoke parser. Nothing here
+        # defends against replay: a redelivered state is superseded by the next
+        # event, which for a now-playing push is the whole lifetime of the fact.
+        headers["X-Floppy-Signature"] = f"sha256={signature}"
+
+    try:
+        response = requests.post(
+            user.playback_webhook_url,
+            data=body,
+            headers=headers,
+            # (connect, read). A host that blackholes the SYN would otherwise
+            # hold a worker for the full read timeout on every playback event.
+            timeout=(3.05, 10),
+            # The URL is user-supplied, so a redirect is a redirect the server
+            # follows on that user's behalf — the one hop that could reach a
+            # host they could not have named directly. `image_cache` refuses
+            # them for the same reason; a webhook has no use for one.
+            allow_redirects=False,
+        )
+        if response.is_redirect:
+            # A 3xx is not an error status, so `raise_for_status` would call
+            # this delivered. Nothing received the body.
+            logger.warning(
+                "Playback webhook for %s redirected, which is not followed",
+                user.username,
+            )
+            return
+        response.raise_for_status()
+    except requests.RequestException as error:
+        # `exception_summary`, never `str(error)`: a requests exception
+        # stringifies with the full URL in it, which would put the webhook's
+        # bearer path straight into the log.
+        logger.warning(
+            "Playback webhook failed for %s: %s",
+            user.username,
+            exception_summary(error),
+        )
 
 
 @shared_task(name="Build statistics day caches")
@@ -822,14 +932,6 @@ def repair_history_day_cache_coverage_task(
     return result
 
 
-@shared_task
-def refresh_statistics_cache_task(user_id: int, range_name: str):
-    """Rebuild the cached Statistics page for a user and range."""
-    from app import statistics_cache
-
-    statistics_cache.refresh_statistics_cache(user_id, range_name)
-
-
 @shared_task(name="Backfill item metadata")
 def backfill_item_metadata_task(
     batch_size: int = 10, game_length_batch_size: int | None = None
@@ -1068,6 +1170,40 @@ def backfill_item_metadata_task(
                 )
                 processed_movie_discover_items.append(item)
 
+            # Record what the provider was actually able to give us. A fetch
+            # that succeeds but still leaves the field blank is "pending", not
+            # "done": the provider may fill it in later, but it must not be
+            # re-fetched on every cycle in the meantime.
+            if item.media_type in RELEASE_BACKFILL_MEDIA_TYPES:
+                if item.release_datetime is None:
+                    _record_backfill_pending(
+                        item,
+                        MetadataBackfillField.RELEASE.value,
+                        "provider has no release date",
+                        strategy_version=RELEASE_BACKFILL_VERSION,
+                    )
+                else:
+                    _record_backfill_success(
+                        item,
+                        MetadataBackfillField.RELEASE.value,
+                        strategy_version=RELEASE_BACKFILL_VERSION,
+                    )
+
+            if item.media_type in STATUS_BACKFILL_MEDIA_TYPES:
+                if item.status:
+                    _record_backfill_success(
+                        item,
+                        MetadataBackfillField.STATUS.value,
+                        strategy_version=STATUS_BACKFILL_VERSION,
+                    )
+                else:
+                    _record_backfill_pending(
+                        item,
+                        MetadataBackfillField.STATUS.value,
+                        "provider has no status",
+                        strategy_version=STATUS_BACKFILL_VERSION,
+                    )
+
             success_count += 1
             logger.info(
                 (
@@ -1088,6 +1224,7 @@ def backfill_item_metadata_task(
 
         except Exception as e:
             error_count += 1
+            terminal = is_terminal_backfill_error(e)
             if (
                 item.source == Sources.TMDB.value
                 and item.media_type == MediaTypes.MOVIE.value
@@ -1096,6 +1233,28 @@ def backfill_item_metadata_task(
                     item,
                     MetadataBackfillField.DISCOVER,
                     f"exception: {exception_summary(e)}",
+                    terminal=terminal,
+                )
+            # A provider id that does not resolve - a MusicBrainz recording id
+            # returning 400/404, a season row with no season number - is not a
+            # provider outage and will not resolve on the next pass either.
+            # Without this, those items sorted to the front of the release and
+            # status queues forever and were re-fetched every cycle.
+            if item.media_type in RELEASE_BACKFILL_MEDIA_TYPES:
+                _record_backfill_failure(
+                    item,
+                    MetadataBackfillField.RELEASE.value,
+                    f"exception: {exception_summary(e)}",
+                    terminal=terminal,
+                    strategy_version=RELEASE_BACKFILL_VERSION,
+                )
+            if item.media_type in STATUS_BACKFILL_MEDIA_TYPES:
+                _record_backfill_failure(
+                    item,
+                    MetadataBackfillField.STATUS.value,
+                    f"exception: {exception_summary(e)}",
+                    terminal=terminal,
+                    strategy_version=STATUS_BACKFILL_VERSION,
                 )
             # Still mark as fetched even if there was an error, to avoid retrying infinitely
             item.metadata_fetched_at = timezone.now()
@@ -1216,6 +1375,7 @@ __all__ = [
     "is_genre_backfill_reconcile_complete",
     "is_provider_backfill_reconcile_complete",
     "migrate_tv_shows_to_preferred_provider_task",
+    "move_user_tv_library_task",
     "populate_album_tracks_batch",
     "populate_credits_backfill_queue",
     "populate_credits_data_for_items",

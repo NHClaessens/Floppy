@@ -382,8 +382,8 @@ class AnimeShapeConversionPromptTests(TestCase):
         from django.urls import reverse
 
         response = self.client.post(
-            reverse("preferences"),
-            {"anime_metadata_source_default": Sources.TMDB.value},
+            reverse("set_media_type_provider", args=[MediaTypes.ANIME.value]),
+            {"source": Sources.TMDB.value},
             follow=True,
         )
 
@@ -392,7 +392,7 @@ class AnimeShapeConversionPromptTests(TestCase):
         self.assertContains(response, reverse("convert_anime_library"))
 
         # A plain reload must not nag again.
-        again = self.client.get(reverse("preferences"))
+        again = self.client.get(reverse("metadata_settings"))
         self.assertNotContains(again, "Convert your existing anime?")
 
     def test_no_prompt_when_the_provider_is_unchanged(self):
@@ -400,8 +400,8 @@ class AnimeShapeConversionPromptTests(TestCase):
         from django.urls import reverse
 
         response = self.client.post(
-            reverse("preferences"),
-            {"anime_metadata_source_default": Sources.MAL.value},
+            reverse("set_media_type_provider", args=[MediaTypes.ANIME.value]),
+            {"source": Sources.MAL.value},
             follow=True,
         )
 

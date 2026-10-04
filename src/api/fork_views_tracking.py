@@ -17,7 +17,7 @@ from app.fork_services_movie import resolve_or_create_movie
 from app.history_cache_utils import normalize_history_media_type_tokens
 from app.models import Episode, ItemTag, MediaTypes, Movie, Tag
 from app.services import metadata_resolution
-from app.tasks import bulk_episode_plays_task
+from app.tasks_bulk_plays import bulk_episode_plays_task
 from app.templatetags.app_tags import media_url
 
 from .contract_serializers import DetailErrorSerializer
@@ -62,7 +62,9 @@ class MediaEpisodeWatchView(drf_views.APIView):
 
     POST mirrors the web UI's episode_save: the season is auto-created when
     missing and a new Episode play row is added. DELETE mirrors unwatching:
-    the most recent play of the episode is removed.
+    the most recent play of the episode is removed. An optional
+    `external_id` makes both calls idempotent/targetable for callers that
+    replay the same event, matching the movie watch route.
     """
 
     @extend_schema(
@@ -105,6 +107,8 @@ class MediaEpisodeWatchView(drf_views.APIView):
                     status=HTTP.BAD_REQUEST,
                 )
 
+        external_id = (request.data.get("external_id") or "").strip() or None
+
         library_media_type = (request.data.get("library_media_type") or "").strip()
         try:
             _, coordinate_error = resolve_episode_coordinate_for_request(
@@ -138,19 +142,18 @@ class MediaEpisodeWatchView(drf_views.APIView):
                 status=HTTP.NOT_FOUND,
             )
 
-        related_season.watch(int(episode_number), end_date)
+        result = related_season.watch(
+            int(episode_number),
+            end_date,
+            external_id=external_id,
+        )
         if score_provided:
             apply_episode_score(related_season, episode_number, score)
-        episode = (
-            Episode.objects.filter(
-                related_season=related_season,
-                item__episode_number=int(episode_number),
-            )
-            .select_related("item")
-            .order_by("-id")
-            .first()
-        )
-        return Response(serialize_data(episode), status=HTTP.CREATED)
+        episode = result.episode
+        if score_provided:
+            episode.refresh_from_db()
+        status_code = HTTP.CREATED if result.created else HTTP.OK
+        return Response(serialize_data(episode), status=status_code)
 
     @extend_schema(
         parameters=[MEDIA_TYPE_TV_ONLY_PARAM],
@@ -211,13 +214,20 @@ class MediaEpisodeWatchView(drf_views.APIView):
             related_season=related_season,
             item__episode_number=int(episode_number),
         )
-        if not plays.exists():
+        external_id = (request.GET.get("external_id") or "").strip() or None
+        if external_id:
+            if not plays.filter(external_id=external_id).exists():
+                return Response(
+                    {"detail": "Episode has no watch with that external_id."},
+                    status=HTTP.NOT_FOUND,
+                )
+        elif not plays.exists():
             return Response(
                 {"detail": "Episode has no watches."},
                 status=HTTP.NOT_FOUND,
             )
 
-        related_season.unwatch(int(episode_number))
+        related_season.unwatch(int(episode_number), external_id=external_id)
         return Response(status=HTTP.NO_CONTENT)
 
 
@@ -635,10 +645,11 @@ class HistoryView(drf_views.APIView):
             paginated = paginate_data(request, flat_entries, limit, offset)
             return Response(paginated, status=HTTP.OK)
 
-        type_only_request = not date_filters and set(filters).issubset(
-            {"media_type"},
-        )
-        if type_only_request:
+        # A date range only ever drops whole days from the index, so it can be
+        # served from the cached day window like a bare type filter. Every
+        # other filter reaches inside a day and still needs the builder.
+        indexable_request = set(filters).issubset({"media_type"})
+        if indexable_request:
             history_days, total_days = history_cache_reader.get_cached_history_window(
                 request.user,
                 limit=limit,
@@ -646,6 +657,7 @@ class HistoryView(drf_views.APIView):
                 filters=filters or None,
                 logging_style_override=logging_style or None,
                 max_entries_per_day=max_entries_per_day,
+                date_filters=date_filters or None,
             )
         else:
             history_days = history_cache_reader.get_history_days(
@@ -656,7 +668,7 @@ class HistoryView(drf_views.APIView):
                 max_entries_per_day=max_entries_per_day,
             )
             total_days = None
-        if type_only_request:
+        if indexable_request:
             paginated = paginate_data(
                 request,
                 [],

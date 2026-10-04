@@ -158,6 +158,7 @@ def _derive_episode(user, item):
     rows = episode_model.objects.filter(
         item=item,
         related_season__user=user,
+        related_season__order_archived=False,
         dropped=False,
     )
 

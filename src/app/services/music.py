@@ -255,38 +255,9 @@ def resolve_artist_mbid(name: str, sort_name: str | None = None):
             target_norm,
         )
 
-        # PRIORITY 1: For exact unquoted name searches, trust MusicBrainz search ranking immediately
-        # Manual searches work because users pick the first result - we should do the same
-        if is_exact_search and candidates:
-            first_cand = candidates[0]
-            first_cand_id = first_cand.get("id")
-            first_cand_name = first_cand.get("name", "Unknown")
-            if first_cand_id:
-                chosen = first_cand_id
-                logger.info(
-                    "resolve_artist_mbid: DECISION - using first candidate for exact search '%s' -> '%s' (MBID=%s, %d candidates, trusting MB search ranking)",
-                    variant,
-                    first_cand_name,
-                    first_cand_id,
-                    len(candidates),
-                )
-            else:
-                logger.info(
-                    "resolve_artist_mbid: exact search '%s' returned candidates but first has no ID, falling back to strict matching",
-                    variant,
-                )
-        elif not is_exact_search:
-            logger.info(
-                "resolve_artist_mbid: variant '%s' is not exact search (quoted/normalized), using strict matching",
-                variant,
-            )
-        elif not candidates:
-            logger.info(
-                "resolve_artist_mbid: exact search '%s' has no candidates, skipping",
-                variant,
-            )
-
-        # PRIORITY 2: For quoted/normalized variants, use stricter matching
+        # A search hit only counts when its name matches. MusicBrainz ranks
+        # "Ray Treblo" next to Ray Charles, and taking that first row attaches
+        # the wrong person.
         if not chosen:
             logger.info(
                 "resolve_artist_mbid: attempting strict matching for variant '%s'",
@@ -302,9 +273,11 @@ def resolve_artist_mbid(name: str, sort_name: str | None = None):
             for cand in candidates:
                 cid = cand.get("id")
                 cname = cand.get("name") or ""
-                cand_norm = _norm_name(cname)
+                sort_name = cand.get("sort_name") or cand.get("sort-name") or ""
+                cand_names = [_norm_name(cname), _norm_name(sort_name)]
+                cand_norm = cand_names[0]
                 exact_match_attempted = True
-                if cid and cand_norm == target_norm:
+                if cid and target_norm in cand_names:
                     chosen = cid
                     logger.info(
                         "resolve_artist_mbid: DECISION - exact normalized match '%s' -> '%s' (MBID=%s, norm='%s'=='%s')",
@@ -393,39 +366,7 @@ def resolve_artist_mbid(name: str, sort_name: str | None = None):
                         break
                 if not chosen and case_match_attempted:
                     logger.info(
-                        "resolve_artist_mbid: case-insensitive match failed for '%s', trying first candidate fallback",
-                        variant,
-                    )
-
-            # Final fallback: use first candidate for non-exact searches
-            if not chosen and candidates:
-                first_cand = candidates[0]
-                first_cand_id = first_cand.get("id")
-                first_cand_name = first_cand.get("name", "Unknown")
-                if first_cand_id:
-                    # Trust first result if very few candidates (1-3) regardless of search type
-                    if len(candidates) <= FEW_CANDIDATES_AUTO_TRUST_MAX:
-                        chosen = first_cand_id
-                        logger.info(
-                            "resolve_artist_mbid: DECISION - using first candidate for '%s' -> '%s' (MBID=%s, only %d candidates, trusting MB search ranking)",
-                            variant,
-                            first_cand_name,
-                            first_cand_id,
-                            len(candidates),
-                        )
-                    # Fallback: use first candidate but log as lower confidence
-                    else:
-                        chosen = first_cand_id
-                        logger.info(
-                            "resolve_artist_mbid: DECISION - using first candidate for '%s' -> '%s' (MBID=%s, no exact/fuzzy match, %d total candidates)",
-                            variant,
-                            first_cand_name,
-                            first_cand_id,
-                            len(candidates),
-                        )
-                else:
-                    logger.info(
-                        "resolve_artist_mbid: first candidate for '%s' has no ID, cannot use",
+                        "resolve_artist_mbid: case-insensitive match failed for '%s'",
                         variant,
                     )
 
@@ -1353,6 +1294,45 @@ def canonicalize_album(album: Album, user=None) -> Album:
     if canonical.id == album.id:
         return album
     return merge_album_records(album, canonical)
+
+
+def canonicalize_albums(albums: list[Album], user=None) -> list[Album]:
+    """Canonicalize many albums, checking for duplicate rows in one query.
+
+    Only albums whose MusicBrainz identity is shared with another row go
+    through canonicalize_album; every other album is returned as it is.
+    """
+    group_ids = {
+        a.musicbrainz_release_group_id for a in albums if a.musicbrainz_release_group_id
+    }
+    release_ids = {
+        a.musicbrainz_release_id
+        for a in albums
+        if a.musicbrainz_release_id and not a.musicbrainz_release_group_id
+    }
+    group_counts = {}
+    release_counts = {}
+    if group_ids or release_ids:
+        rows = Album.objects.filter(
+            models.Q(musicbrainz_release_group_id__in=group_ids)
+            | models.Q(musicbrainz_release_id__in=release_ids),
+        ).values_list("musicbrainz_release_group_id", "musicbrainz_release_id")
+        for group_id, release_id in rows:
+            if group_id in group_ids:
+                group_counts[group_id] = group_counts.get(group_id, 0) + 1
+            if release_id in release_ids:
+                release_counts[release_id] = release_counts.get(release_id, 0) + 1
+
+    canonical = []
+    for album in albums:
+        if album.musicbrainz_release_group_id:
+            shared = group_counts.get(album.musicbrainz_release_group_id, 0) > 1
+        elif album.musicbrainz_release_id:
+            shared = release_counts.get(album.musicbrainz_release_id, 0) > 1
+        else:
+            shared = False
+        canonical.append(canonicalize_album(album, user=user) if shared else album)
+    return canonical
 
 
 def needs_discography_sync(artist: Artist, max_age_days: int = 7) -> bool:

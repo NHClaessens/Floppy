@@ -3,6 +3,7 @@
 from http import HTTPStatus as HTTP  # noqa: N814
 from unittest.mock import patch
 
+from django.conf import settings
 from django.core.cache import cache
 
 from app.models import (
@@ -318,38 +319,66 @@ class ForkBackdropFieldTests(FloppyApiTestCase):
         self.assertEqual(payload["image"], self.tv_item.image)
         mock_backdrop.assert_not_called()
 
+    @patch("app.tasks_backdrops.warm_backdrops_task.apply_async")
     @patch("api.views.services.get_media_metadata")
     @patch("lists.models.CustomList._get_tmdb_backdrop", return_value=BACKDROP_URL)
-    def test_detail_fetches_backdrop_when_cache_is_cold(
+    def test_detail_never_calls_the_provider_for_a_cold_backdrop(
         self,
         mock_backdrop,
         mock_metadata,
+        mock_warm,
     ):
-        """A single detail view may pay for one provider call; the result caches."""
+        """A cold backdrop is fetched in the background, not in the request."""
         mock_metadata.return_value = self._tv_metadata()
 
         response = self._get_detail()
 
-        self.assertEqual(response.json()["backdrop"], BACKDROP_URL)
-        mock_backdrop.assert_called_once_with(
-            MediaTypes.TV.value,
-            self.tv_item.media_id,
-        )
+        self.assertEqual(response.status_code, HTTP.OK)
+        self.assertIsNone(response.json()["backdrop"])
+        mock_backdrop.assert_not_called()
+        mock_warm.assert_called_once()
 
     @patch("api.views.services.get_media_metadata")
-    @patch("lists.models.CustomList._get_tmdb_backdrop", return_value=None)
-    def test_detail_reports_null_when_no_backdrop_exists(
+    @patch("lists.models.CustomList._get_tmdb_backdrop")
+    def test_detail_serves_the_backdrop_once_the_warm_lands(
         self,
         mock_backdrop,
         mock_metadata,
     ):
+        """The background fetch (inline under eager Celery) fills Redis."""
+        media_id = self.tv_item.media_id
+
+        def fill_cache(media_type, backdrop_media_id):
+            cache.set(f"tmdb_backdrop_{media_type}_{backdrop_media_id}", BACKDROP_URL)
+            return BACKDROP_URL
+
+        mock_backdrop.side_effect = fill_cache
+        mock_metadata.return_value = self._tv_metadata()
+
+        self.assertIsNone(self._get_detail().json()["backdrop"])
+        self.assertEqual(self._get_detail().json()["backdrop"], BACKDROP_URL)
+        mock_backdrop.assert_called_once_with(MediaTypes.TV.value, media_id)
+
+    @patch("app.tasks_backdrops.warm_backdrops_task.apply_async")
+    @patch("api.views.services.get_media_metadata")
+    def test_detail_reports_null_when_no_backdrop_exists(
+        self,
+        mock_metadata,
+        mock_warm,
+    ):
         """Clients need to distinguish "no artwork" from "a poster", so: null."""
         mock_metadata.return_value = self._tv_metadata()
+        # The provider's cached "no backdrop" answer.
+        cache.set(
+            f"tmdb_backdrop_tv_{self.tv_item.media_id}", settings.IMG_NONE, 60
+        )
 
         payload = self._get_detail().json()
 
         self.assertIn("backdrop", payload)
         self.assertIsNone(payload["backdrop"])
+        # A known absence is not fetched again.
+        mock_warm.assert_not_called()
 
     @patch("api.views.services.get_media_metadata")
     @patch("lists.models.CustomList._get_tmdb_backdrop", return_value=BACKDROP_URL)
@@ -359,6 +388,7 @@ class ForkBackdropFieldTests(FloppyApiTestCase):
         mock_metadata,
     ):
         """Episode stills are often missing; the show backdrop covers that gap."""
+        cache.set(f"tmdb_backdrop_tv_{self.tv_item.media_id}", BACKDROP_URL, 60)
         season_item = self.items_by_type[MediaTypes.SEASON.value][0]
         episode_item = self.items_by_type[MediaTypes.EPISODE.value][0]
         mock_metadata.return_value = self.build_episode_metadata(

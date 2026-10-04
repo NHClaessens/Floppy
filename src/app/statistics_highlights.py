@@ -81,9 +81,7 @@ def _history_entry_card_payload(entry):
         "item": item,
         "media_type": entry.get("media_type") or getattr(item, "media_type", None),
         "title": title,
-        "image": _get_horizontal_history_image(
-            item, fallback_image, allow_network=True
-        ),
+        "image": _poster_image(item, fallback_image),
         "played_at": played_at,
     }
 
@@ -93,52 +91,90 @@ def _cached_horizontal_backdrop(item) -> str | None:
     return backdrops.cached_backdrop(item)
 
 
-def _get_horizontal_history_image(item, fallback_image, *, allow_network=True):
-    """Prefer horizontal artwork when available, matching list hub behavior."""
+def _poster_image(item, fallback_image):
+    """Return the stored portrait artwork for a card, before backdrop upgrade."""
     if item is None:
         poster = fallback_image
     elif isinstance(item, dict):
         poster = fallback_image or item.get("image", "")
     else:
         poster = fallback_image or getattr(item, "image", "")
+    return poster or settings.IMG_NONE
 
+
+def _get_horizontal_history_image(item, fallback_image, *, allow_network=False):
+    """Prefer horizontal artwork when available, matching list hub behavior.
+
+    Statistics code always leaves ``allow_network`` off; missing backdrops are
+    warmed in the background by ``normalize_highlight_images`` instead.
+    """
     backdrop = backdrops.resolve_backdrop(item, allow_network=allow_network)
-    return backdrop or poster or settings.IMG_NONE
+    return backdrop or _poster_image(item, fallback_image)
 
 
-def _normalize_history_highlight_images(history_highlights):
-    """Ensure highlight cards prefer horizontal artwork, even for cached payloads."""
+def _highlight_entries(history_highlights):
+    """Yield the card entries of one highlights dict that carry artwork."""
     if not isinstance(history_highlights, dict):
         return
-
     for key in ("first_play", "last_play"):
         entry = history_highlights.get(key)
-        if not isinstance(entry, dict):
-            continue
-        fallback = entry.get("image") or entry.get("poster")
-        entry["image"] = _get_horizontal_history_image(
-            entry.get("item"),
-            fallback,
-            allow_network=True,
-        )
+        if isinstance(entry, dict):
+            yield entry
     today_card = history_highlights.get("today_card")
     if isinstance(today_card, dict):
         entry = today_card.get("entry")
         if isinstance(entry, dict):
-            fallback = entry.get("image") or entry.get("poster")
-            entry["image"] = _get_horizontal_history_image(
-                entry.get("item"),
-                fallback,
-                allow_network=True,
-            )
+            yield entry
+
+
+def _upgrade_entry_images(entries) -> None:
+    """Swap cached backdrops into card entries; warm the misses in background.
+
+    Never calls a provider. An entry marked ``image_is_backdrop`` already holds
+    its backdrop URL and is left alone, so payloads keep serving landscape
+    artwork after the Redis backdrop key expires.
+    """
+    to_warm = []
+    for entry in entries:
+        if entry.get("image_is_backdrop"):
+            continue
+        item = entry.get("item")
+        backdrop = _cached_horizontal_backdrop(item)
+        if backdrop:
+            entry["image"] = backdrop
+            entry["image_is_backdrop"] = True
+            continue
+        entry["image"] = _poster_image(item, entry.get("image") or entry.get("poster"))
+        if item is not None:
+            to_warm.append(item)
+    if to_warm:
+        backdrops.schedule_backdrop_warm(to_warm)
+
+
+def normalize_highlight_images(data) -> None:
+    """Prefer horizontal artwork on every highlight card of a statistics payload.
+
+    Runs on reads and before a rebuilt payload is published; see the
+    "Highlight artwork" section of docs/architecture/statistics-refresh-runs.md.
+    """
+    if not isinstance(data, dict):
+        return
+    entries = list(_highlight_entries(data.get("history_highlights")))
+    by_type = data.get("history_highlights_by_type")
+    if isinstance(by_type, dict):
+        for type_highlights in by_type.values():
+            entries.extend(_highlight_entries(type_highlights))
+    _upgrade_entry_images(entries)
+
+
+def _normalize_history_highlight_images(history_highlights):
+    """Apply ``normalize_highlight_images`` to a single highlights dict."""
+    _upgrade_entry_images(list(_highlight_entries(history_highlights)))
 
 
 def _normalize_history_highlights_by_type(highlights_by_type):
-    """Apply image normalization to each per-type highlights dict."""
-    if not isinstance(highlights_by_type, dict):
-        return
-    for type_highlights in highlights_by_type.values():
-        _normalize_history_highlight_images(type_highlights)
+    """Apply ``normalize_highlight_images`` to each per-type highlights dict."""
+    normalize_highlight_images({"history_highlights_by_type": highlights_by_type})
 
 
 _TV_FAMILY = {MediaTypes.TV.value, MediaTypes.EPISODE.value, MediaTypes.SEASON.value}
@@ -271,9 +307,7 @@ def _get_today_release_entry(user, media_type_filter=None):
                     "item": item,
                     "media_type": item.media_type,
                     "title": item.title,
-                    "image": _get_horizontal_history_image(
-                        item, item.image, allow_network=True
-                    ),
+                    "image": _poster_image(item, item.image),
                     "release_date": release_date,
                 }
             )
@@ -281,7 +315,7 @@ def _get_today_release_entry(user, media_type_filter=None):
     include_episodes = not media_type_filter or media_type_filter == MediaTypes.TV.value
     Episode = apps.get_model("app", "Episode")
     episode_qs = (
-        Episode.objects.filter(
+        Episode.all_objects.filter(
             related_season__user=user,
             item__release_datetime__isnull=False,
         )
@@ -317,11 +351,7 @@ def _get_today_release_entry(user, media_type_filter=None):
                 "item": episode_item,
                 "media_type": MediaTypes.EPISODE.value,
                 "title": display_title or episode_item.title,
-                "image": _get_horizontal_history_image(
-                    episode_item,
-                    episode_poster,
-                    allow_network=True,
-                ),
+                "image": _poster_image(episode_item, episode_poster),
                 "release_date": release_date,
             }
         )
@@ -363,11 +393,7 @@ def _get_today_release_entry(user, media_type_filter=None):
                     "item": item,
                     "media_type": MediaTypes.PODCAST.value,
                     "title": title,
-                    "image": _get_horizontal_history_image(
-                        item,
-                        image,
-                        allow_network=False,
-                    ),
+                    "image": _poster_image(item, image),
                     "release_date": release_date,
                 }
             )
@@ -407,11 +433,7 @@ def _get_today_release_entry(user, media_type_filter=None):
                     "item": item,
                     "media_type": MediaTypes.PODCAST.value,
                     "title": title,
-                    "image": _get_horizontal_history_image(
-                        item,
-                        image,
-                        allow_network=False,
-                    ),
+                    "image": _poster_image(item, image),
                     "release_date": release_date,
                 }
             )
@@ -457,10 +479,12 @@ def _get_history_day_payload(user, day_value):
     if cached_payload:
         return history_cache._deserialize_history_day(cached_payload)
 
-    return history_cache.build_history_day(
+    # Keep the day it had to build. Every range of a Statistics sync picks its
+    # own random day, and an uncached day cost ~80 ms each time it came up.
+    return history_cache._build_and_cache_history_day(
         user,
         day_key,
-        logging_style_override=logging_style,
+        logging_style,
     )
 
 

@@ -68,6 +68,10 @@ class MusicPlaybackEvent:
     completed: bool = False
     played_at: timezone.datetime | None = None
     defer_cover_prefetch: bool = False
+    # How this play was created ("koito", "lastfm", "listenbrainz", "manual",
+    # …). Distinct from ResolvedMusicMetadata.source (the metadata provider,
+    # e.g. "musicbrainz") and stored on Music.entry_source.
+    entry_source: str = ""
 
 
 @dataclass
@@ -1091,6 +1095,7 @@ def _update_music_entry(
             "progress": 1,
             "start_date": played_at,
             "end_date": played_at,
+            "entry_source": event.entry_source,
         }
         import_run_id = import_progress.get_current_import_run_id()
         if import_run_id:
@@ -1124,6 +1129,9 @@ def _update_music_entry(
         changed = True
     if music.track_id != track.id:
         music.track = track
+        changed = True
+    if event.entry_source and music.entry_source != event.entry_source:
+        music.entry_source = event.entry_source
         changed = True
 
     if event.completed:

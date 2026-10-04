@@ -8,12 +8,27 @@ the model, only fetched from the provider and cached in Redis for 7 days by
 choice of fallback to the caller: the web UI falls back to the poster so a
 card always renders, while the API reports ``null`` so clients can pick their
 own artwork.
+
+Request paths and the interactive worker never fetch: they read Redis and
+hand misses to ``schedule_backdrop_warm``, which fetches them on a background
+worker so a later read finds them. TMDB detail fetches also record the
+backdrop their response already carried (``remember_tmdb_backdrop``).
 """
+
+import logging
 
 from django.conf import settings
 from django.core.cache import cache
 
 from app.models import MediaTypes, Sources
+
+logger = logging.getLogger(__name__)
+
+# How long a queued warm suppresses another request for the same item.
+BACKDROP_WARM_GUARD_SECONDS = 60 * 10
+# Matches lists.models.CustomList._get_tmdb_backdrop.
+TMDB_BACKDROP_BASE_URL = "https://image.tmdb.org/t/p/w1280"
+TMDB_BACKDROP_TTL = 60 * 60 * 24 * 7
 
 # Episodes and seasons share their show's media_id, and TMDB files anime under
 # /tv, so all three resolve against the show-level backdrop.
@@ -56,8 +71,17 @@ def _usable(backdrop):
     return None
 
 
-def cached_backdrop(item) -> str | None:
-    """Return an already-cached backdrop without triggering provider lookups."""
+def _tmdb_backdrop_key(media_type, media_id) -> str:
+    """Redis key ``lists.models.CustomList._get_tmdb_backdrop`` caches under."""
+    return f"tmdb_backdrop_{media_type}_{media_id}"
+
+
+def _backdrop_cache_key(item) -> str | None:
+    """Return the Redis key holding an item's backdrop, or None if it has none.
+
+    This is also the eligibility rule: an item without a key can never have a
+    backdrop, so it is never fetched or warmed.
+    """
     identity = _identity(item)
     if identity is None:
         return None
@@ -68,19 +92,50 @@ def cached_backdrop(item) -> str | None:
             MediaTypes.TV.value if media_type in _SHOW_LEVEL_TYPES else media_type
         )
         if backdrop_media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value):
-            return _usable(
-                cache.get(f"tmdb_backdrop_{backdrop_media_type}_{media_id}"),
-            )
+            return _tmdb_backdrop_key(backdrop_media_type, media_id)
 
     if source == Sources.TVDB.value and media_type in _TVDB_TYPES:
         tmdb_id = _tvdb_tmdb_id(item)
         if tmdb_id:
-            return _usable(cache.get(f"tmdb_backdrop_tv_{tmdb_id}"))
+            return _tmdb_backdrop_key(MediaTypes.TV.value, tmdb_id)
 
     if source == Sources.IGDB.value and media_type == MediaTypes.GAME.value:
-        return _usable(cache.get(f"igdb_backdrop_{media_id}"))
+        return f"igdb_backdrop_{media_id}"
 
     return None
+
+
+def cached_backdrop(item) -> str | None:
+    """Return an already-cached backdrop without triggering provider lookups."""
+    key = _backdrop_cache_key(item)
+    return _usable(cache.get(key)) if key else None
+
+
+def remember_tmdb_backdrop(media_type, media_id, backdrop_path) -> None:
+    """Cache the backdrop a TMDB detail response already carried.
+
+    Movie and TV detail responses include ``backdrop_path``, so recording it
+    here spares the separate backdrop request a later reader would need.
+    """
+    if not backdrop_path or not media_id:
+        return
+    cache.set(
+        _tmdb_backdrop_key(media_type, media_id),
+        f"{TMDB_BACKDROP_BASE_URL}{backdrop_path}",
+        TMDB_BACKDROP_TTL,
+    )
+
+
+def cached_backdrop_or_warm(item) -> str | None:
+    """Return a cached backdrop; on a miss, queue a background fetch.
+
+    For request paths that must not wait on a provider: the response reports
+    no backdrop this time and a later request finds it in Redis.
+    """
+    backdrop = cached_backdrop(item)
+    if backdrop is None:
+        schedule_backdrop_warm([item])
+    return backdrop
 
 
 def resolve_backdrop(item, *, allow_network=True) -> str | None:
@@ -131,3 +186,59 @@ def _fetch(getter, *args) -> str | None:
         return _usable(getter(*args))
     except Exception:  # deliberate best-effort; failure is non-fatal here
         return None
+
+
+def warm_identity(item) -> dict | None:
+    """Return a JSON-safe identity to warm, or None if no backdrop can exist."""
+    if _backdrop_cache_key(item) is None:
+        return None
+    source, media_type, media_id = _identity(item)
+    identity = {"source": source, "media_type": media_type, "media_id": str(media_id)}
+    if source == Sources.TVDB.value:
+        identity["provider_external_ids"] = {"tmdb_id": _tvdb_tmdb_id(item)}
+    return identity
+
+
+def _warm_guard_key(identity: dict) -> str:
+    return (
+        f"backdrop_warm:{identity['source']}:{identity['media_type']}:"
+        f"{identity['media_id']}"
+    )
+
+
+def schedule_backdrop_warm(items) -> int:
+    """Queue one background fetch for the backdrops these items are missing.
+
+    Each item is guarded for ``BACKDROP_WARM_GUARD_SECONDS`` so repeated page
+    loads do not queue the same fetch again. Returns the number queued.
+    """
+    identities = []
+    guard_keys = []
+    for item in items:
+        identity = warm_identity(item)
+        if identity is None:
+            continue
+        if cache.get(_backdrop_cache_key(item)) is not None:
+            # Already known, including a cached "no backdrop" answer.
+            continue
+        key = _warm_guard_key(identity)
+        if key in guard_keys or not cache.add(key, True, BACKDROP_WARM_GUARD_SECONDS):
+            continue
+        guard_keys.append(key)
+        identities.append(identity)
+
+    if not identities:
+        return 0
+
+    try:
+        from app.tasks_backdrops import warm_backdrops_task
+
+        warm_backdrops_task.apply_async(
+            args=[identities],
+            priority=getattr(settings, "CELERY_TASK_PRIORITY_FOLLOWUP", 3),
+        )
+    except Exception:  # pragma: no cover - Celery not available
+        cache.delete_many(guard_keys)
+        logger.debug("Could not schedule backdrop warm", exc_info=True)
+        return 0
+    return len(identities)

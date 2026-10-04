@@ -1,0 +1,164 @@
+{% load i18n %}
+{% load app_tags %}
+{% comment %}
+  Provider picker for one media type, opened from the summary row on the
+  Metadata page. Mirrors provider_credential_modal.html's chrome. Every
+  supported source is listed, configured or not: clicking a configured one
+  selects it (configurable media types) or is just informational (others);
+  clicking an unconfigured one jumps straight to that provider's own
+  credential modal instead, since activeModal is shared state across both.
+  Content here is always short and fixed, so this modal uses overflow-visible
+  (the statistics.html modal pattern) rather than overflow-y-auto, so the
+  dropdown's options panel is never clipped by the modal's own bounding box.
+{% endcomment %}
+<div x-show="activeModal === 'media-type-{{ entry.media_type }}'"
+     x-cloak
+     @keydown.escape.window="closeModal()"
+     x-transition.opacity.duration.150ms
+     class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
+     @mousedown.self="closeModal()">
+  <div class="modal-max-height overflow-visible w-full" style="width: min(96vw, 28rem);">
+    <button type="button"
+            @click="closeModal()"
+            class="block w-fit ml-auto mb-2 text-[var(--color-text-muted)] hover:text-[var(--color-text)] cursor-pointer p-1 rounded-md hover:bg-[var(--color-surface-hover)] bg-[var(--color-surface)]">
+      {% include "app/icons/x.svg" with classes="w-4 h-4" %}
+    </button>
+    <div class="bg-[var(--color-surface-strong)] p-4 rounded-lg space-y-3">
+      <h4 class="font-medium">
+        {% blocktranslate with type=entry.media_type|media_type_readable_plural %}{{ type }} Provider{% endblocktranslate %}
+      </h4>
+
+      {% if entry.configurable %}
+        <form method="post" action="{% url 'set_media_type_provider' entry.media_type %}" class="space-y-3">
+          {% csrf_token %}
+          <div>
+            <label class="block text-[var(--color-text-secondary)] text-xs font-medium mb-2">{% translate "Provider" %}</label>
+            <div class="relative" x-data="{ open: false, selectedValue: '{{ entry.current_provider }}', selectedLabel: '', options: [
+              {% for choice in entry.choices %}
+                { value: '{{ choice.value }}', label: '{{ choice.label|escapejs }}', configured: {{ choice.configured|yesno:'true,false' }} }
+                {% if not forloop.last %},{% endif %}
+              {% endfor %}
+              ], init() { const match = this.options.find(o => o.value === this.selectedValue); this.selectedValue = match ? match.value : this.options[0]?.value ?? ''; this.selectedLabel = match ? match.label : this.options[0]?.label ?? ''; } }" x-init="init()">
+              <button type="button"
+                      @click="open = !open"
+                      @click.outside="open = false"
+                      class="flex items-center justify-between w-full px-3 py-2 bg-[var(--color-panel)] border border-gray-600 rounded-md text-[var(--color-text-secondary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent cursor-pointer">
+                <span x-text="selectedLabel"></span>
+                <svg xmlns="http://www.w3.org/2000/svg"
+                     width="24"
+                     height="24"
+                     viewBox="0 0 24 24"
+                     fill="none"
+                     stroke="currentColor"
+                     stroke-width="2"
+                     stroke-linecap="round"
+                     stroke-linejoin="round"
+                     class="w-4 h-4 text-[var(--color-text-muted)]">
+                  <path d="m6 9 6 6 6-6"></path>
+                </svg>
+              </button>
+              <div x-show="open"
+                   x-transition:enter="transition ease-out duration-100"
+                   x-transition:enter-start="transform opacity-0 scale-95"
+                   x-transition:enter-end="transform opacity-100 scale-100"
+                   x-transition:leave="transition ease-in duration-75"
+                   x-transition:leave-start="transform opacity-100 scale-100"
+                   x-transition:leave-end="transform opacity-0 scale-95"
+                   class="absolute left-0 right-0 mt-2 py-1 bg-[var(--color-panel)] rounded-md shadow-lg overflow-y-auto max-h-60 z-10 border border-gray-600">
+                <template x-for="option in options" :key="option.value">
+                  <button type="button"
+                          @click="option.configured ? (selectedValue = option.value, selectedLabel = option.label, open = false) : openModal(option.value)"
+                          class="flex items-center justify-between w-full px-3 py-2 text-left text-sm transition-colors text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-strong)] hover:text-[var(--color-text)]"
+                          :class="{ 'text-[var(--color-text)] bg-[var(--color-surface-strong)]': selectedValue === option.value }">
+                    <span x-text="option.label"></span>
+                    <span x-show="!option.configured" class="text-xs text-[var(--color-text-muted)]">{% translate "Not configured" %}</span>
+                  </button>
+                </template>
+              </div>
+              <input type="hidden" name="source" x-bind:value="selectedValue">
+            </div>
+          </div>
+
+          {% if entry.media_type == "anime" %}
+            <div>
+              <label class="block text-[var(--color-text-secondary)] text-xs font-medium mb-2">{% translate "Anime Library" %}</label>
+              <div class="relative" x-data="{ open: false, selectedValue: '{{ user.anime_library_mode }}', selectedLabel: '', options: [
+                {% for value, label in anime_library_mode_choices %}
+                  { value: '{{ value }}', label: '{{ label|escapejs }}' }
+                  {% if not forloop.last %},{% endif %}
+                {% endfor %}
+                ], init() { const match = this.options.find(o => o.value === this.selectedValue); this.selectedLabel = match ? match.label : this.options[0]?.label ?? ''; } }" x-init="init()">
+                <button type="button"
+                        @click="open = !open"
+                        @click.outside="open = false"
+                        class="flex items-center justify-between w-full px-3 py-2 bg-[var(--color-panel)] border border-gray-600 rounded-md text-[var(--color-text-secondary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent cursor-pointer">
+                  <span x-text="selectedLabel"></span>
+                  <svg xmlns="http://www.w3.org/2000/svg"
+                       width="24"
+                       height="24"
+                       viewBox="0 0 24 24"
+                       fill="none"
+                       stroke="currentColor"
+                       stroke-width="2"
+                       stroke-linecap="round"
+                       stroke-linejoin="round"
+                       class="w-4 h-4 text-[var(--color-text-muted)]">
+                    <path d="m6 9 6 6 6-6"></path>
+                  </svg>
+                </button>
+                <div x-show="open"
+                     x-transition:enter="transition ease-out duration-100"
+                     x-transition:enter-start="transform opacity-0 scale-95"
+                     x-transition:enter-end="transform opacity-100 scale-100"
+                     x-transition:leave="transition ease-in duration-75"
+                     x-transition:leave-start="transform opacity-100 scale-100"
+                     x-transition:leave-end="transform opacity-0 scale-95"
+                     class="absolute left-0 right-0 mt-2 py-1 bg-[var(--color-panel)] rounded-md shadow-lg overflow-y-auto max-h-60 z-10 border border-gray-600">
+                  <template x-for="option in options" :key="option.value">
+                    <button type="button"
+                            @click="selectedValue = option.value; selectedLabel = option.label; open = false"
+                            class="block w-full px-3 py-2 text-left text-sm transition-colors text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-strong)] hover:text-[var(--color-text)]"
+                            :class="{ 'text-[var(--color-text)] bg-[var(--color-surface-strong)]': selectedValue === option.value }">
+                      <span x-text="option.label"></span>
+                    </button>
+                  </template>
+                </div>
+                <input type="hidden" name="anime_library_mode" x-bind:value="selectedValue">
+              </div>
+            </div>
+          {% endif %}
+
+          <button type="submit"
+                  class="w-full px-4 py-2 text-sm rounded-md transition-colors cursor-pointer bg-indigo-600 text-white hover:bg-indigo-700">
+            {% translate "Save" %}
+          </button>
+        </form>
+      {% else %}
+        <div class="space-y-2">
+          {% for choice in entry.choices %}
+            <div class="flex items-center justify-between px-3 py-2 rounded-md bg-[var(--color-panel)] border border-gray-700/60 text-sm">
+              <span class="flex items-center gap-2 text-[var(--color-text-secondary)]">
+                {{ choice.label }}
+                {% if choice.value == entry.current_provider %}
+                  {% include "app/icons/checkmark.svg" with classes="w-4 h-4 text-[var(--color-link)]" %}
+                {% endif %}
+              </span>
+              {% if choice.configured %}
+                <span class="text-xs text-[var(--color-text-muted)]">{% translate "Configured" %}</span>
+              {% else %}
+                <button type="button"
+                        @click="openModal('{{ choice.value }}')"
+                        class="px-2 py-1 text-xs rounded-md bg-[var(--color-surface)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer">
+                  {% translate "Configure" %}
+                </button>
+              {% endif %}
+            </div>
+          {% endfor %}
+          <p class="text-xs text-[var(--color-text-muted)]">
+            {% translate "This library doesn't have a switchable default yet — configure a provider above to make it available." %}
+          </p>
+        </div>
+      {% endif %}
+    </div>
+  </div>
+</div>

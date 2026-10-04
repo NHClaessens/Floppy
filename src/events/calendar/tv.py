@@ -357,12 +357,14 @@ def reopen_completed_tv_with_new_seasons(tv_item, season_items, events_bulk):
                     seasons_by_tv_id[tv.id],
                     Season,
                     default_user=tv.user,
+                    default_change_reason="New season announced",
                 )
             bulk_update_with_history(
                 [tv],
                 TV,
                 ["status"],
                 default_user=tv.user,
+                default_change_reason="New season announced",
             )
             logger.info(
                 "%s - Reopened TV for user %s and created %d planning seasons",

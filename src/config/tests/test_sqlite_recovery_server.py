@@ -377,8 +377,10 @@ class RecoveryPageTests(SimpleTestCase):
             "version": "1.2.3",
             "commit_sha": "abc1234",
         }
+        status["error_message"] = "no read or CPU progress for 180s"
         page = recovery.render_page(None, interactive=True, status=status)
-        self.assertIn("timed out", page)
+        self.assertIn("stopped making progress", page)
+        self.assertIn("no read or CPU progress for 180s", page)
         self.assertIn("foreign_key_check", page)
         self.assertIn("601s", page)
         self.assertIn("842MB", page)
@@ -404,7 +406,7 @@ class RecoveryPageTests(SimpleTestCase):
             status = {"database": db_path, "status": "ok"}
             page = recovery.render_page(report, interactive=True, status=status)
             self.assertIn("Your data is safe. Floppy paused before migrations.", page)
-            self.assertNotIn("timed out", page)
+            self.assertNotIn("stopped making progress", page)
 
     def test_offline_and_live_pages_render_the_same_timeout_diagnosis(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -418,8 +420,8 @@ class RecoveryPageTests(SimpleTestCase):
             }
             live_page = recovery.render_page(None, interactive=True, status=status)
             offline_page = recovery.render_page(None, interactive=False, status=status)
-            self.assertIn("timed out", live_page)
-            self.assertIn("timed out", offline_page)
+            self.assertIn("stopped making progress", live_page)
+            self.assertIn("stopped making progress", offline_page)
             self.assertIn("quick_check", live_page)
             self.assertIn("quick_check", offline_page)
 

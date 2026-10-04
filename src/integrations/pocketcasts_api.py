@@ -158,17 +158,20 @@ def refresh_token(refresh_token: str) -> dict[str, Any]:
             "refreshToken": data.get("refreshToken", refresh_token),
         }
     except requests.HTTPError as e:
-        status_code = e.response.status_code if e.response else None
+        # ``Response.__bool__`` is ``response.ok``, so an error response is
+        # falsy: compare against None, not truthiness.
+        response = e.response
+        status_code = response.status_code if response is not None else None
         try:
-            error_body = e.response.text[:500] if e.response else "No response"
+            error_body = response.text[:500] if response is not None else "No response"
             logger.exception(
-                "Token refresh failed with status %d. Response: %s",
+                "Token refresh failed with status %s. Response: %s",
                 status_code,
                 error_body,
             )
         except Exception:
             logger.exception(
-                "Token refresh failed with status %d (could not read response body)",
+                "Token refresh failed with status %s (could not read response body)",
                 status_code,
             )
 

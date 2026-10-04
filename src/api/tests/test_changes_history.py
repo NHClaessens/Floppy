@@ -1,3 +1,5 @@
+from app.models import Movie, Sources
+
 from .base import FloppyApiTestCase
 from .helpers import check_changes_history_entry_structure, check_pagination_structure
 
@@ -286,3 +288,34 @@ class ChangesHistoryTests(FloppyApiTestCase):
         )
 
         self.assertEqual(delete_response.status_code, 404)
+
+
+class ChangesHistoryImportedMediaTests(FloppyApiTestCase):
+    """Media whose first record came from an import must still serialize."""
+
+    def test_an_imported_first_record_does_not_break_the_response(self):
+        """import_run is a relation; emitting it raw answered 500."""
+        from integrations.models import ImportRun
+
+        movie_item = self.items_by_type["movie"][0]
+        movie = Movie.objects.get(item=movie_item, user=self.user1)
+        movie.import_run = ImportRun.objects.create(
+            user=self.user1,
+            source=Sources.TMDB.value,
+        )
+        movie.save()
+
+        response = self.call_api(
+            "get",
+            "api_media_changes_history",
+            args=("movie", movie_item.source, movie_item.media_id),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        fields = {
+            change["field"]
+            for entry in response.json()["results"]
+            for change in entry["changes"]
+        }
+        self.assertNotIn("import_run", fields)

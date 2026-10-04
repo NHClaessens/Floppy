@@ -1,6 +1,7 @@
 import logging
 from contextlib import suppress
 from datetime import UTC, date
+from urllib.parse import urlencode
 from uuid import uuid4
 
 from django.apps import apps
@@ -14,7 +15,7 @@ from django.utils.translation import gettext_noop
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
-from app import custom_metadata, helpers
+from app import custom_metadata, helpers, history_processor
 from app import statistics as stats
 from app.collection_views import build_collection_modal_context
 from app.discover_views import _build_track_modal_discover_tab_context
@@ -234,13 +235,63 @@ def _track_modal_release_runtime_minutes(media_type, *candidates):
     return ""
 
 
-def _track_modal_date_suggestion(label, iso_date, runtime_minutes=""):
-    """Normalize a single labeled date suggestion for the shared date/time picker."""
+def _track_modal_date_suggestion(label, iso_date, runtime_minutes="", extras=()):
+    """Normalize a labeled date suggestion for the shared date/time picker.
+
+    ``extras`` are further ``{"label", "date"}`` quick dates offered next to it.
+    """
     return {
         "label": label,
         "date": iso_date or "",
         "runtime_minutes": runtime_minutes or "",
+        "extras": list(extras),
     }
+
+
+def _library_panel_url(source, media_type, media_id, season_number, episode_number):
+    """Return the URL that lazy-loads Radarr/Sonarr/Seerr details for a title."""
+    query = urlencode(
+        {
+            key: value
+            for key, value in (
+                ("season_number", season_number),
+                ("episode_number", episode_number),
+            )
+            if value is not None
+        },
+    )
+    url = reverse("library_panel", args=[source, media_type, media_id])
+    return f"{url}?{query}" if query else url
+
+
+RELEASE_TYPE_SHORTCUT_LABELS = {
+    "digital": gettext_noop("Digital release"),
+    "physical": gettext_noop("Physical release"),
+}
+
+
+def _track_modal_other_release_dates(media_type, item, user):
+    """Return a movie's stored digital and physical dates for the user's region.
+
+    Read from the calendar's events, so opening the modal never calls a provider.
+    """
+    if media_type != MediaTypes.MOVIE.value or item is None:
+        return []
+
+    from events.models import Event
+
+    events = (
+        Event.objects.filter(item=item, region=user.watch_provider_region)
+        .exclude(release_type="")
+        .order_by("release_type", "datetime")
+    )
+    return [
+        {
+            "label": RELEASE_TYPE_SHORTCUT_LABELS[event.release_type],
+            "date": event.datetime.date().isoformat(),
+        }
+        for event in events
+    ]
 
 
 def _rewatch_action(media, media_type):
@@ -329,6 +380,10 @@ def _render_standard_track_modal(
         "episode_number": episode_number,
         "instance_id": instance_id,
     }
+    if media_type == MediaTypes.EPISODE.value and media:
+        # Editing an episode watch can also save the current form as a new
+        # entry. Give that create operation its own stable idempotency key.
+        initial_data["watch_operation_id"] = uuid4()
     route_identity_media_type = None
     route_library_media_type = None
 
@@ -372,7 +427,6 @@ def _render_standard_track_modal(
                         ).get("number_of_pages")
                         if number_of_pages:
                             media.item.number_of_pages = number_of_pages
-                            media.item.save(update_fields=["number_of_pages"])
                             max_progress = number_of_pages
                     except Exception:  # noqa: S110  # deliberate best-effort; failure is non-fatal here
                         pass
@@ -438,7 +492,12 @@ def _render_standard_track_modal(
                 .filter(status=Status.IN_PROGRESS.value)
                 .exists()
             )
-            if existing_in_progress:
+            # An episode form logs a watch, so it keeps the Completed default.
+            if media_type != MediaTypes.EPISODE.value:
+                initial_data["status"] = helpers.default_status_for_new_entry(
+                    has_in_progress_entry=existing_in_progress,
+                )
+            elif existing_in_progress:
                 initial_data["status"] = Status.IN_PROGRESS.value
 
     title_subtitle = ""
@@ -591,6 +650,7 @@ def _render_standard_track_modal(
             media_id=media_id,
             source=source,
             base_metadata=base_metadata,
+            persist_links=False,
         )
         display_provider = metadata_resolution_result.display_provider
         identity_provider = metadata_resolution_result.identity_provider
@@ -705,6 +765,11 @@ def _render_standard_track_modal(
         or library_move_context
         or manual_metadata_form
         or can_manage_hardcover_edition
+        or (
+            metadata_item is not None
+            and media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value)
+        )
+        or (media_type == MediaTypes.TV.value and media is not None)
     )
 
     episode_plays_domain = bulk_episode_tracking.build_episode_play_domain(
@@ -762,10 +827,17 @@ def _render_standard_track_modal(
         ),
         base_metadata,
     )
+    other_release_dates = _track_modal_other_release_dates(
+        media_type,
+        metadata_item,
+        request.user,
+    )
     date_suggestion = _track_modal_date_suggestion(
-        "Release Date",
+        # Name the theatrical date once a digital or physical one sits beside it.
+        gettext_noop("Theatrical release") if other_release_dates else "Release Date",
         release_date_shortcut,
         release_date_runtime_minutes,
+        other_release_dates,
     )
     rewatch_action = _rewatch_action(media, media_type)
 
@@ -807,6 +879,13 @@ def _render_standard_track_modal(
         "library_move_context": library_move_context,
         "metadata_tab_available": metadata_tab_available,
         "metadata_item": metadata_item,
+        "match_item": metadata_item,
+        "tv_provider_switch_target": (
+            library_migration.tv_provider_switch_target(request.user, metadata_item)
+            if metadata_item is not None
+            else None
+        ),
+        "current_instance": media,
         "general_hidden_fields": hidden_fields,
         "general_fields": general_fields,
         "general_submit_formaction": (
@@ -830,21 +909,8 @@ def _render_standard_track_modal(
             getattr(media, "rewatch_started_at", None) if rewatch_action else None
         ),
         "general_existing_instance": media,
-        # Episodes are multi-watch: when the modal is bound to an existing watch
-        # this re-opens it in create mode so a rewatch can still be logged.
-        "episode_create_url": (
-            reverse(
-                "track_modal",
-                kwargs={
-                    "source": source,
-                    "media_type": media_type,
-                    "media_id": media_id,
-                    "season_number": season_number,
-                },
-            )
-            + f"?is_create=1&episode_number={episode_number}&return_url={return_url}"
-            if media_type == MediaTypes.EPISODE.value and media
-            else ""
+        "episode_save_as_new": bool(
+            media_type == MediaTypes.EPISODE.value and media,
         ),
         "metadata_fields": metadata_fields,
         "image_field": image_field,
@@ -878,6 +944,18 @@ def _render_standard_track_modal(
         "collection_tab_available": False,
         "collection_context": None,
     }
+    context["status_history_tab_available"] = bool(
+        media is not None
+        and media_type in (MediaTypes.TV.value, MediaTypes.SEASON.value),
+    )
+    context["status_changes"] = (
+        history_processor.status_change_log(
+            media,
+            limit=history_processor.STATUS_HISTORY_TAB_LENGTH,
+        )
+        if context["status_history_tab_available"]
+        else []
+    )
     koreader_account = getattr(request.user, "koreader_account", None)
     context["show_koreader_document_field"] = bool(
         media_type == MediaTypes.BOOK.value
@@ -892,8 +970,16 @@ def _render_standard_track_modal(
             request.user,
             metadata_item,
         )
-    if media_type == MediaTypes.EPISODE.value and episode_number is not None:
+    if (
+        (media_type == MediaTypes.EPISODE.value and episode_number is not None)
+        or (media_type == MediaTypes.SEASON.value and season_number is not None)
+        or media_type in (MediaTypes.MOVIE.value, MediaTypes.TV.value)
+    ):
         context["collection_tab_available"] = True
+        if source in (Sources.TMDB.value, Sources.TVDB.value):
+            context["library_panel_url"] = _library_panel_url(
+                source, media_type, media_id, season_number, episode_number
+            )
         context["collection_context"] = build_collection_modal_context(
             request,
             source,
@@ -1092,18 +1178,18 @@ def track_modal(
                 ).order_by("-end_date")
             )
 
-            # Get or create Item for this episode
-            item, _ = Item.objects.get_or_create(
+            # Render without creating a tracking Item during this GET.
+            item = Item.objects.filter(
                 media_id=episode.episode_uuid,
                 source=source,
                 media_type=media_type,
-                defaults={
-                    "title": episode.title,
-                    "image": show.image or settings.IMG_NONE,
-                    "runtime_minutes": (episode.duration // 60)
-                    if episode.duration
-                    else None,
-                },
+            ).first() or Item(
+                media_id=episode.episode_uuid,
+                source=source,
+                media_type=media_type,
+                title=episode.title,
+                image=show.image or settings.IMG_NONE,
+                runtime_minutes=(episode.duration // 60) if episode.duration else None,
             )
 
             # Create adapter objects to match template expectations

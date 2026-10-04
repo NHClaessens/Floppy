@@ -78,10 +78,7 @@ class ListSmartRulesView(drf_views.APIView):
         )
         custom_list.smart_media_types = normalized["media_types"]
         custom_list.smart_excluded_media_types = []
-        custom_list.smart_filters = {
-            key: normalized.get(key, smart_rules.SMART_FILTER_DEFAULTS[key])
-            for key in smart_rules.SMART_FILTER_KEYS
-        }
+        custom_list.smart_filters = smart_rules.saved_filters(normalized, custom_list)
         custom_list.save(
             update_fields=[
                 "smart_media_types",

@@ -157,7 +157,7 @@ what the user approved, and the settings page names the shortfall as
 | Jellyfin | Yes | Yes — `PlayedItems` is a *set*, so read-first retry is safe | inbound + outbound |
 | Emby | Yes | Unverified here | inbound only |
 | Kodi | Yes, via library id lookup | Unverified; its write assigns a *count* | inbound only |
-| Plex | Existing webhooks and history | `/:/scrobble` is undocumented | inbound only |
+| Plex | Existing webhooks and history; manual marks via an opt-in 15-minute history poll (Plex sends no webhook for them) | `/:/scrobble` is undocumented | inbound only |
 | Stremio | Existing bitfield parsing | `datastorePut` is a read-modify-write of an opaque bitfield with no CAS | inbound only |
 | Audiobookshelf | Existing pull | Documented, unverified | inbound only |
 | Last.fm / ListenBrainz / Koito | Listens | Append-only | out of scope — listens have no unwatch |
@@ -170,7 +170,8 @@ what the user approved, and the settings page names the shortfall as
 operations.
 
 - With an identifiable play (`MoviePlay.external_id`,
-  `Episode.watch_operation_id`) exactly that play is removed.
+  `Episode.external_id`, `Episode.watch_operation_id`) exactly that play is
+  removed.
 - Without one, an episode retraction drops the latest play and keeps the rest;
   a movie retraction keeps every play and reverts the row's status. A provider
   saying "unwatched" is at most evidence about the most recent viewing.

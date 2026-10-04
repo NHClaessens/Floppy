@@ -818,6 +818,30 @@ def _episode_delete_filter(selected_episodes):
     return filters
 
 
+def _inherited_scores(season_trackers, item_ids):
+    """Return the latest existing (score, scored_at) per item id for replay inheritance.
+
+    A rating belongs to the episode, not to one viewing of it (see
+    Episode.save()), but bulk-logged plays are written with bulk_create,
+    which skips save() entirely, so this mirrors that inheritance rule here.
+    """
+    if not item_ids:
+        return {}
+    scored_plays = (
+        Episode.objects.filter(
+            related_season__in=season_trackers,
+            item_id__in=item_ids,
+        )
+        .exclude(score__isnull=True)
+        .order_by("item_id", "-end_date", "-created_at")
+        .values_list("item_id", "score", "scored_at")
+    )
+    scores = {}
+    for item_id, score, scored_at in scored_plays:
+        scores.setdefault(item_id, (score, scored_at))
+    return scores
+
+
 def _get_or_create_podcast_episode_item(show, episode):
     """Return the trackable item for a podcast episode."""
     runtime_minutes = episode.duration // 60 if episode.duration else None
@@ -1101,7 +1125,7 @@ def apply_bulk_episode_plays(
                         id__in=[entry.id for entry in existing_entries],
                     ).delete()
 
-        episodes_to_create = []
+        episode_specs = []
         for episode, watched_at in zip(selected_episodes, timestamps, strict=False):
             season_tracker = touched_seasons[episode["season_number"]]
             episode_item_exists = Item.objects.filter(
@@ -1124,13 +1148,23 @@ def apply_bulk_episode_plays(
             played_day_key = history_cache.history_day_key(watched_at)
             if played_day_key:
                 affected_day_keys.add(played_day_key)
-            episodes_to_create.append(
-                Episode(
-                    related_season=season_tracker,
-                    item=episode_item,
-                    end_date=watched_at,
-                ),
+            episode_specs.append((season_tracker, episode_item, watched_at))
+
+        inherited_scores = _inherited_scores(
+            touched_seasons.values(),
+            {episode_item.id for _, episode_item, _ in episode_specs},
+        )
+        episodes_to_create = [
+            Episode(
+                related_season=season_tracker,
+                item=episode_item,
+                end_date=watched_at,
+                score=inherited[0],
+                scored_at=inherited[1],
             )
+            for season_tracker, episode_item, watched_at in episode_specs
+            for inherited in [inherited_scores.get(episode_item.id, (None, None))]
+        ]
 
         if episodes_to_create:
             created_episodes = bulk_create_with_history(episodes_to_create, Episode)
@@ -1138,9 +1172,21 @@ def apply_bulk_episode_plays(
                 normalize_completed_entry(episode)
             created_count = len(episodes_to_create)
 
-    for season_tracker in touched_seasons.values():
+    # bulk_create skips Episode.save, which is what completes a season on a
+    # single play, so settle each season here with the provider's episode
+    # count, in watch order so each completion hands on to the next season.
+    for season_number in sorted(touched_seasons):
+        season_tracker = touched_seasons[season_number]
         season_tracker.refresh_from_db()
-        season_tracker._sync_status_after_episode_change()
+        season_payload = domain["season_payloads"][season_number]
+        season_tracker._sync_status_after_episode_change(
+            max_progress=(
+                season_payload.get("max_progress")
+                or len(season_payload.get("episodes") or [])
+                or None
+            ),
+            plays_added=bool(created_count),
+        )
 
     if created_count or replaced_episode_count:
         flush_media_change_side_effects(

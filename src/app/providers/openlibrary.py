@@ -3,13 +3,11 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-import aiohttp
 import requests
-from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.cache import cache
 
-from app import helpers
+from app import helpers, request_timing
 from app.models import MediaTypes, Sources
 from app.providers import services
 
@@ -118,6 +116,7 @@ def get_image_url(doc):
         return settings.IMG_NONE
 
 
+@request_timing.timed_provider_call
 def book(media_id):
     """Get metadata for a book from Open Library."""
     return asyncio.run(async_book(media_id))
@@ -214,6 +213,11 @@ def get_cover_image_url(response):
 
 def get_description(response_book, response_work):
     """Extract and clean up the book description."""
+    # Imported here, not at module scope: beautifulsoup4 is only needed to
+    # flatten an HTML description, so importing it at module scope would
+    # keep it resident in every process that touches this provider.
+    from bs4 import BeautifulSoup
+
     if "description" in response_book:
         description = response_book["description"]
     elif "description" in response_work:
@@ -295,6 +299,11 @@ async def get_authors(response):
 
 async def get_authors_full(response):
     """Get full author payloads asynchronously."""
+    # Imported here, not at module scope: aiohttp is the single heaviest
+    # import in the provider set, and only this async path needs it. An
+    # install that tracks no manga or books never loads it at all.
+    import aiohttp
+
     authors = []
     author_entries = response.get("authors", [])
 
@@ -365,6 +374,11 @@ def get_isbns(response):
 
 async def get_editions(response_book, response_work):
     """Get list of editions asynchronously."""
+    # Imported here, not at module scope: aiohttp is the single heaviest
+    # import in the provider set, and only this async path needs it. An
+    # install that tracks no manga or books never loads it at all.
+    import aiohttp
+
     book_id = extract_openlibrary_id(response_book.get("key", ""))
     work_id = extract_openlibrary_id(response_work.get("key", ""))
 
@@ -400,6 +414,11 @@ async def get_editions(response_book, response_work):
 
 async def get_ratings(response_work):
     """Get ratings data for a book asynchronously."""
+    # Imported here, not at module scope: aiohttp is the single heaviest
+    # import in the provider set, and only this async path needs it. An
+    # install that tracks no manga or books never loads it at all.
+    import aiohttp
+
     work_id = extract_openlibrary_id(response_work.get("key", ""))
 
     if not work_id:

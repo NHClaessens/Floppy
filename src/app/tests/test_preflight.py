@@ -690,6 +690,35 @@ class RedisCheckTests(SimpleTestCase):
         rendered = json.dumps(result.as_dict())
         self.assertNotIn("hunter2", rendered)
 
+    @override_settings(
+        REDIS_URL="redis://redis:6379",
+        REDIS_CACHE_URL="redis://redis:6379",
+        REDIS_ADMIN_URL="redis://redis:6379",
+        CELERY_BROKER_URL="redis://redis:6379",
+        CELERY_RESULT_BACKEND="redis://redis:6379",
+    )
+    def test_an_unresolvable_hostname_points_at_the_shared_network(self):
+        """#1263. Redis was running, on a network Floppy was not on.
+
+        "Check that the Redis service is running" sent the operator to a
+        container that was healthy. The fix is the compose file's networks.
+        """
+        client = mock.Mock()
+        client.ping.side_effect = preflight.redis.ConnectionError(
+            "Error -2 connecting to redis:6379. Name does not resolve."
+        )
+        with (
+            mock.patch.object(preflight.redis, "from_url", return_value=client),
+            mock.patch.object(preflight, "in_container", return_value=True),
+        ):
+            result = preflight.check_redis()
+
+        self.assertEqual(result.status, FAIL)
+        self.assertIn('"redis" does not resolve', result.cause)
+        self.assertTrue(result.fix.startswith(preflight.CONFIG))
+        self.assertIn("network", result.fix)
+        self.assertNotIn("is running", result.fix)
+
 
 class CommandTests(TestCase):
     """Command-level behaviour.

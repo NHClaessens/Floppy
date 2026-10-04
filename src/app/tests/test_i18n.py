@@ -1,5 +1,7 @@
 """Language selection and presentation must not change stored media identities."""
 
+import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -95,3 +97,59 @@ class GermanPreferencesTests(TestCase):
             reverse("javascript-catalog"), HTTP_ACCEPT_LANGUAGE="en"
         )
         self.assertNotContains(english, "Heute")
+
+
+class FilterMenuCatalogTests(TestCase):
+    """The shared filter menu's JavaScript labels are in the JS catalogs."""
+
+    def test_every_filter_state_label_is_translated(self):
+        source = (
+            Path(settings.BASE_DIR) / "static" / "js" / "libraryFilterState.js"
+        ).read_text()
+        messages = set(re.findall(r"gettext\('([^']*)'\)", source))
+        self.assertIn("All Types", messages)
+        for language in ("de", "fr"):
+            response = self.client.get(
+                reverse("javascript-catalog"), HTTP_ACCEPT_LANGUAGE=language
+            )
+            catalog = json.loads(
+                re.search(r"const newcatalog = (\{.*?\});", response.text, re.DOTALL)[1],
+            )
+            with self.subTest(language=language):
+                self.assertEqual(messages - catalog.keys(), set())
+
+
+class FrenchPresentationTests(SimpleTestCase):
+    """French catalogs localize labels and use its own plural rule."""
+
+    def test_labels_are_localized_without_changing_status_values(self):
+        with translation.override("fr"):
+            self.assertEqual(media_type_readable(MediaTypes.MOVIE), "Film")
+            self.assertEqual(media_status_readable(Status.PLANNING), "Prévu")
+            choices = dict(MovieForm().fields["status"].choices)
+            self.assertEqual(choices["Planning"], "Prévu")
+            self.assertEqual(Status.PLANNING.value, "Planning")
+
+    def test_progress_units_treat_zero_as_singular(self):
+        # French uses plural=(n > 1), unlike German and English.
+        with translation.override("fr"):
+            self.assertEqual(progress_unit_label(MediaTypes.SEASON, 0), "Épisode")
+            self.assertEqual(progress_unit_label(MediaTypes.SEASON, 1), "Épisode")
+            self.assertEqual(progress_unit_label(MediaTypes.SEASON, 2), "Épisodes")
+
+
+class FrenchPreferencesTests(TestCase):
+    """Check a saved French preference across HTML and JavaScript requests."""
+
+    def test_saved_language_controls_html_and_javascript(self):
+        user = get_user_model().objects.create_user(username="french-language-test")
+        self.client.force_login(user)
+        response = self.client.post(reverse("preferences"), {"ui_language": "fr"})
+        self.assertEqual(response.status_code, 302)
+        user.refresh_from_db()
+        self.assertEqual(user.ui_language, "fr")
+        response = self.client.get(reverse("preferences"), HTTP_ACCEPT_LANGUAGE="en")
+        self.assertContains(response, '<html lang="fr"')
+        self.assertContains(response, "Paramètres")
+        catalog = self.client.get(reverse("javascript-catalog"))
+        self.assertContains(catalog, "Aujourd'hui")

@@ -86,10 +86,22 @@ class HomeScreenViewTests(TestCase):
         self.assertContains(response, "expanded: false")
         self.assertContains(response, 'x-html="section.icon_svg"')
         self.assertContains(response, "ensureSortable()")
-        self.assertNotContains(
+        self.assertContains(response, "sortablejs-1.15.3.min.js")
+        self.assertNotContains(response, "cdn.jsdelivr.net/npm/sortablejs")
+        self.assertContains(
             response,
-            'src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.3/Sortable.min.js"',
+            "These groups are the rows on the home screen. Drag to reorder, click to edit.",
         )
+        self.assertContains(response, "sectionPreview(section)")
+        self.assertContains(response, 'aria-label="Reorder section"')
+        self.assertContains(response, "section-drag-handle")
+        self.assertContains(response, 'aria-label="Reorder row"')
+        self.assertContains(response, "row-drag-handle")
+        self.assertContains(response, 'aria-label="Delete row"')
+        self.assertContains(response, 'aria-label="Row name"')
+        self.assertNotContains(response, "!isDesktop || hovering")
+        self.assertContains(response, "rowFilterPills(section, row)")
+        self.assertNotContains(response, "statusButtonLabel(section, row)")
         self.assertNotContains(response, "section.rows.length === 1")
         self.assertContains(response, "Add Row")
         self.assertContains(response, "Add List")
@@ -97,6 +109,16 @@ class HomeScreenViewTests(TestCase):
         self.assertNotContains(response, "Add List / Smart List")
         self.assertNotContains(response, "Add Recently Played Row")
         self.assertNotContains(response, "Enabled")
+
+    def test_home_dropdowns_expose_open_state_and_escape_controls(self):
+        response = self.client.get(reverse("home_screen"))
+
+        self.assertContains(response, ":aria-expanded=\"openMenu === 'filter'\"")
+        self.assertContains(response, ":aria-expanded=\"openMenu === 'status'\"")
+        self.assertContains(response, ":aria-expanded=\"openMenu === 'sort'\"")
+        self.assertContains(response, ':aria-expanded="section.addRowMenuOpen"')
+        self.assertContains(response, '@keydown.escape="if (openMenu !== null)')
+        self.assertContains(response, '@keydown.escape="if (section.addRowMenuOpen)')
 
     def test_home_rows_progress_filter_ignores_dropped_tv_seasons(self):
         """Home not-caught-up rows should ignore dropped TV seasons."""
@@ -287,11 +309,11 @@ class HomeScreenViewTests(TestCase):
         )
 
     @patch("app.models.providers.services.get_media_metadata")
-    def test_home_in_progress_row_hides_fully_watched_stale_seasons(
+    def test_home_in_progress_row_preserves_caught_up_in_progress_seasons(
         self,
         mock_get_metadata,
     ):
-        """Home should derive completed status for fully watched season rows."""
+        """Home should preserve in-progress status for caught-up season rows."""
         self._set_enabled_media_types(MediaTypes.SEASON.value)
 
         stale_season_item = Item.objects.create(
@@ -400,11 +422,9 @@ class HomeScreenViewTests(TestCase):
 
         self.assertEqual(
             [entry.item.title for entry in groups[0]["rows"][0]["items"]],
-            ["Home Active Season 1"],
+            ["Home Active Season 1", "Home Completed Season 1"],
         )
         stale_season.refresh_from_db()
-        # Rewatch protection: an in-progress season is never auto-promoted to
-        # Completed in the DB; Home only derives the status for display.
         self.assertEqual(stale_season.status, Status.IN_PROGRESS.value)
 
     @patch("app.models.providers.services.get_media_metadata")
@@ -603,14 +623,12 @@ class HomeScreenViewTests(TestCase):
             "which would 504 the home page after a cache clear (#621).",
         )
 
-    def test_library_query_rows_share_one_collection_scan_per_request(self):
-        """`_collection_filter_context` should run once per request, not per row.
+    def test_library_query_rows_do_not_scan_the_collection_in_python(self):
+        """Collection-only items are found in SQL, never by a CollectionEntry scan.
 
-        `_library_query_entries` always calls `collect_matching_item_ids`
-        with `include_collection_only_untracked=True`, which needs the
-        user's collection context whenever a row's status filter is empty.
-        Building several such rows in one `build_home_page_groups` call
-        must not re-scan `CollectionEntry` once per row/media type.
+        Rows with an empty status filter include items the user collected but
+        never tracked. That used to load the user's whole collection once per
+        request (#621); the library-query engine now reads it in SQL.
         """
         enabled_media_types = [
             MediaTypes.MOVIE.value,
@@ -638,9 +656,9 @@ class HomeScreenViewTests(TestCase):
 
         self.assertEqual(
             spy.call_count,
-            1,
-            "Expected one shared CollectionEntry scan per request, "
-            f"got {spy.call_count} calls across {len(enabled_media_types)} rows.",
+            0,
+            f"Expected no Python CollectionEntry scan, got {spy.call_count} "
+            f"across {len(enabled_media_types)} rows.",
         )
 
     def test_cached_row_section_skips_rebuild_after_empty_sentinel(self):
@@ -658,7 +676,10 @@ class HomeScreenViewTests(TestCase):
         )
 
         first = home_screen._cached_row_section(
-            self.user, row, MediaTypes.MOVIE.value, items_limit=10,
+            self.user,
+            row,
+            MediaTypes.MOVIE.value,
+            items_limit=10,
         )
         self.assertIsNone(first)
 
@@ -668,7 +689,10 @@ class HomeScreenViewTests(TestCase):
             side_effect=AssertionError("row builder should not run on a warm hit"),
         ):
             second = home_screen._cached_row_section(
-                self.user, row, MediaTypes.MOVIE.value, items_limit=10,
+                self.user,
+                row,
+                MediaTypes.MOVIE.value,
+                items_limit=10,
             )
 
         self.assertIsNone(second)
@@ -812,7 +836,7 @@ class HomeScreenViewTests(TestCase):
             },
         )
 
-        entries = home_screen._library_query_entries(self.user, row)
+        entries = home_screen._library_row_window(self.user, row, 0, 1000, seed=0)[0]
 
         self.assertEqual(
             [entry.item.title for entry in entries], ["Home Action Comedy"]
@@ -854,7 +878,7 @@ class HomeScreenViewTests(TestCase):
             filters={"subview": "tracks", "status": [Status.COMPLETED.value]},
         )
 
-        entries = home_screen._library_query_entries(self.user, row)
+        entries = home_screen._library_row_window(self.user, row, 0, 1000, seed=0)[0]
 
         self.assertEqual(len(entries), 1)
         self.assertEqual(entries[0].media.card_image_override, album_image)
@@ -1074,6 +1098,76 @@ class HomeScreenViewTests(TestCase):
             HomeScreenRow.objects.filter(
                 user=self.user,
                 row_type=HomeScreenRowTypeChoices.RECENTLY_UNRATED,
+            ).exists(),
+        )
+
+    def test_home_screen_get_omits_smart_list_only_filter_keys(self):
+        self._set_enabled_media_types(MediaTypes.TV.value)
+
+        response = self.client.get(reverse("home_screen"))
+
+        sections = {
+            section["media_type"]: section
+            for section in json.loads(response.context["home_screen_sections_json"])
+        }
+        tv_filters = sections[MediaTypes.TV.value]["rows"][0]["filters"]
+        for key in (
+            "completed_date_within_unit",
+            "completed_date_from",
+            "completed_date_to",
+            "completed_date_within",
+            "release_date_from",
+            "rating_min",
+            "rating_max",
+            "sort",
+            "list",
+        ):
+            self.assertNotIn(key, tv_filters)
+
+    def test_home_screen_post_round_trips_seeded_filters_without_error(self):
+        """Regression test for #1177: saving unmodified seeded filters must not
+        fail with e.g. "Filter 'completed_date_within_unit' is not available".
+        """
+        self._set_enabled_media_types(MediaTypes.TV.value)
+
+        get_response = self.client.get(reverse("home_screen"))
+        sections = {
+            section["media_type"]: section
+            for section in json.loads(
+                get_response.context["home_screen_sections_json"],
+            )
+        }
+        tv_row = sections[MediaTypes.TV.value]["rows"][0]
+
+        payload = [
+            {
+                "media_type": MediaTypes.TV.value,
+                "rows": [
+                    {
+                        "enabled": True,
+                        "row_type": HomeScreenRowTypeChoices.LIBRARY_QUERY,
+                        "sort_by": tv_row["sort_by"],
+                        "direction": tv_row["direction"],
+                        "filters": tv_row["filters"],
+                    },
+                ],
+            },
+        ]
+
+        response = self.client.post(
+            reverse("home_screen"),
+            {"home_screen_sections": json.dumps(payload)},
+        )
+
+        self.assertRedirects(response, reverse("home_screen"))
+        messages = list(get_messages(response.wsgi_request))
+        self.assertEqual(len(messages), 1)
+        self.assertIn("updated successfully", str(messages[0]))
+        self.assertTrue(
+            HomeScreenRow.objects.filter(
+                user=self.user,
+                media_type=MediaTypes.TV.value,
+                row_type=HomeScreenRowTypeChoices.LIBRARY_QUERY,
             ).exists(),
         )
 
@@ -1999,6 +2093,46 @@ class HomeScreenRecentSortTests(SimpleTestCase):
             ["Actively Watched Show", "Unstarted Auto-Created Season"],
         )
 
+    def _unstarted_entry(self, title, release_datetime):
+        item = SimpleNamespace(title=title, release_datetime=release_datetime)
+        media = SimpleNamespace(
+            progress=0,
+            last_played_at=None,
+            progressed_at=None,
+            created_at=None,
+        )
+        return home_screen.HomeRowEntry(item=item, media=media)
+
+    def test_unstarted_items_sort_by_release_status_not_reverse_title(self):
+        """Regression for #999: unstarted items fell back to reverse-alpha title."""
+        now = timezone.now()
+        entries = [
+            self._unstarted_entry("Elle Season 2", None),
+            self._unstarted_entry("Witch Hat Atelier Season 2", None),
+            self._unstarted_entry("Frieren Season 3", now + timedelta(days=30)),
+            self._unstarted_entry("Upcoming Soon Season", now + timedelta(days=5)),
+            self._unstarted_entry("Bridgerton Season 4", now - timedelta(days=10)),
+            self._unstarted_entry("Older Released Season", now - timedelta(days=100)),
+        ]
+
+        result = home_screen.sort_home_entries(
+            entries,
+            HomeSortChoices.RECENT,
+            DirectionChoices.DESC,
+        )
+
+        self.assertEqual(
+            [entry.item.title for entry in result],
+            [
+                "Bridgerton Season 4",
+                "Older Released Season",
+                "Upcoming Soon Season",
+                "Frieren Season 3",
+                "Elle Season 2",
+                "Witch Hat Atelier Season 2",
+            ],
+        )
+
 
 class CrossProviderDedupTests(TestCase):
     """Home rows must not show duplicate tiles for a verified TMDB/TVDB pair (#620)."""
@@ -2023,8 +2157,12 @@ class CrossProviderDedupTests(TestCase):
             source=Sources.TVDB.value,
             image="",
         )
-        TV.objects.create(item=tmdb_item, user=self.user, status=Status.IN_PROGRESS.value)
-        TV.objects.create(item=tvdb_item, user=self.user, status=Status.IN_PROGRESS.value)
+        TV.objects.create(
+            item=tmdb_item, user=self.user, status=Status.IN_PROGRESS.value
+        )
+        TV.objects.create(
+            item=tvdb_item, user=self.user, status=Status.IN_PROGRESS.value
+        )
         return tmdb_item, tvdb_item
 
     def test_prefers_tvdb_item_for_tvdb_preferring_user(self):
@@ -2090,6 +2228,6 @@ class CrossProviderDedupTests(TestCase):
             filters={"status": [Status.IN_PROGRESS.value]},
         )
 
-        entries = home_screen._library_query_entries(self.user, row)
+        entries = home_screen._library_row_window(self.user, row, 0, 1000, seed=0)[0]
 
         self.assertEqual([entry.item.pk for entry in entries], [tvdb_item.pk])

@@ -2,7 +2,6 @@ import logging
 import re
 
 import requests
-from bs4 import BeautifulSoup
 from django.conf import settings
 from django.core.cache import cache
 
@@ -189,6 +188,11 @@ def get_image(response):
 
 def get_synopsis(response):
     """Return the synopsis."""
+    # Imported here, not at module scope: beautifulsoup4 is only needed to
+    # flatten an HTML description, so importing it at module scope would
+    # keep it resident in every process that touches this provider.
+    from bs4 import BeautifulSoup
+
     if not response.get("description"):
         return "No synopsis available"
 
@@ -626,6 +630,11 @@ def issue(media_id, user=None):
 
 def person_profile(person_id, user=None):
     """Return metadata for a Comic Vine person profile."""
+    # Imported here, not at module scope: beautifulsoup4 is only needed to
+    # flatten an HTML description, so importing it at module scope would
+    # keep it resident in every process that touches this provider.
+    from bs4 import BeautifulSoup
+
     cache_key = f"{Sources.COMICVINE.value}_person_{person_id}"
     data = cache.get(cache_key)
     if data is not None:

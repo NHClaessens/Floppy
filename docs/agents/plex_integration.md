@@ -92,6 +92,7 @@ Real-time webhooks (`src/integrations/webhooks/plex.py`) share the same ID resol
 -   **Dedupe Intent**: Webhook dedupe is tuned for bursty duplicate deliveries; import dedupe is tuned for replaying long history pages, so the rules intentionally differ.
 -   **Reliability**: Webhooks are best-effort with no ordering guarantees. If a scrobble is missed, rerun the Plex history import (manual or scheduled) to reconcile gaps.
 -   **Metadata**: Webhooks fetch TMDB metadata inline (cached); there is no separate refresh queue.
+-   **Ratings (`media.rate`)**: Movie ratings update the movie instance; episode and show ratings update the show-level TV rating; season ratings update the matching Season rating. A `-1.0` rating clears the stored score. Show and season payloads are mapped only on the rating path — other events keep ignoring them.
 
 ### Shared webhook routing
 

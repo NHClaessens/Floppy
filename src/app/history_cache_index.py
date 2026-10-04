@@ -55,7 +55,7 @@ def build_history_index(
     days = set()
 
     episode_days = (
-        Episode.objects.filter(
+        Episode.all_objects.filter(
             related_season__user=user,
             end_date__isnull=False,
         )
@@ -65,7 +65,21 @@ def build_history_index(
         .values_list("day", flat=True)
         .distinct()
     ) if include_episode else []
+    # An open play is indexed on the day it started, as a movie is.
+    episode_start_days = (
+        Episode.all_objects.filter(
+            related_season__user=user,
+            end_date__isnull=True,
+            start_date__isnull=False,
+        )
+        .annotate(
+            day=TruncDate("start_date"),
+        )
+        .values_list("day", flat=True)
+        .distinct()
+    ) if include_episode else []
     episode_count = _add_days(days, episode_days)
+    episode_count += _add_days(days, episode_start_days)
 
     movie_qs = Movie.objects.none()
     if include_movie:

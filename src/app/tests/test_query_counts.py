@@ -29,6 +29,9 @@ from app.models import (
     Manga,
     MediaTypes,
     Movie,
+    Podcast,
+    PodcastEpisode,
+    PodcastShow,
     Season,
     Sources,
     Status,
@@ -64,6 +67,13 @@ TV_LIST_DEFAULT_SORT_MAX_QUERIES = 24  # pinned after Fix 1+2+3 (was 2642 in pro
 TV_LIST_TIME_LEFT_SORT_MAX_QUERIES = (
     26  # pinned after Fix 4 bulk runtime load (was ~400+ per-season queries)
 )
+TV_LIST_NEXT_EPISODE_SORT_MAX_QUERIES = (
+    33  # +2 fixed Item prefetches after compact Episode window selection;
+    # keeps wide Item columns out of the history-sized window intermediates.
+    # The untracked-season events of every show on the page are read in
+    # one query; it was one per show plus one per event's item (49 for these
+    # ten shows, 92 for sixty)
+)
 MOVIE_LIST_DEFAULT_SORT_MAX_QUERIES = 14
 ANIME_LIST_DEFAULT_SORT_MAX_QUERIES = (
     22  # +2 over the pre-credential-registry pin: resolving the MAL/TMDB
@@ -71,12 +81,16 @@ ANIME_LIST_DEFAULT_SORT_MAX_QUERIES = (
     # one, each once per cold cache (an hour in production, every test here).
 )
 ANIME_LIST_GROUPED_MAX_QUERIES = (
-    23  # grouped (TV-backed) anime adds no per-show runtime queries (24 when broken);
+    26  # +1 bulk Item prefetch after compact Episode window selection;
+    # grouped (TV-backed) anime adds no per-show runtime queries;
+    # +1 for the page COUNT: the list is paged by the library-query engine
+    # instead of counting a fully loaded list (#1248);
     # +4 from the Genres/Tags column Prefetch("item__item_tags") added in #457;
-    # +2 from the instance and personal provider-credential reads
+    # +2 from the instance and personal provider-credential reads;
+    # +1 from the sidebar's saved-views read (#413)
 )
 MANGA_LIST_DEFAULT_SORT_MAX_QUERIES = 14
-MANGA_LIST_NO_STATUS_MAX_QUERIES = 18
+MANGA_LIST_NO_STATUS_MAX_QUERIES = 19  # +1 from the custom-list collaborators prefetch
 GAME_LIST_DEFAULT_SORT_MAX_QUERIES = 18
 GAME_LIST_START_DATE_SORT_LIBRARY_SIZE = 150
 GAME_LIST_START_DATE_SORT_MAX_QUERIES = (
@@ -86,10 +100,15 @@ GAME_LIST_START_DATE_SORT_MAX_QUERIES = (
 HOME_ROW_FRAGMENT_MAX_QUERIES = (
     123  # +2 from the Tags column Prefetch (#457); +1 from the provider-credential read
 )
-CUSTOM_LIST_DETAIL_MAX_QUERIES = 33  # +3 from prefilled release-year metadata
+CUSTOM_LIST_DETAIL_MAX_QUERIES = 38  # +3 from prefilled release-year metadata;
+# +1 from the custom-list collaborators prefetch; +1 from the sidebar's
+# saved-views read (#413); +3 from the filter menu's options (member ids,
+# member metadata, tag names) on a full page render (#806)
 SEASON_PAGE_FIRST_VIEW_EPISODE_COUNT = 18
 SEASON_PAGE_FIRST_VIEW_MAX_QUERIES = 46  # +1 from the per-item metadata language override lookup (#1009)
 SESSION_HISTORY_MODAL_MAX_QUERIES = 60
+PODCAST_SHOW_DETAIL_MAX_QUERIES = 17  # was 155 for twenty played episodes
+PODCAST_EPISODE_PAGE_MAX_QUERIES = 14  # was 72
 
 
 def seed_tv_library(
@@ -290,7 +309,27 @@ class QueryCountTests(TestCase):
     def setUp(self):
         """Reset cache state and log in."""
         cache.clear()
+        self._warm_instance_caches(self.user)
         self.client.force_login(self.user)
+
+    @staticmethod
+    def _warm_instance_caches(user):
+        """Populate the instance-wide caches a running deployment already has.
+
+        These budgets guard how list rendering scales with the library, so the
+        constant per-instance lookups must not be counted. ``cache.clear()``
+        above drops all three, and the image-caching one additionally creates
+        its singleton row on first read, adding a savepoint and an insert.
+        """
+        from app import image_cache
+        from app.providers import credentials, services
+
+        image_cache.is_enabled()
+        # Credentials are cached per member as well as instance-wide, and a
+        # request runs as the logged-in user, so both maps have to be warm.
+        credentials.is_configured("tmdb")
+        credentials.is_configured("tmdb", user)
+        services._get_tmdb_proxy_url()  # no public warm entry point
 
     def _assert_query_budget(self, url, budget, label):
         with CaptureQueriesContext(connection) as context:
@@ -361,6 +400,14 @@ class QueryCountTests(TestCase):
             "TV list time_left sort",
         )
 
+    def test_tv_list_next_episode_air_date_sort_query_budget(self):
+        """Next-episode sort reads season events in bulk, not per show."""
+        self._assert_query_budget(
+            "/medialist/tv?sort=next_episode_air_date",
+            TV_LIST_NEXT_EPISODE_SORT_MAX_QUERIES,
+            "TV list next_episode_air_date sort",
+        )
+
     def test_tv_list_cache_hit_query_budget(self):
         """Second TV list request hits the media-list cache, skipping the expensive build phase.
 
@@ -396,7 +443,10 @@ class QueryCountTests(TestCase):
         """A cache-hit page-2 movie request hydrates only its own page."""
         self.client.get("/medialist/movie")  # warm the order + filter_data caches
         self._assert_query_budget(
-            "/medialist/movie?page=2", 12, "movie list cache hit page 2"
+            # +1 from the custom-list collaborators prefetch
+            "/medialist/movie?page=2",
+            13,
+            "movie list cache hit page 2",
         )
 
     def test_movie_list_default_sort_query_budget(self):
@@ -458,7 +508,7 @@ class QueryCountTests(TestCase):
 
         `GET /api/v1/media/game/?status=1&limit=10&sort=start_date&direction=asc`
         took 778ms/75 queries in production against ~2,500 games in one
-        status — the SQL fast path (app.media_list_pagination) must keep
+        status — the library-query engine (app.library_query) must keep
         this flat regardless of library size, not scan every matching row
         to serve a 10-item page.
         """
@@ -735,3 +785,98 @@ class SeasonRuntimeCacheReadBudgetTests(TestCase):
             response = self.client.get("/medialist/tv?sort=time_left")
 
         self.assertEqual(response.status_code, 200)
+
+
+class PodcastShowQueryCountTests(TestCase):
+    """A podcast show page reads its plays in bulk, not per episode.
+
+    A show page with tracked episodes issued 386 queries in the production
+    log: each of the 20 episodes on the first page looked up its own play rows
+    and their history. The pins hold with twenty episodes, every one played
+    twice (a repeat listen).
+    """
+
+    EPISODES_ON_PAGE = 20
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.user = get_user_model().objects.create_user(
+            username="podcastquery",
+            password="12345",
+        )
+        cls.show = PodcastShow.objects.create(
+            podcast_uuid="qc-show",
+            source=Sources.POCKETCASTS.value,
+            title="Query Count Podcast",
+            image="https://example.com/podcast.jpg",
+        )
+        published = datetime(2024, 1, 1, tzinfo=UTC)
+        for index in range(cls.EPISODES_ON_PAGE + 5):
+            episode = PodcastEpisode.objects.create(
+                show=cls.show,
+                episode_uuid=f"qc-episode-{index}",
+                title=f"Episode {index}",
+                published=published + timedelta(days=index),
+                duration=1800,
+                episode_number=index,
+            )
+            item = Item.objects.create(
+                media_id=episode.episode_uuid,
+                source=Sources.POCKETCASTS.value,
+                media_type=MediaTypes.PODCAST.value,
+                title=episode.title,
+                image=cls.show.image,
+            )
+            for play in range(2):
+                Podcast.objects.create(
+                    item=item,
+                    user=cls.user,
+                    show=cls.show,
+                    episode=episode,
+                    status=Status.COMPLETED.value,
+                    progress=30,
+                    end_date=published + timedelta(days=index, hours=play),
+                )
+
+    def setUp(self):
+        """Reset cache state and log in."""
+        cache.clear()
+        QueryCountTests._warm_instance_caches(self.user)
+        self.client.force_login(self.user)
+
+    def _assert_budget(self, url, budget, label):
+        self.client.get(url)  # first view creates episode Items and warms caches
+        with CaptureQueriesContext(connection) as context:
+            response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertLessEqual(
+            len(context.captured_queries),
+            budget,
+            f"{label} issued {len(context.captured_queries)} queries, budget is "
+            f"{budget}. If this increase is intentional, update the pin deliberately.",
+        )
+
+    def test_show_detail_page_query_budget(self):
+        """The show page's first 20 episodes cost a fixed number of queries."""
+        self._assert_budget(
+            reverse(
+                "media_details",
+                args=[
+                    Sources.POCKETCASTS.value,
+                    MediaTypes.PODCAST.value,
+                    self.show.podcast_uuid,
+                    "query-count-podcast",
+                ],
+            ),
+            PODCAST_SHOW_DETAIL_MAX_QUERIES,
+            "podcast show detail",
+        )
+
+    def test_episode_page_fragment_query_budget(self):
+        """The infinite-scroll episode fragment costs a fixed number of queries."""
+        self._assert_budget(
+            reverse("podcast_episodes_api", args=[self.show.id])
+            + "?format=html&page=1&page_size=20",
+            PODCAST_EPISODE_PAGE_MAX_QUERIES,
+            "podcast episode fragment",
+        )

@@ -59,6 +59,8 @@ services:
       - floppy_db:/floppy/db
     ports:
       - "8000:8000"
+    networks:
+      - floppy-net
 
   redis:
     image: redis:8-alpine
@@ -72,10 +74,16 @@ services:
       retries: 10
     volumes:
       - redis_data:/data
+    networks:
+      - floppy-net
 
 volumes:
   floppy_db:
   redis_data:
+
+networks:
+  floppy-net:
+    driver: bridge
 ```
 
 Open `http://localhost:8000`, create your account, then set `REGISTRATION=False` and redeploy so strangers can't sign up.
@@ -219,8 +227,17 @@ process working directory. Use absolute paths so that each process uses the
 same location.
 
 If `SECRET` and `SECRET_FILE` are not set, the container stores its generated
-`secret_key` in `FLOPPY_DATA_DIR`. Floppy stores logs and backups in `LOG_DIR`
-and `BACKUP_DIR`. `FLOPPY_DATA_DIR` does not change those settings.
+`secret_key` in `FLOPPY_DATA_DIR`. Floppy stores backups in `BACKUP_DIR`;
+`FLOPPY_DATA_DIR` does not change that setting. Logs go to `LOG_DIR`, which
+defaults to a `logs` folder inside `FLOPPY_DATA_DIR`, so they sit on the same
+volume as the database and survive the container being recreated.
+
+If the container keeps crashing, that folder holds `floppy.log` (application
+log, with a memory line every 5 minutes and a note on the next start when the
+previous run did not shut down cleanly), `supervisord.log` (which process
+exited and how) and `faulthandler.log` (Python traceback after a segfault). It
+can be read from the host even while the container is down. Settings →
+Advanced → Download Sanitized Logs bundles all three with secrets redacted.
 
 `BACKUP_DIR` defaults to `/floppy/backups` inside the container. The
 Settings → Export page shows this path, but it is a container path, not a
@@ -333,6 +350,8 @@ services:
       - DB_PORT=5432
     ports:
       - "8000:8000"
+    networks:
+      - floppy-net
 
   db:
     image: postgres:16-alpine
@@ -344,6 +363,8 @@ services:
       - POSTGRES_PASSWORD=change-this-password
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - floppy-net
 
   redis:
     image: redis:8-alpine
@@ -352,10 +373,16 @@ services:
     command: ["redis-server", "--appendonly", "yes", "--save", "", "--maxmemory", "256mb", "--maxmemory-policy", "volatile-lru"]
     volumes:
       - redis_data:/data
+    networks:
+      - floppy-net
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  floppy-net:
+    driver: bridge
 ```
 
 > Already running Postgres with `DB_NAME=yamtrack`? Leave those values alone. Renaming the database, role, or password against an existing volume breaks the deployment.
@@ -414,6 +441,41 @@ Prefer **Stacks** over **Containers → Add container**. Stacks let you paste a 
 
 If you use **Containers → Add container** anyway: always set `SECRET` and `REDIS_URL`; for SQLite mount persistent storage to `/floppy/db`; for PostgreSQL set the `DB_*` variables on the Floppy container and persist `/var/lib/postgresql/data` on the Postgres container; publish port `8000`; and leave `Command` and `Entrypoint` empty.
 
+### Floppy can't reach Redis
+
+**Symptoms:** imports say they could not be queued, or the logs show
+`Name does not resolve`, `Name or service not known`, or
+`Error -2 connecting to redis:6379`.
+
+**Cause:** Floppy finds Redis by its service name, `redis` in
+`REDIS_URL=redis://redis:6379`. Docker resolves service names only on a
+user-defined network. Some tools (ZimaOS, CasaOS, and some Portainer setups)
+place the containers on Docker's default `bridge` network instead, or add
+`network_mode: bridge`. On that network the name `redis` does not resolve.
+
+**Fix:** declare a shared network, as the compose files above do. Add this to
+every service in the stack (Floppy, Redis, and Postgres if you use it):
+
+```yaml
+    networks:
+      - floppy-net
+```
+
+Then add this once at the bottom of the file:
+
+```yaml
+networks:
+  floppy-net:
+    driver: bridge
+```
+
+Remove any `network_mode:` line, then redeploy the stack. Alternatively, set
+`REDIS_URL` to an address the Floppy container can reach, such as the host's
+IP and Redis's published port.
+
+**Check:** `docker exec floppy python manage.py floppy_preflight` names the
+problem and reports `redis: ok` once Floppy can reach Redis.
+
 ### Environment variables
 
 The only universally required variable is `SECRET`. For Docker installs you should also set `REDIS_URL`.
@@ -428,7 +490,10 @@ The only universally required variable is `SECRET`. For Docker installs you shou
 - `BGG_API_TOKEN` - board game metadata from [BoardGameGeek](https://boardgamegeek.com/using_the_xml_api)
 - `HARDCOVER_API` - Hardcover book metadata/imports. **Required to use Hardcover** ([generate a token](https://hardcover.app/account/api)); Hardcover meters its free tier per account (5000 requests/day), so Floppy ships no shared default and book search falls back to Open Library without one. Individual users can also set a personal token in their own settings.
 - `GOOGLE_BOOKS_API_KEY` - optional Google Books book metadata ([Google Books API](https://developers.google.com/books/docs/v1/using)); supports `GOOGLE_BOOKS_API_KEY_FILE` for Docker secrets
+- `OPENCRITIC_API_KEY` - optional OpenCritic critic scores for games, from a [RapidAPI key](https://rapidapi.com/opencritic-opencritic-default/api/opencritic-api). The free plan (25 searches and 200 requests a day) is enough: a score is fetched when a game page is opened, and quota left over in the hour before the daily reset fills in tracked games. Supports `OPENCRITIC_API_KEY_FILE`; can also be set in Settings > Metadata
 - `COMICVINE_API` - comic metadata
+- `MANGABAKA_NSFW` - optional, set to `true` to include erotica and pornographic series in [MangaBaka](https://mangabaka.org/) manga search results. MangaBaka needs no API key and is available as a manga source next to MyAnimeList and MangaUpdates; light novels are left out
+- `GCD_USERNAME` / `GCD_PASSWORD` - optional [Grand Comics Database](https://www.comics.org/) comic metadata, as a second comic source next to Comic Vine. Use a free GCD account: GCD limits anonymous API access to 30 requests an hour, so Floppy ships no shared default and the source stays hidden until a login is set. Support `GCD_USERNAME_FILE` / `GCD_PASSWORD_FILE` for Docker secrets; can also be set in Settings > Metadata, then chosen as the default comic source there
 - `LASTFM_API_KEY` - Last.fm integration and scrobble polling
 - `MUSICBRAINZ_URL` - custom MusicBrainz-compatible API root, including `/ws/2` (defaults to `https://musicbrainz.org/ws/2`)
 - `TRAKT_API` / `TRAKT_API_SECRET` - Trakt private-profile OAuth imports
@@ -570,7 +635,22 @@ scripts/benchmark_memory.sh \
 
 The report distinguishes cgroup usage from summed process PSS/RSS and Redis usage, so shared
 preloaded pages and the separate Redis container are visible instead of being counted as a
-single opaque number. Build the candidate image locally before running the comparison.
+single opaque number. It also splits each process's proportional memory into anonymous,
+file-backed and shared parts, which is what separates private heap a process is really using
+from page cache and preloaded pages it merely shares. Build the candidate image locally
+before running the comparison.
+
+To measure a running container instead of a disposable one, pipe the sampler into it:
+
+```bash
+docker exec -i floppy python - < scripts/container_memory_sample.py
+```
+
+`scripts/` is not part of the image, so the script is fed over standard input. Outside the
+benchmark stack the container has no `CAP_SYS_PTRACE`, so `/proc/<pid>/smaps_rollup` is
+unreadable and those processes are reported with `"measurement": "rss-only"` — RSS only, with
+the proportional counters null and `process_pss_complete` false. The sampler reports the
+command name of each process but never its arguments, which can carry connection details.
 
 If an existing deployment has `WEB_CONCURRENCY` or `GUNICORN_THREADS` set from an
 older fixed-size configuration, remove those overrides before upgrading on a
@@ -769,7 +849,7 @@ Options:
 | `--json` | Print one JSON object and nothing else. |
 | `--no-redis` | Do not check Redis. |
 | `--auto-migrate` | Apply the pending migrations, then check again. |
-| `--timeout SECONDS` | Bound the database storage check. The default matches the startup entrypoint's own bound (`integrity_timeout` in `entrypoint.sh`), currently 600 seconds. |
+| `--timeout SECONDS` | Bound the database storage check (default 600 seconds). Startup does not use a fixed bound. It stops its own check only when the check stops making progress; see `docs/architecture/sqlite-recovery-decisions.md`. |
 
 The command reads only. `--auto-migrate` is the one exception, and it is for an
 operator at a terminal. Containers do not need it, because the startup sequence
@@ -885,6 +965,11 @@ that case set the Trakt app's Redirect URI to `urn:ietf:wg:oauth:2.0:oob`.
 
 Set `URLS=https://your_domain.com` if you would rather use the one-click browser
 flow.
+
+If scheduled Trakt imports fail with "Trakt rejected the token refresh", the
+Redirect URI on your Trakt app does not match the one Floppy used when you
+connected. Set `URLS=https://your_domain.com`, make sure the Trakt app lists
+`https://your_domain.com/import/trakt/private`, and reconnect Trakt.
 
 ### Reverse proxy setup
 

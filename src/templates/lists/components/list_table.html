@@ -6,7 +6,7 @@
 {% if media_list %}
   <div class="bg-[var(--color-surface)] p-4 rounded-lg overflow-hidden max-w-[calc(100svw-4rem)] overflow-x-scroll">
     <table class="w-full bg-[var(--color-surface)] media-table">
-      {% include "app/components/table_items.html" with public_list_reference=public_list_reference show_public_notes=show_public_notes %}
+      {% include "app/components/table_items.html" with public_list_reference=public_list_reference show_public_notes=show_public_notes enable_bulk_select=enable_bulk_select %}
     </table>
   </div>
 {% elif items_count %}

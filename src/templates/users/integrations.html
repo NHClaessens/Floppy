@@ -176,6 +176,13 @@
                 :class="activeIntegration === 'nuvio' ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] border-[var(--color-border)] hover:border-indigo-500 hover:text-[var(--color-text)]'">
           {% translate "Nuvio" %}
         </button>
+        <button type="button"
+                @click="activeIntegration = 'navidrome'"
+                :aria-pressed="activeIntegration === 'navidrome'"
+                class="px-3 py-1.5 text-xs rounded-md border transition-colors cursor-pointer"
+                :class="activeIntegration === 'navidrome' ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] border-[var(--color-border)] hover:border-indigo-500 hover:text-[var(--color-text)]'">
+          {% translate "Navidrome" %}
+        </button>
       </div>
     </div>
 
@@ -188,6 +195,17 @@
         <h3 class="text-base font-medium">{% translate "Jellyfin Integration (Official Repo)" %}</h3>
       </div>
       <p class="text-[var(--color-text-muted)] mb-4 text-sm">{% translate "Connect Jellyfin to automatically track your watching progress. Use this method if your server has access to the official Jellyfin plugin repository." %}</p>
+      {% if jellyfin_template_outdated %}
+        <div class="flex items-start gap-2 mb-4" data-testid="jellyfin-template-outdated">
+          {% include "app/icons/warning.svg" with classes="w-4 h-4 mt-0.5 text-[var(--color-warning-text)] shrink-0" %}
+          <div class="text-sm text-[var(--color-text-secondary)]">
+            <p class="font-medium text-[var(--color-warning-text)]">{% translate "Webhook template needs updating" %}</p>
+            <p class="text-[var(--color-text-muted)] mt-1">
+              {% translate "Floppy is receiving updates from an older Jellyfin webhook template. Re-copy the template below into the Webhook plugin so the watched checkmark you set in Jellyfin can sync." %}
+            </p>
+          </div>
+        </div>
+      {% endif %}
       <div class="bg-[var(--color-surface-dim)] p-4 rounded-md">
         <h4 class="text-sm font-medium mb-3">{% translate "Setup Instructions" %}</h4>
         {% url 'jellyfin_webhook' request.user.token as jellyfin_webhook_path %}
@@ -202,7 +220,7 @@
             {% translate "Configure the webhook with the following settings:" %}
             <ul class="list-disc list-inside ml-6 mt-2 space-y-1 text-[var(--color-text-muted)]">
               <li>{% translate "Name:" %} <strong>{% translate "Floppy" %}</strong></li>
-              <li>{% translate "Notification Type:" %} <strong>{% translate "Playback Start" %}</strong>, <strong>{% translate "Playback Stop" %}</strong>, <strong>{% translate "Playback Progress" %}</strong>, <strong>{% translate "Item Added" %}</strong>{% translate ", and" %} <strong>{% translate "Item Deleted" %}</strong></li>
+              <li>{% translate "Notification Type:" %} <strong>{% translate "Playback Start" %}</strong>, <strong>{% translate "Playback Stop" %}</strong>, <strong>{% translate "Playback Progress" %}</strong>, <strong>{% translate "User Data Saved" %}</strong>, <strong>{% translate "Item Added" %}</strong>{% translate ", and" %} <strong>{% translate "Item Deleted" %}</strong></li>
               <li>{% translate "User Filter: your Jellyfin user" %}</li>
             </ul>
           </li>
@@ -222,8 +240,9 @@
             <div class="relative mt-2">
               <textarea readonly id="jellyfin-json-template" class="w-full bg-[var(--color-surface-strong)] rounded-md text-[var(--color-text-secondary)] text-sm border-0 focus:ring-0 outline-none font-mono p-3 resize-none overflow-auto max-h-72" rows="14">
 {% verbatim %}{
-  "Event": "{{#if_equals NotificationType 'PlaybackStart'}}Play{{/if_equals}}{{#if_equals NotificationType 'PlaybackStop'}}Stop{{/if_equals}}{{#if_equals NotificationType 'PlaybackProgress'}}{{#if IsPaused}}Pause{{else}}Play{{/if}}{{/if_equals}}{{#if_equals NotificationType 'ItemAdded'}}ItemAdded{{/if_equals}}{{#if_equals NotificationType 'ItemDeleted'}}ItemDeleted{{/if_equals}}",
-  "PlaybackPositionTicks": "{{PlaybackPositionTicks}}",
+  "Event": "{{#if_equals NotificationType 'PlaybackStart'}}Play{{/if_equals}}{{#if_equals NotificationType 'PlaybackStop'}}Stop{{/if_equals}}{{#if_equals NotificationType 'PlaybackProgress'}}{{#if IsPaused}}Pause{{else}}Play{{/if}}{{/if_equals}}{{#if_equals NotificationType 'UserDataSaved'}}UserDataSaved{{/if_equals}}{{#if_equals NotificationType 'ItemAdded'}}ItemAdded{{/if_equals}}{{#if_equals NotificationType 'ItemDeleted'}}ItemDeleted{{/if_equals}}",
+  "PlaybackPositionTicks": "{{PlaybackPositionTicks}}",{{#if_equals NotificationType 'UserDataSaved'}}
+  "SaveReason": "{{SaveReason}}",{{/if_equals}}
   "Item": {
     "Id": "{{ItemId}}",
     "Type": "{{ItemType}}",
@@ -235,8 +254,9 @@
       "Tvdb": "{{Provider_tvdb}}"
     },
     "UserData": {
-      "Played": {{#if_equals PlayedToCompletion 'True'}}true{{else}}false{{/if_equals}},
-      "LastPlayedDate": "{{LastPlayedDate}}"
+      "Played": {{#if_equals NotificationType 'UserDataSaved'}}{{#if_equals Played 'True'}}true{{else}}false{{/if_equals}}{{else}}{{#if_equals PlayedToCompletion 'True'}}true{{else}}false{{/if_equals}}{{/if_equals}},
+      "LastPlayedDate": "{{LastPlayedDate}}"{{#if_equals NotificationType 'UserDataSaved'}}{{#if Rating}},
+      "Rating": {{Rating}}{{/if}}{{/if_equals}}
     }{{#if_equals ItemType 'Episode'}},
     "SeriesName": "{{SeriesName}}",
     "ParentIndexNumber": {{SeasonNumber}},
@@ -305,10 +325,20 @@
           </li>
         </ol>
       </div>
-      <div class="bg-[var(--color-surface-dim)] p-4 rounded-md mt-4">
-        <h4 class="text-sm font-medium mb-3">{% translate "Webhook Events" %}</h4>
+    </div>
+
+    {# Jellyfin webhook events (both plugins) #}
+    <div class="bg-[var(--color-surface-strong)] p-5 rounded-lg mb-6"
+         x-show="activeIntegration === 'all' || activeIntegration === 'jellyfin'"
+         x-transition.opacity.duration.150ms>
+      <div class="flex items-center mb-3">
+        {% include "app/icons/server.svg" with classes="w-5 h-5 text-[var(--color-link)] mr-2" %}
+        <h3 class="text-base font-medium">{% translate "Jellyfin Webhook Events" %}</h3>
+      </div>
+      <div class="bg-[var(--color-surface-dim)] p-4 rounded-md">
+        <h4 class="text-sm font-medium mb-3">{% translate "Manual Watched Changes" %}</h4>
         <p class="text-[var(--color-text-muted)] mb-4 text-sm">
-          {% translate "Play and Stop events are always processed. Enable these to sync manual watched changes from the unofficial Webhooks plugin." %}
+          {% translate "Stop events always record what you watched; Play and Pause only update Now Playing. Enable these to also sync the watched checkmark you set by hand in Jellyfin. Official plugin: needs the User Data Saved notification type and the current template above. Unofficial plugin: needs the MarkPlayed and MarkUnplayed events." %}
         </p>
         <form method="post"
               action="{% url 'update_jellyfin_webhook_events' %}"
@@ -371,7 +401,7 @@
           <h3 class="text-base font-medium">{% translate "Floppy → Jellyfin" %}</h3>
         </div>
         {% if jellyfin_account and jellyfin_account.is_connected %}
-          <span class="px-2 py-1 text-xs rounded bg-emerald-500/10 text-emerald-300 border border-emerald-500/30">{% translate "Connected" %}</span>
+          <span class="px-2 py-1 text-xs rounded bg-emerald-500/10 border border-emerald-500/30" style="color: var(--color-status-clean)">{% translate "Connected" %}</span>
         {% else %}
           <span class="px-2 py-1 text-xs rounded bg-gray-500/20 text-[var(--color-text-secondary)] border border-gray-600/50">{% translate "Disconnected" %}</span>
         {% endif %}
@@ -390,6 +420,11 @@
               <span>{% blocktranslate with value1=jellyfin_account.last_sync_at|user_datetime_format:user %}Last sync: {{ value1 }}{% endblocktranslate %}</span>
             {% endif %}
           </div>
+          {% if jellyfin_account.connection_broken %}
+            <p class="text-xs text-[var(--color-text-muted)]">
+              {% translate "Jellyfin rejected the API key. Floppy re-checks it on every scheduled run; reconnect if the key was changed or revoked." %}
+            </p>
+          {% endif %}
           {% if jellyfin_account.last_error_message %}
             <div class="text-xs text-[var(--color-warning-text)] bg-amber-500/10 border border-amber-400/30 rounded p-2">
               <strong>{% translate "Error:" %}</strong> {{ jellyfin_account.last_error_message }}
@@ -702,6 +737,46 @@
           </form>
         {% else %}
           <p class="text-sm text-[var(--color-warning-text)]">{% translate "Connect Plex from the Import page to load your available libraries." %}</p>
+        {% endif %}
+      </div>
+
+      <div class="bg-[var(--color-surface-dim)] p-4 rounded-md mb-4">
+        <h4 class="text-sm font-medium mb-3">{% translate "Manual Watched Changes" %}</h4>
+        <p class="text-[var(--color-text-muted)] mb-4 text-sm">
+          {% translate "The webhook records what you watch, but Plex sends nothing when you mark an item watched by hand. Enable this to check your Plex history every 15 minutes and add those marks. It uses the libraries selected above. Marking an item unwatched in Plex is not synced." %}
+        </p>
+        {% if plex_connected %}
+          <form method="post"
+                action="{% url 'update_plex_mark_watched' %}"
+                class="space-y-3">
+            {% csrf_token %}
+            <div class="flex items-center justify-between p-3 bg-[var(--color-surface-strong)] rounded-md">
+              <div class="flex-1">
+                <div class="flex items-center text-[var(--color-text-secondary)] mb-1">
+                  {% include "app/icons/circle-check.svg" with classes="w-5 h-5 mr-2" %}
+                  <span class="text-sm font-medium">{% translate "Sync items marked watched" %}</span>
+                </div>
+                <p class="text-xs text-[var(--color-text-muted)] ml-7">{% translate "Mark media as watched when it is manually marked watched in Plex." %}</p>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer ml-4">
+                <input class="sr-only peer"
+                       type="checkbox"
+                       name="plex_mark_watched_enabled"
+                       {% if user.plex_account.mark_watched_sync_enabled %}checked{% endif %}>
+                <div class="w-9 h-5 bg-gray-600 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-px after:left-0.5 after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4.5 after:w-4.5 after:transition-all peer-checked:bg-indigo-600">
+                </div>
+              </label>
+            </div>
+            <div class="pt-1">
+              <button type="submit"
+                      class="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors text-sm cursor-pointer">
+                {% include "app/icons/save.svg" with classes="w-4 h-4 mr-2" %}
+                {% translate "Save Changes" %}
+              </button>
+            </div>
+          </form>
+        {% else %}
+          <p class="text-sm text-[var(--color-warning-text)]">{% translate "Connect Plex from the Import page to use this." %}</p>
         {% endif %}
       </div>
 
@@ -1152,24 +1227,8 @@
         </ol>
         {% include "users/components/catalog_grants.html" %}
       </div>
-      {% if stremio_catalog_readiness %}
-        <div class="mt-4">
-          <h4 class="text-sm font-medium mb-2">{% translate "Catalog Status" %}</h4>
-          <ul class="space-y-1 text-sm text-[var(--color-text-muted)]">
-            {% for catalog in stremio_catalog_readiness %}
-              <li>
-                {% if catalog.unresolved %}
-                  <strong class="text-[var(--color-text-secondary)]">{% blocktranslate with value1=catalog.publishable value2=catalog.total %}{{ value1 }} of {{ value2 }}{% endblocktranslate %}</strong>
-                  {% blocktranslate with value1=catalog.noun %}{{ value1 }} in{% endblocktranslate %} <strong class="text-[var(--color-text-secondary)]">{{ catalog.list_name }}</strong> {% blocktranslate count count=catalog.unresolved %}can be published. Stremio identifies titles by IMDb ID, and the other {{ count }} has none yet. Floppy resolves these in the background, but a title with no IMDb ID at its provider stays unpublishable.{% plural %}can be published. Stremio identifies titles by IMDb ID, and the other {{ count }} have none yet. Floppy resolves these in the background, but a title with no IMDb ID at its provider stays unpublishable.{% endblocktranslate %}
-                {% else %}
-                  {% translate "All" %} <strong class="text-[var(--color-text-secondary)]">{{ catalog.total }}</strong>
-                  {% blocktranslate with value1=catalog.noun %}{{ value1 }} in{% endblocktranslate %} <strong class="text-[var(--color-text-secondary)]">{{ catalog.list_name }}</strong> {% translate "can be published." %}
-                {% endif %}
-              </li>
-            {% endfor %}
-          </ul>
-        </div>
-      {% endif %}
+      {# Counting publishable titles reads the whole library, so it loads after the page paints. #}
+      <div hx-get="{% url 'stremio_catalog_status' %}" hx-trigger="load" hx-swap="outerHTML"></div>
     </div>
 
     {# Seerr #}
@@ -1328,6 +1387,48 @@
             </div>
           </div>
 
+          <div class="border-t border-[var(--color-surface-border)] pt-3">
+            <p class="text-[var(--color-text-muted)] text-sm mb-3">
+              {% translate "Connect Seerr to request movies and shows from their Floppy page." %}
+            </p>
+            <label for="seerr_url" class="block text-[var(--color-text-secondary)] text-sm font-medium mb-1">
+              {% translate "Seerr URL" %}
+            </label>
+            <input type="url"
+                   id="seerr_url"
+                   name="seerr_url"
+                   placeholder="http://192.168.1.10:5055"
+                   value="{{ request.user.seerr_url }}"
+                   class="w-full px-3 py-2 bg-[var(--color-panel)] border border-gray-600 rounded-md text-[var(--color-text-secondary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+          </div>
+
+          <div>
+            <label for="seerr_api_key" class="block text-[var(--color-text-secondary)] text-sm font-medium mb-1">
+              {% translate "Seerr API key" %}
+            </label>
+            <input type="password"
+                   id="seerr_api_key"
+                   name="seerr_api_key"
+                   autocomplete="off"
+                   placeholder="{% if request.user.seerr_api_key %}{% translate "Saved - leave blank to keep" %}{% else %}{% translate "Settings > General > API Key" %}{% endif %}"
+                   class="w-full px-3 py-2 bg-[var(--color-panel)] border border-gray-600 rounded-md text-[var(--color-text-secondary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+          </div>
+
+          <div>
+            <label for="seerr_username" class="block text-[var(--color-text-secondary)] text-sm font-medium mb-1">
+              {% translate "Seerr username" %}
+            </label>
+            <input type="text"
+                   id="seerr_username"
+                   name="seerr_username"
+                   autocomplete="off"
+                   value="{{ request.user.seerr_username }}"
+                   class="w-full px-3 py-2 bg-[var(--color-panel)] border border-gray-600 rounded-md text-[var(--color-text-secondary)] text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent">
+            <p class="text-[var(--color-text-muted)] text-xs mt-1">
+              {% translate "Required. The username or email you sign in to Seerr with (Plex and Jellyfin logins work too). Requests are made as this user, with their permissions, quotas and approval rules." %}
+            </p>
+          </div>
+
           <div class="pt-2">
             <button type="submit"
                     class="flex items-center px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors text-sm cursor-pointer">
@@ -1482,6 +1583,39 @@
             {# djlint:on #}
           </li>
           <li>{% translate "Revoke the token in" %} <a href="#app-tokens" class="text-[var(--color-link)] hover:underline">{% translate "App tokens" %}</a> {% translate "above to disconnect the device. This never deletes your tracking data." %}</li>
+        </ol>
+      </div>
+    </div>
+
+    {# Navidrome: uses the ListenBrainz-compatible endpoint (api/listenbrainz_views.py) #}
+    <div class="bg-[var(--color-surface-strong)] p-5 rounded-lg mb-6"
+         x-show="activeIntegration === 'all' || activeIntegration === 'navidrome'"
+         x-transition.opacity.duration.150ms>
+      <div class="flex items-center mb-3">
+        {% include "app/icons/server.svg" with classes="w-5 h-5 text-[var(--color-link)] mr-2" %}
+        <h3 class="text-base font-medium">{% translate "Navidrome Integration" %}</h3>
+      </div>
+      <p class="text-[var(--color-text-muted)] mb-4 text-sm">
+        {% translate "Record what you play in Navidrome through its built-in ListenBrainz scrobbler. Needs music tracking turned on." %}
+      </p>
+      <div class="bg-[var(--color-surface-dim)] p-4 rounded-md">
+        <h4 class="text-sm font-medium mb-3">{% translate "Setup Instructions" %}</h4>
+        <ol class="list-decimal list-inside space-y-2 text-sm text-[var(--color-text-secondary)]">
+          <li>
+            {% translate "Set ND_LISTENBRAINZ_BASEURL in Navidrome to this address and restart it. This applies to every Navidrome user." %}
+            {# djlint:off #}
+            <div class="mt-2 inline-flex items-center gap-2 w-[calc(100%-30px)]">
+              <input readonly id="navidrome-listenbrainz-url" class="w-full bg-[var(--color-surface-dim)] rounded-md text-[var(--color-text-muted)] text-sm border-0 focus:ring-0 outline-none font-mono" type="text" value="{% absolute_app_url '/apis/listenbrainz/1/' %}">
+              <span class="flex items-center cursor-pointer group" title="{% translate "Copy" %}" data-copy-target="#navidrome-listenbrainz-url">
+                {% include "app/icons/copy.svg" with classes="w-5 h-5 text-[var(--color-text-muted)] group-hover:text-[var(--color-link)] transition-colors" %}
+              </span>
+            </div>
+            {# djlint:on #}
+          </li>
+          <li>
+            {% translate "Create an" %} <a href="#app-tokens" class="text-[var(--color-link)] hover:underline">{% translate "app token" %}</a> {% translate "above and copy its secret." %}
+          </li>
+          <li>{% translate "In Navidrome, go to Personal, turn on Scrobble to ListenBrainz and paste the secret." %}</li>
         </ol>
       </div>
     </div>

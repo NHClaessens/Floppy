@@ -4,7 +4,7 @@ from django.conf import settings
 from django.db.models import Exists, OuterRef, Q, Subquery
 from django.utils import timezone
 
-from app.models import Item, MediaTypes, Sources
+from app.models import Item, MediaTypes, Movie, Sources
 from app.providers import services, tmdb
 from events.models import Event
 
@@ -13,10 +13,15 @@ logger = logging.getLogger(__name__)
 
 def get_items_to_process(user=None):
     """Get items to process for the calendar."""
+    # Music tracks never gain a calendar event (a MusicBrainz recording has no
+    # progress to schedule), so walking them spent one rate-limited MusicBrainz
+    # call each - a 606-second chunk in production - and every dead recording
+    # id was re-requested on every reload because a failed fetch is never
+    # stamped as checked.
     media_types = [
         choice.value
         for choice in MediaTypes
-        if choice not in [MediaTypes.SEASON, MediaTypes.EPISODE]
+        if choice not in [MediaTypes.SEASON, MediaTypes.EPISODE, MediaTypes.MUSIC]
     ]
 
     query = Q()
@@ -91,14 +96,24 @@ def filter_items_to_fetch(items):
 
     # Provider responses are not cached, so every selected item costs a live
     # network call. Drop the ones checked recently enough that nothing can
-    # usefully have changed. Items the TV/movie selectors picked are exempt --
-    # those were chosen because TMDB's change feed reported a change, or because
-    # they have no events yet, so re-checking them is the point.
+    # usefully have changed. Only TMDB change-feed hits are exempt: re-checking
+    # them is the point. Items picked because they have no events yet follow the
+    # window too -- an ended show never gains a season event, and exempting it
+    # re-fetched it on every reload (#1158). Never-checked items stay due.
     stale_after_hours = getattr(settings, "CALENDAR_ITEM_STALE_AFTER_HOURS", 0)
     if stale_after_hours > 0:
         fresh_cutoff = now - timezone.timedelta(hours=stale_after_hours)
+        change_feed_q = Q(
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            media_id__in=get_changed_tmdb_tv_ids(),
+        ) | Q(
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            media_id__in=get_changed_tmdb_movie_ids(),
+        )
         selected = selected.exclude(
-            Q(calendar_checked_at__gte=fresh_cutoff) & ~(tv_q | movie_q),
+            Q(calendar_checked_at__gte=fresh_cutoff) & ~change_feed_q,
         )
 
     return selected.distinct()
@@ -214,10 +229,32 @@ def get_movie_items_to_include(movie_items):
 
     changed_movie_ids = get_changed_tmdb_movie_ids()
 
+    # Digital and physical dates are stored per user region. A recent movie
+    # with none for a tracking user's region gets one fetch per stale window,
+    # which also picks up regions set after the movie was first scheduled.
+    # Older movies wait for TMDB's change feed.
+    region_without_events = Exists(
+        Movie.objects.filter(item=OuterRef("pk"))
+        .exclude(user__watch_provider_region__in=["", "UNSET"])
+        .exclude(
+            Exists(
+                Event.objects.filter(
+                    item=OuterRef("item"),
+                    region=OuterRef("user__watch_provider_region"),
+                ),
+            ),
+        ),
+    )
+    recent_cutoff = timezone.now() - timezone.timedelta(days=365)
+
     return list(
-        movie_items.filter(
-            Q(media_id__in=changed_movie_ids) | Q(event__isnull=True),
-        ).values_list("id", flat=True),
+        set(
+            movie_items.filter(
+                Q(media_id__in=changed_movie_ids)
+                | Q(event__isnull=True)
+                | (Q(region_without_events) & Q(event__datetime__gte=recent_cutoff)),
+            ).values_list("id", flat=True),
+        ),
     )
 
 

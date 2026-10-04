@@ -334,6 +334,56 @@ class TagFilterViewTest(TestCase):
         self.assertContains(response, "Tagged Movie")
         self.assertNotContains(response, "Untagged Movie")
 
+    def test_tag_filter_logs_shown_count(self):
+        with self.assertLogs("app.media_list_views", level="INFO") as logs:
+            self.client.get(reverse("medialist", args=["movie"]), {"tag": "Favorite"})
+
+        self.assertIn("shown=1", "\n".join(logs.output))
+
+    def test_empty_tag_filter_logs_why(self):
+        """An empty tagged list logs the status filter and tracked/untracked split."""
+        untracked = Item.objects.create(
+            media_id="3",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Untracked Movie",
+            image="http://example.com/image.jpg",
+        )
+        ItemTag.objects.create(tag=self.tag, item=untracked)
+        ItemTag.objects.filter(item=self.item1).delete()
+        self.user.update_preference("movie_status", Status.PLANNING.value)
+
+        with self.assertLogs("app.media_list_views", level="WARNING") as logs:
+            self.client.get(reverse("medialist", args=["movie"]), {"tag": "Favorite"})
+
+        output = "\n".join(logs.output)
+        self.assertIn("shown=0", output)
+        self.assertIn("from saved", output)
+        self.assertIn("tagged_items=1", output)
+        self.assertIn("untracked=1", output)
+
+    def test_empty_tag_filter_log_matches_tag_case_insensitively(self):
+        self.user.update_preference("movie_status", Status.PLANNING.value)
+
+        with self.assertLogs("app.media_list_views", level="WARNING") as logs:
+            self.client.get(reverse("medialist", args=["movie"]), {"tag": "favorite"})
+
+        self.assertIn("tagged_items=1", "\n".join(logs.output))
+
+    def test_empty_tag_filter_log_counts_items_not_tracker_rows(self):
+        """Several tracker rows on one item must not make untracked negative."""
+        Movie.objects.create(
+            item=self.item1,
+            user=self.user,
+            status=Status.DROPPED,
+        )
+        self.user.update_preference("movie_status", Status.PLANNING.value)
+
+        with self.assertLogs("app.media_list_views", level="WARNING") as logs:
+            self.client.get(reverse("medialist", args=["movie"]), {"tag": "Favorite"})
+
+        self.assertIn("untracked=0", "\n".join(logs.output))
+
     def test_exclude_tag_filter(self):
         """Tag exclude filter hides items with the tag."""
         url = reverse("medialist", args=["movie"])
@@ -506,6 +556,21 @@ class TagIndexViewTest(TestCase):
         tags_by_name = {tag.name: tag for tag in response.context["tags"]}
         self.assertEqual(tags_by_name["Favorite"].item_count, 2)
         self.assertEqual(tags_by_name["Someday"].item_count, 0)
+
+    def test_tag_link_ignores_saved_status_filter(self):
+        """Following a tag link lists every tagged entry, whatever status was saved."""
+        Movie.objects.create(
+            item=self.movie_item,
+            user=self.user,
+            status=Status.COMPLETED,
+        )
+        self.user.update_preference("movie_status", Status.PLANNING.value)
+
+        response = self.client.get(reverse("tag_index"))
+        link = response.context["tags"][0].type_breakdown[0]["url"]
+        response = self.client.get(link)
+
+        self.assertContains(response, "The Shawshank Redemption")
 
     def test_only_shows_current_users_tags(self):
         """Index page never surfaces another user's tags."""

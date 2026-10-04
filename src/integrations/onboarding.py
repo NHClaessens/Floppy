@@ -127,6 +127,24 @@ ONBOARDING_SOURCES: tuple[OnboardingSource, ...] = (
         connect_fields=(("base_url", "Base URL", "url"), ("api_key", "API Key", "password")),
     ),
     OnboardingSource(
+        "mylar",
+        (COMIC,),
+        "host_url",
+        "mylar_instances",
+        tags=("reading",),
+        connect_url_name="mylar_connect",
+        connect_fields=(("base_url", "Base URL", "url"), ("api_key", "API Key", "password")),
+    ),
+    OnboardingSource(
+        "kapowarr",
+        (COMIC,),
+        "host_url",
+        "kapowarr_instances",
+        tags=("reading",),
+        connect_url_name="kapowarr_connect",
+        connect_fields=(("base_url", "Base URL", "url"), ("api_key", "API Key", "password")),
+    ),
+    OnboardingSource(
         "stremio",
         (MOVIE, TV),
         "credentials",
@@ -143,6 +161,24 @@ ONBOARDING_SOURCES: tuple[OnboardingSource, ...] = (
         tags=("reading", "podcasts"),
         connect_url_name="audiobookshelf_connect",
         connect_fields=(("base_url", "Server URL", "url"), ("api_token", "API Token", "password")),
+    ),
+    OnboardingSource(
+        "kavita",
+        (BOOK, COMIC, MANGA),
+        "host_url",
+        "kavita_account",
+        tags=("reading",),
+        connect_url_name="kavita_connect",
+        connect_fields=(("base_url", "Server URL", "url"), ("api_key", "API Key", "password")),
+    ),
+    OnboardingSource(
+        "komga",
+        (BOOK, COMIC),
+        "host_url",
+        "komga_account",
+        tags=("reading",),
+        connect_url_name="komga_connect",
+        connect_fields=(("base_url", "Server URL", "url"), ("api_key", "API Key", "password")),
     ),
     OnboardingSource(
         "storyteller",
@@ -242,6 +278,16 @@ ONBOARDING_SOURCES: tuple[OnboardingSource, ...] = (
         tags=("anime_manga",),
         connect_url_name="import_kitsu",
         connect_fields=(("user", "Kitsu User ID", "text"),),
+    ),
+    OnboardingSource(
+        "mangabaka",
+        (MANGA,),
+        "api_key",
+        tags=("anime_manga",),
+        # MangaBaka keeps other people's libraries off the API entirely, so a
+        # token is the only way in and there is nothing to connect persistently.
+        connect_url_name="import_mangabaka",
+        connect_fields=(("token", "MangaBaka API Token", "password"),),
     ),
     OnboardingSource(
         "hltb",

@@ -51,6 +51,39 @@
       </form>
     </div>
 
+    <div class="bg-[var(--color-surface)] rounded-lg p-6 space-y-4">
+      <div class="flex items-center">
+        {% include "app/icons/shield.svg" with classes="w-6 h-6 text-[var(--color-link)] mr-3" %}
+        <h2 class="text-xl font-semibold">{% translate "Account Type" %}</h2>
+      </div>
+
+      {% if user.is_superuser %}
+        <p class="flex items-start gap-2 text-sm text-[var(--color-text-muted)] leading-relaxed">
+          {% include "app/icons/info.svg" with classes="w-4 h-4 text-[var(--color-link)] shrink-0 mt-0.5" %}
+          <span>{% blocktranslate %}You are a <strong>Superuser</strong>. You have full administrative access to this Floppy instance.{% endblocktranslate %}</span>
+        </p>
+      {% else %}
+        <p class="flex items-start gap-2 text-sm text-[var(--color-text-muted)] leading-relaxed">
+          {% include "app/icons/info.svg" with classes="w-4 h-4 text-[var(--color-link)] shrink-0 mt-0.5" %}
+          <span>{% translate "You are a regular user. Superuser access grants full administrative control over this Floppy instance." %}</span>
+        </p>
+
+        <div class="rounded-lg border border-[var(--color-surface-border)] bg-[var(--color-surface-strong)] p-4">
+          <div class="flex items-center mb-2">
+            {% include "app/icons/warning.svg" with classes="w-5 h-5 text-[var(--color-warning-text)] mr-2" %}
+            <h3 class="font-medium text-[var(--color-warning-text)]">{% translate "Upgrading to Superuser" %}</h3>
+          </div>
+          <p class="text-sm text-[var(--color-text-secondary)] mb-2">
+            {% translate "Floppy never grants superuser access automatically. If you have access to the host or container running this instance, you can promote this account by running:" %}
+          </p>
+          <code class="block bg-[var(--color-surface)] rounded-md p-3 text-sm overflow-x-auto">docker exec floppy python manage.py promote_superuser {{ user.username }}</code>
+          <p class="text-sm text-[var(--color-text-secondary)] mt-2">
+            {% translate "This must be run from a terminal with access to the Floppy container — it cannot be done from this web UI." %}
+          </p>
+        </div>
+      {% endif %}
+    </div>
+
     <div class="bg-[var(--color-surface)] rounded-lg p-6">
       <div class="flex items-center mb-5">
         {% include "app/icons/padlock.svg" with classes="w-6 h-6 text-[var(--color-link)] mr-3" %}

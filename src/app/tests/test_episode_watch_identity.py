@@ -1,5 +1,6 @@
 import datetime
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from threading import Barrier
 from unittest import skipUnless
 from unittest.mock import patch
@@ -12,6 +13,7 @@ from django.test import TestCase, TransactionTestCase
 
 from api.serializers import EpisodeSerializer
 from app import fork_services_episode
+from app.db_retry import run_retryable_db_operation
 from app.models import TV, Episode, Item, MediaTypes, Season, Sources, Status
 from app.signals import suppress_media_change_side_effects
 from integrations.exports import get_track_fields
@@ -138,6 +140,55 @@ class EpisodeWatchIdentityTests(TestCase):
             2,
         )
 
+    def test_external_id_retry_returns_winner_without_second_row(self):
+        now = datetime.datetime.now(datetime.UTC)
+        first = self.season.watch(1, now, external_id="evt-1")
+        retry = self.season.watch(1, now, external_id="evt-1")
+
+        self.assertTrue(first.created)
+        self.assertFalse(retry.created)
+        self.assertEqual(first.episode.pk, retry.episode.pk)
+        self.assertEqual(
+            Episode.objects.filter(
+                related_season=self.season,
+                external_id="evt-1",
+            ).count(),
+            1,
+        )
+
+    def test_new_external_id_allows_intentional_rewatch(self):
+        now = datetime.datetime.now(datetime.UTC)
+        first = self.season.watch(1, now, external_id="evt-1")
+        second = self.season.watch(1, now, external_id="evt-2")
+
+        self.assertNotEqual(first.episode.pk, second.episode.pk)
+        self.assertEqual(
+            Episode.objects.filter(related_season=self.season).count(),
+            2,
+        )
+
+    def test_external_id_is_per_episode_and_scoped_to_the_owner(self):
+        now = datetime.datetime.now(datetime.UTC)
+        self.season.watch(1, now, external_id="evt-1")
+        self.season.watch(2, now, external_id="evt-1")
+        self.other_season.watch(1, now, external_id="evt-1")
+
+        self.assertEqual(
+            Episode.objects.filter(external_id="evt-1").count(),
+            3,
+        )
+
+    def test_unwatch_by_external_id_removes_only_that_play(self):
+        now = datetime.datetime.now(datetime.UTC)
+        self.season.watch(1, now, external_id="evt-1")
+        self.season.watch(1, now, external_id="evt-2")
+
+        self.season.unwatch(1, external_id="evt-1")
+
+        remaining = Episode.objects.filter(related_season=self.season)
+        self.assertEqual(remaining.count(), 1)
+        self.assertEqual(remaining.first().external_id, "evt-2")
+
     def test_token_conflicts_are_generic_across_user_and_episode(self):
         token = uuid4()
         self.season.watch(
@@ -193,6 +244,23 @@ class EpisodeWatchIdentityTests(TestCase):
             EpisodeSerializer(result.episode).data,
         )
         self.assertNotIn("watch_operation_id", get_track_fields())
+
+    def test_external_id_is_excluded_from_history_and_exports(self):
+        result = self.season.watch(
+            1,
+            datetime.datetime.now(datetime.UTC),
+            external_id="evt-1",
+        )
+
+        field = Episode._meta.get_field("external_id")
+        self.assertTrue(field.null)
+        self.assertTrue(field.blank)
+        self.assertEqual(result.episode.external_id, "evt-1")
+        self.assertNotIn(
+            "external_id",
+            {field.name for field in Episode.history.model._meta.fields},
+        )
+        self.assertNotIn("external_id", get_track_fields())
 
 
 class EpisodeWatchIdentityConcurrencyTests(TransactionTestCase):
@@ -251,10 +319,24 @@ class EpisodeWatchIdentityConcurrencyTests(TransactionTestCase):
             finally:
                 close_old_connections()
 
+        # The two threads share one in-memory SQLite database, which answers
+        # "table is locked" at once instead of waiting. On a loaded CI runner
+        # the default 3 seconds of retries sometimes ran out, so give the
+        # retry loop more room; the outcome being tested is unchanged.
+        patient_retry = partial(
+            run_retryable_db_operation,
+            max_retries=10,
+            base_delay=0.1,
+            backoff=1.5,
+        )
         with (
             patch(
                 "app.models.providers.services.get_media_metadata",
                 side_effect=_episode_metadata,
+            ),
+            patch(
+                "app.fork_services_episode.run_retryable_db_operation",
+                patient_retry,
             ),
             ThreadPoolExecutor(max_workers=2) as executor,
         ):

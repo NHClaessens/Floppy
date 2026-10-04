@@ -11,7 +11,7 @@ import logging
 from django.contrib.auth import get_user_model
 from django.contrib.auth.decorators import login_not_required
 from django.core.paginator import Paginator
-from django.db.models import Count, Exists, F, OuterRef, Prefetch, Q, Subquery
+from django.db.models import Count, Exists, F, OuterRef, Q, Subquery
 from django.http import HttpResponseForbidden
 from django.shortcuts import get_object_or_404, render
 from django.urls import reverse
@@ -25,7 +25,7 @@ from lists.forms import CustomListForm
 from lists.models import CustomList, CustomListItem
 from lists.views_helpers import (
     _build_list_url_template,
-    _get_completed_item_ids,
+    _get_list_completed_counts,
     _get_list_last_watched_dates,
     _order_expression,
     _resolve_list_sort_direction,
@@ -158,17 +158,7 @@ def lists(request):
             .distinct()
         )
 
-    # Add prefetch after annotations to avoid interfering with counts
-    # This is for the list image property which uses items.first()
-    custom_lists = custom_lists.prefetch_related(
-        "collaborators",
-        Prefetch(
-            "customlistitem_set",
-            queryset=CustomListItem.objects.select_related("item").order_by(
-                "date_added"
-            ),
-        ),
-    )
+    custom_lists = custom_lists.prefetch_related("collaborators")
 
     if sort_by == ListSortChoices.NAME:
         custom_lists = custom_lists.order_by(_order_expression("name", direction))
@@ -180,24 +170,24 @@ def lists(request):
     elif sort_by == ListSortChoices.NEWEST_FIRST:
         custom_lists = custom_lists.order_by(_order_expression("id", direction))
     elif sort_by == ListSortChoices.LAST_WATCHED:
+        # This sort needs every candidate's scalar key, but full list/card
+        # models are still loaded only after pagination below.
+        sorted_rows = list(custom_lists.values_list("id", "name"))
         list_last_watched = _get_list_last_watched_dates(
             request.user,
-            list(custom_lists.values_list("id", flat=True)),
+            [row[0] for row in sorted_rows],
         )
-        custom_lists = list(custom_lists)
-        for custom_list in custom_lists:
-            custom_list.last_watched_at = list_last_watched.get(custom_list.id)
-        custom_lists.sort(
-            key=lambda custom_list: (
-                custom_list.last_watched_at is None,
+        sorted_rows.sort(
+            key=lambda row: (
+                list_last_watched.get(row[0]) is None,
                 (
-                    custom_list.last_watched_at.timestamp()
-                    if direction == "asc"
-                    else -custom_list.last_watched_at.timestamp()
+                    list_last_watched[row[0]].timestamp()
+                    * (1 if direction == "asc" else -1)
                 )
-                if custom_list.last_watched_at is not None
+                if row[0] in list_last_watched
                 else 0,
-                custom_list.name.casefold(),
+                row[1].casefold(),
+                row[0],
             ),
         )
     else:  # last_item_added is the default
@@ -213,39 +203,35 @@ def lists(request):
         ).order_by(_order_expression("latest_update", direction), F("name").asc())
 
     items_per_page = 20
-    paginator = Paginator(custom_lists, items_per_page)
-    lists_page = paginator.get_page(page)
+    if sort_by == ListSortChoices.LAST_WATCHED:
+        paginator = Paginator([row[0] for row in sorted_rows], items_per_page)
+        lists_page = paginator.get_page(page)
+        cards = {card.id: card for card in custom_lists.filter(pk__in=lists_page)}
+        lists_page.object_list = [cards[list_id] for list_id in lists_page]
+        for card in lists_page:
+            card.last_watched_at = list_last_watched.get(card.id)
+    else:
+        paginator = Paginator(custom_lists, items_per_page)
+        lists_page = paginator.get_page(page)
 
     available_tags = CustomListForm._normalize_tags(
         tag
-        for custom_list in CustomList.objects.filter(
+        for tags in CustomList.objects.filter(
             Q(owner=request.user) | Q(collaborators=request.user),
-        ).only("tags")
-        for tag in (custom_list.tags or [])
+        )
+        .values_list("tags", flat=True)
+        .iterator(chunk_size=500)
+        for tag in (tags or [])
     )
 
     # Compute completion percentages for each list (titles completed / total titles)
     page_list_ids = [custom_list.id for custom_list in lists_page]
-    list_item_pairs = CustomListItem.objects.filter(
-        custom_list_id__in=page_list_ids,
-    ).values_list("custom_list_id", "item_id")
-
-    item_ids_by_list = {}
-    all_item_ids = set()
-    for list_id, item_id in list_item_pairs:
-        item_ids_by_list.setdefault(list_id, set()).add(item_id)
-        all_item_ids.add(item_id)
-
-    completed_item_ids = _get_completed_item_ids(request.user, all_item_ids)
+    completed_counts = _get_list_completed_counts(request.user, page_list_ids)
     for cl in lists_page:
-        list_item_ids = item_ids_by_list.get(cl.id, set())
-        if list_item_ids:
-            n_done = len(list_item_ids & completed_item_ids)
-            cl.completed_count = n_done
-            cl.completion_percent = round(n_done / len(list_item_ids) * 100)
-        else:
-            cl.completed_count = 0
-            cl.completion_percent = None
+        cl.completed_count = completed_counts.get(cl.id, 0)
+        cl.completion_percent = (
+            round(cl.completed_count / cl.items_count * 100) if cl.items_count else None
+        )
 
     # The edit form (with its select2 widgets) is fetched lazily via
     # list_edit_form when the user opens the modal, so only compute the
@@ -332,17 +318,7 @@ def list_cover_image(request, list_id):
     Called per-card via hx-trigger="revealed" so the expensive IGDB/TMDB
     backdrop lookups happen after the page has already rendered.
     """
-    custom_list = get_object_or_404(
-        CustomList.objects.prefetch_related(
-            Prefetch(
-                "customlistitem_set",
-                queryset=CustomListItem.objects.select_related("item").order_by(
-                    "date_added"
-                ),
-            )
-        ),
-        id=list_id,
-    )
+    custom_list = get_object_or_404(CustomList, id=list_id)
     if not custom_list.user_can_view(request.user):
         return HttpResponseForbidden()
     image_url = custom_list.image

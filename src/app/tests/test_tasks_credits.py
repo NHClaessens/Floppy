@@ -2,6 +2,7 @@ from unittest.mock import patch
 
 import requests
 from django.contrib.auth import get_user_model
+from django.db import OperationalError
 from django.test import TestCase
 from django.utils import timezone
 
@@ -219,6 +220,30 @@ class CreditsBackfillTaskTests(TestCase):
         self.assertEqual(state.strategy_version, CREDITS_BACKFILL_VERSION)
         self.assertFalse(state.give_up)
         self.assertIsNotNone(state.last_success_at)
+
+    @patch("app.db_retry.time.sleep")
+    @patch("app.tasks.enqueue_credits_backfill_items")
+    @patch("app.credits.sync_item_credits_from_metadata")
+    @patch("app.providers.services.get_media_metadata")
+    def test_populate_credits_retries_a_sqlite_lock_before_recording_failure(
+        self, mock_get_metadata, mock_sync, _mock_enqueue, _mock_sleep
+    ):
+        item = Item.objects.create(
+            media_id="2002",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.MOVIE.value,
+            title="Locked Movie",
+            runtime_minutes=100,
+            genres=["Action"],
+        )
+        mock_get_metadata.return_value = {"cast": [], "crew": [], "studios_full": []}
+        mock_sync.side_effect = [OperationalError("database is locked"), None]
+
+        result = tasks.populate_credits_data_for_items([item.id])
+
+        self.assertEqual(result["updated"], 1)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(mock_sync.call_count, 2)
 
     @patch("app.tasks_credits._clear_item_metadata_cache")
     @patch("app.providers.services.get_media_metadata")

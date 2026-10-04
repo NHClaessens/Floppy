@@ -6,7 +6,7 @@ import requests
 from django.conf import settings
 from django.core.cache import cache
 
-from app import helpers
+from app import helpers, request_timing
 from app.models import MediaTypes, Sources
 from app.providers import services
 
@@ -25,6 +25,7 @@ def handle_error(error):
     )
 
 
+@request_timing.timed_provider_call
 def search(query, page):
     """Search for podcasts using iTunes API."""
     cache_key = (
@@ -97,6 +98,7 @@ def search(query, page):
     return data
 
 
+@request_timing.timed_provider_call
 def lookup_by_itunes_id(itunes_collection_id):
     """Look up podcast metadata by iTunes collection ID.
 

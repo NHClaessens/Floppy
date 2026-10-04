@@ -1524,55 +1524,37 @@ class SqliteIntegrityTests(SimpleTestCase):
         self.assertEqual(status["phase"], "unknown")
         self.assertEqual(status["elapsed_seconds"], 600.0)
 
-    def test_entrypoint_bounds_integrity_check_without_background_polling(self):
+    def test_entrypoint_supervises_integrity_check_by_progress_not_wall_clock(self):
         script = ENTRYPOINT.read_text()
         check = (
-            'timeout "$integrity_timeout" python -c '
+            'python -m config.sqlite_startup_watchdog "$DB_FILE" python -c '
             "'from config.sqlite_recovery_policy import "
             "check_database_for_startup; import sys; "
-            'check_database_for_startup(sys.argv[1])\' "$DB_FILE"'
+            'check_database_for_startup(sys.argv[1])\' "$DB_FILE" &'
         )
 
         self.assertIn(check, script)
-        # The bound and the message it reports must come from one definition.
-        self.assertIn("integrity_timeout=600", script)
-        self.assertIn('"$DB_FILE" &', script)
-        # The heartbeat reads the status sidecar the scan itself writes; it
-        # must never poll the scanner's own PID or /proc directly, which is
-        # exactly what the old, removed heartbeat did.
+        # A wall-clock bound stops a slow but healthy scan. The watchdog owns
+        # the stall decision and the heartbeat; the shell only waits for it.
+        self.assertNotIn("integrity_timeout", script)
+        self.assertNotIn('timeout "$integrity', script)
+        self.assertNotIn("heartbeat_pid", script)
         self.assertNotIn("kill -0", script)
         self.assertNotIn("/proc/", script)
         self.assertNotIn("Still checking SQLite integrity", script)
-        self.assertIn("print_startup_heartbeat", script)
-        self.assertIn("sleep 30", script)
         launch = script.index(check)
         cleanup_trap = script.index(
             "trap 'kill \"$integrity_pid\" 2>/dev/null || :; "
-            'wait "$integrity_pid" 2>/dev/null || :; '
-            'kill "$heartbeat_pid" 2>/dev/null || :; '
-            "wait \"$heartbeat_pid\" 2>/dev/null || :; exit 0' TERM INT"
+            "wait \"$integrity_pid\" 2>/dev/null || :; exit 0' TERM INT"
         )
-        heartbeat_launch = script.index("heartbeat_pid=$!", launch)
-        wait = script.index('wait "$integrity_pid"', heartbeat_launch)
-        heartbeat_cleanup = script.index('kill "$heartbeat_pid"', wait)
-        heartbeat_wait = script.index('wait "$heartbeat_pid"', heartbeat_cleanup)
-        reset_trap = script.index("trap - TERM INT", heartbeat_wait)
+        wait = script.index('wait "$integrity_pid"', launch)
+        reset_trap = script.index("trap - TERM INT", wait)
         self.assertLess(cleanup_trap, launch)
-        self.assertLess(launch, heartbeat_launch)
-        self.assertLess(heartbeat_launch, wait)
-        self.assertLess(wait, heartbeat_cleanup)
-        self.assertLess(heartbeat_cleanup, heartbeat_wait)
-        self.assertLess(heartbeat_wait, reset_trap)
-        timeout_case = script.index("124|143)")
+        self.assertLess(launch, wait)
+        self.assertLess(wait, reset_trap)
+        timeout_case = script.index("124)", reset_trap)
         failure_case = script.index("*)", timeout_case)
-        self.assertIn(
-            "exceeded its ${integrity_timeout}s timeout",
-            script[timeout_case:failure_case],
-        )
-        self.assertIn(
-            "mark_startup_status_timeout",
-            script[timeout_case:failure_case],
-        )
+        self.assertIn("stopped making progress", script[timeout_case:failure_case])
         self.assertIn("integrity check failed", script[failure_case:])
         self.assertIn(
             "trap 'kill \"$parking_pid\" 2>/dev/null || :; "
@@ -1847,3 +1829,169 @@ class SqliteIntegrityTests(SimpleTestCase):
             self.assertEqual(list(dest_dir.glob("*.sqlite3")), [])
             self.assertEqual(list(dest_dir.glob(".*")), [])
             self.assertEqual(self.read_incident_report(db_path)["status"], "corrupt")
+
+
+def _small_database(tmp_dir, rows=3):
+    """Create a tiny real database for the snapshot to copy."""
+    db_path = str(Path(tmp_dir) / "db.sqlite3")
+    conn = sqlite3.connect(db_path)
+    conn.executescript(
+        "CREATE TABLE child (id INTEGER PRIMARY KEY, name TEXT);",
+    )
+    conn.executemany(
+        "INSERT INTO child VALUES (?, ?)",
+        ((row_id, f"row-{row_id}") for row_id in range(1, rows + 1)),
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@requires_proc_fd_backup
+class SnapshotPageCacheReleaseTests(SimpleTestCase):
+    """A published snapshot should not keep its own size in the page cache.
+
+    The copy is written and then read back in full by ``PRAGMA quick_check``,
+    so a multi-GiB database charges the container's cgroup roughly twice its
+    own size in ``file`` accounting -- for a file Floppy will not read again
+    until the live database is unreadable. The hint that releases it is
+    advisory in both directions and must never be able to spoil a backup.
+    """
+
+    def test_hint_is_issued_for_the_finished_snapshot(self):
+        """The happy path reports the advice it gave, and gives it once."""
+        calls = []
+
+        def record(descriptor, offset, length, advice):
+            calls.append((offset, length, advice))
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(sqlite_integrity.os, "posix_fadvise", record),
+        ):
+            db_path = _small_database(tmp_dir)
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                Path(tmp_dir) / "database",
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+        self.assertIsNotNone(snapshot_path)
+        # offset 0 / length 0 is "the whole file", and DONTNEED is the only
+        # advice that releases cache; anything else here would be a bug.
+        self.assertEqual(
+            calls,
+            [(0, 0, sqlite_integrity.os.POSIX_FADV_DONTNEED)],
+        )
+
+    def test_a_platform_without_posix_fadvise_still_publishes(self):
+        """Not every platform has posix_fadvise; the backup is the point."""
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(
+                sqlite_integrity.os, "posix_fadvise", None, create=True,
+            ),
+        ):
+            db_path = _small_database(tmp_dir)
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                Path(tmp_dir) / "database",
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+            self.assertIsNotNone(snapshot_path)
+            self.assertTrue(snapshot_path.is_file())
+
+    def test_a_failing_hint_never_fails_the_snapshot(self):
+        """An advisory call that errors must leave a good backup published."""
+
+        def explode(*_args):
+            raise OSError(5, "I/O error")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(sqlite_integrity.os, "posix_fadvise", explode),
+        ):
+            db_path = _small_database(tmp_dir)
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                Path(tmp_dir) / "database",
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+            self.assertIsNotNone(snapshot_path)
+            snapshot = sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True)
+            self.assertEqual(
+                snapshot.execute("PRAGMA quick_check").fetchone(),
+                ("ok",),
+            )
+            self.assertEqual(
+                snapshot.execute("SELECT COUNT(*) FROM child").fetchone()[0],
+                3,
+            )
+            snapshot.close()
+
+    def test_the_hint_comes_after_the_fsync(self):
+        """The hint must come after fsync.
+
+        DONTNEED drops only clean pages, so the ordering is what makes the
+        release both safe and effective: hinted before fsync, a still-dirty
+        page would simply be skipped and nothing would be released.
+        """
+        order = []
+
+        real_fsync = sqlite_integrity.os.fsync
+
+        def record_fsync(descriptor):
+            order.append("fsync")
+            return real_fsync(descriptor)
+
+        def record_advise(*_args):
+            order.append("fadvise")
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(sqlite_integrity.os, "fsync", record_fsync),
+            mock.patch.object(sqlite_integrity.os, "posix_fadvise", record_advise),
+        ):
+            db_path = _small_database(tmp_dir)
+            sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                Path(tmp_dir) / "database",
+                max_keep=7,
+                timeout_seconds=5,
+            )
+
+        self.assertIn("fadvise", order)
+        self.assertLess(order.index("fsync"), order.index("fadvise"))
+
+    def test_the_live_database_is_never_hinted(self):
+        """Evicting the live database's cache would be a performance bug.
+
+        Only the descriptor for the finished snapshot may be advised, so the
+        set of advised inodes must be exactly one, and not the source's.
+        """
+        advised = []
+
+        def record(descriptor, *_args):
+            advised.append(os.fstat(descriptor).st_ino)
+
+        with (
+            tempfile.TemporaryDirectory() as tmp_dir,
+            mock.patch.object(sqlite_integrity.os, "posix_fadvise", record),
+        ):
+            db_path = _small_database(tmp_dir)
+            source_inode = Path(db_path).stat().st_ino
+            snapshot_path = sqlite_integrity.create_live_database_snapshot(
+                db_path,
+                Path(tmp_dir) / "database",
+                max_keep=7,
+                timeout_seconds=5,
+            )
+            snapshot_inode = snapshot_path.stat().st_ino
+
+        self.assertEqual(advised, [snapshot_inode])
+        self.assertNotIn(source_inode, advised)

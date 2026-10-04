@@ -25,6 +25,7 @@ from app.detail_builders import (
     _build_series_graph_from_raw,
     _build_trakt_popularity_context,
 )
+from app.detail_related import drop_recommendations_if_hidden
 from app.log_safety import exception_summary
 from app.metadata_sync_views import (
     _build_local_tv_with_seasons_metadata,
@@ -258,15 +259,16 @@ def season_details(
         )
         season_metadata_missing = True
     else:
-        tv_with_seasons_metadata = services.get_media_metadata(
-            "tv_with_seasons",
-            media_id,
-            source,
-            [season_number],
-            language=metadata_resolution.metadata_language_default(
-                request.user, show_item
-            ),
-        )
+        with services.interactive_request_scope():
+            tv_with_seasons_metadata = services.get_media_metadata(
+                "tv_with_seasons",
+                media_id,
+                source,
+                [season_number],
+                language=metadata_resolution.metadata_language_default(
+                    request.user, show_item
+                ),
+            )
         season_metadata = tv_with_seasons_metadata.get(season_key)
         season_metadata_missing = season_metadata is None
         if season_metadata_missing:
@@ -728,6 +730,8 @@ def season_details(
             episode["item"] = db_item
             if db_item is not None and db_item.release_datetime is not None:
                 episode["air_date"] = db_item.release_datetime
+
+    drop_recommendations_if_hidden(request, season_metadata)
 
     # Enrich related items with user tracking data
     # For public views, use list owner's data if available

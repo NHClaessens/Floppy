@@ -12,6 +12,7 @@ from uuid import NAMESPACE_URL, uuid5
 from django.utils import timezone
 
 from app import fork_services_episode, fork_services_movie
+from app import fork_services_play_dedupe as play_dedupe
 from app.models import Episode, MediaTypes, MoviePlay
 from integrations import import_progress
 from integrations.imports.helpers import MediaImportError, decrypt_or_raise
@@ -530,12 +531,26 @@ class JellyfinPlaybackReportingImporter:
             self._skip(f"Line {row.line_number}: already imported.")
             return
 
+        # The same play may already have been recorded by the Jellyfin webhook
+        # (#1162), which timestamps a play at playback-stop while this import
+        # uses playback-start, so the two rows never share an external_id.
+        duplicate = play_dedupe.existing_movie_play_times(
+            self.user,
+            media_ids=[media_id],
+            source=source,
+        ).is_duplicate(media_id, row.date_created)
+        if duplicate:
+            self._skip(f"Line {row.line_number}: duplicate of an existing play.")
+            return
+
         movie = fork_services_movie.resolve_or_create_movie(self.user, media_id, source)
         import_run_id = import_progress.get_current_import_run_id()
         if import_run_id and movie.import_run_id != import_run_id:
             movie.import_run_id = import_run_id
             movie.save(update_fields=["import_run"])
-        _, created = movie.watch(row.date_created, external_id=source_id)
+        _, created = movie.watch(
+            row.date_created, external_id=source_id, entry_source="jellyfin",
+        )
         if created:
             self.counts[MediaTypes.MOVIE.value] += 1
         else:
@@ -558,6 +573,18 @@ class JellyfinPlaybackReportingImporter:
             self._skip(f"Line {row.line_number}: already imported.")
             return
 
+        # The same play may already have been recorded by the Jellyfin webhook
+        # (#1162), which timestamps a play at playback-stop while this import
+        # uses playback-start, so the two rows never share a watch_operation_id.
+        duplicate = play_dedupe.existing_episode_play_times(
+            self.user,
+            media_ids=[media_id],
+            source=source,
+        ).is_duplicate((media_id, season_number, episode_number), row.date_created)
+        if duplicate:
+            self._skip(f"Line {row.line_number}: duplicate of an existing play.")
+            return
+
         season = fork_services_episode.resolve_or_create_season(
             self.user,
             media_id,
@@ -568,6 +595,7 @@ class JellyfinPlaybackReportingImporter:
             episode_number,
             row.date_created,
             watch_operation_id=operation_id,
+            entry_source="jellyfin",
         )
         if result.created:
             self.counts[MediaTypes.EPISODE.value] += 1

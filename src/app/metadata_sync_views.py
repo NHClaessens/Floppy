@@ -15,11 +15,16 @@ from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.utils.translation import gettext
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import (
+    require_GET,
+    require_http_methods,
+    require_POST,
+)
 
 from app import (
     custom_metadata,
     helpers,
+    history_cache,
     metadata_utils,
 )
 from app.db_retry import is_retryable_error, run_retryable_db_operation
@@ -348,6 +353,63 @@ def move_library_item(request, item_id):
 
 
 @login_required
+@require_http_methods(["GET", "POST"])
+def switch_tv_provider(request, item_id):
+    """Preview, then apply, moving one tracked show between TMDB and TVDB."""
+    item = get_object_or_404(Item, id=item_id)
+    try:
+        switch = library_migration.preview_tv_provider_switch(request.user, item)
+    except library_migration.LibraryMigrationError as error:
+        return render(
+            request,
+            "app/tv_provider_switch.html",
+            {"item": item, "error": str(error)},
+        )
+
+    if request.method == "POST" and switch.plan is not None:
+        try:
+            target_item = run_retryable_db_operation(
+                lambda: library_migration.switch_tv_provider(request.user, item),
+                operation_name="TV provider switch",
+            ).value
+        except OperationalError as error:
+            if not is_retryable_error(error):
+                raise
+            messages.error(
+                request,
+                gettext(
+                    "The database is busy with another operation. "
+                    "Nothing was changed; please try again."
+                ),
+            )
+        except library_migration.LibraryMigrationError as error:
+            messages.error(request, str(error))
+        else:
+            messages.success(
+                request,
+                gettext("Moved tracking to %(value_1)s.")
+                % {"value_1": switch.target_label},
+            )
+            return redirect(
+                "media_details",
+                source=target_item.source,
+                media_type=MediaTypes.TV.value,
+                media_id=target_item.media_id,
+                title=target_item.get_display_title(request.user) or "item",
+            )
+
+    return render(
+        request,
+        "app/tv_provider_switch.html",
+        {
+            "item": item,
+            "switch": switch,
+            "source_label": metadata_resolution.metadata_provider_label(item.source),
+        },
+    )
+
+
+@login_required
 @require_POST
 def remap_metadata_provider(request, source, media_type, media_id):
     """Persist a user-picked cross-provider ID mapping for an item."""
@@ -622,6 +684,7 @@ def _resolve_current_display_metadata_payload(
         item,
         current_provider,
         route_media_type=media_type,
+        persist_links=False,
     )
     if not provider_media_id:
         return base_metadata
@@ -1260,6 +1323,7 @@ def _build_flat_anime_episode_preview(
                     persistence_mode="best_effort",
                     retry_max_retries=retry_max_retries,
                     on_deferred=on_persistence_deferred,
+                    persist_links=False,
                 )
                 if detail_item is not None
                 else anime_mapping.resolve_provider_series_id(media_id, candidate)
@@ -1706,6 +1770,7 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
             }
 
             episodes_to_update = []
+            episode_item_ids_with_title_changes = set()
             episode_count = 0
 
             # Create a lookup for raw episode data by episode_number
@@ -1715,10 +1780,17 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
                 episode_number = episode_data["episode_number"]
                 if episode_number in existing_episodes:
                     episode_item = existing_episodes[episode_number]
-                    title_fields = Item.title_fields_from_metadata(metadata)
-                    episode_item.title = title_fields["title"]
-                    episode_item.original_title = title_fields["original_title"]
-                    episode_item.localized_title = title_fields["localized_title"]
+                    episode_title_fields = Item.title_fields_from_episode_metadata(
+                        episode_data,
+                    )
+                    if episode_title_fields["title"]:
+                        if any(
+                            getattr(episode_item, field) != value
+                            for field, value in episode_title_fields.items()
+                        ):
+                            episode_item_ids_with_title_changes.add(episode_item.pk)
+                        for field, value in episode_title_fields.items():
+                            setattr(episode_item, field, value)
                     episode_item.image = episode_data["image"]
 
                     # Extract and update release_datetime from TMDB air_date
@@ -1771,6 +1843,17 @@ def sync_metadata(request, source, media_type, media_id, season_number=None):
                     updated_count,
                     title,
                 )
+
+            if episode_item_ids_with_title_changes:
+                history_user_ids = (
+                    Episode.objects.filter(
+                        item_id__in=episode_item_ids_with_title_changes,
+                    )
+                    .values_list("related_season__user_id", flat=True)
+                    .distinct()
+                )
+                for user_id in history_user_ids:
+                    history_cache.invalidate_history_cache(user_id, force=True)
 
         item.fetch_releases(delay=False)
 

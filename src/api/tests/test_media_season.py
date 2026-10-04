@@ -574,6 +574,44 @@ class MediaSeasonTests(FloppyApiTestCase):
         self.assertEqual(payload["imdb_rating_count"], 890)
 
     @patch("api.views.services.get_media_metadata")
+    def test_season_detail_media_type_status_disabled_via_library_media_type(
+        self,
+        mock_metadata,
+    ):
+        """Season detail surfaces a disabled anime bucket with a redirect hint."""
+        tv_item = self.items_by_type[MediaTypes.TV.value][0]
+        season_item = self.items_by_type[MediaTypes.SEASON.value][0]
+        self.user1.anime_enabled = False
+        self.user1.save(update_fields=["anime_enabled"])
+
+        mock_metadata.return_value = {
+            "media_id": tv_item.media_id,
+            "source": tv_item.source,
+            "media_type": "season",
+            "season_number": season_item.season_number,
+            "related": {"episodes": []},
+        }
+
+        response = self.call_api(
+            "get",
+            "api_media_season_detail",
+            args=(
+                MediaTypes.TV.value,
+                tv_item.source,
+                tv_item.media_id,
+                season_item.season_number,
+            ),
+            params={"library_media_type": MediaTypes.ANIME.value},
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        status = response.json()["media_type_status"]
+        self.assertEqual(status["media_type"], "anime")
+        self.assertFalse(status["enabled"])
+        self.assertIn("tv", status["message"])
+
+    @patch("api.views.services.get_media_metadata")
     def test_season_detail_untracked_episode_reports_synced_imdb_rating(
         self,
         mock_metadata,

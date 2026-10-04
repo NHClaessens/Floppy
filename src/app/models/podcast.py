@@ -100,6 +100,15 @@ class PodcastEpisode(models.Model):
         verbose_name = "Podcast Episode"
         verbose_name_plural = "Podcast Episodes"
         unique_together = [("show", "episode_uuid")]
+        indexes = [
+            # The catalog sync looks an episode up by uuid alone, thousands of
+            # times a run. unique_together's index leads with show_id, so it
+            # cannot serve that lookup and every one of them was a table scan.
+            # Not unique: migration 0116 removed that constraint deliberately,
+            # because RSS-sourced rows key on the feed GUID and two shows can
+            # collide.
+            models.Index(fields=["episode_uuid"], name="podcast_ep_uuid_idx"),
+        ]
 
     def __str__(self):
         """Return the episode title."""

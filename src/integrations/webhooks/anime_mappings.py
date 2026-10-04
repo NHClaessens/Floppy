@@ -1,4 +1,5 @@
 import contextlib
+import time
 
 from django.conf import settings
 from django.core.cache import cache
@@ -15,12 +16,26 @@ URL = (
 DESCRIPTOR_MIN_PARTS = 2
 DESCRIPTOR_SEASON_PART_INDEX = 3
 
+# The mapping table is a multi-MB blob that changes at most once a day (see
+# CACHE_TIMEOUT), but this is called on every media-server webhook event.
+# Memoize it per-process for a short window to avoid re-transferring and
+# re-deserializing it from Redis on every call.
+_LOCAL_CACHE_TTL_SECONDS = 300
+_local_cache: dict[str, object] = {"data": None, "fetched_at": 0.0}
+
 
 def fetch_mapping_data():
     """Fetch anime mapping data with an optional local data override."""
     mapping_override = getattr(settings, "ANIBRIDGE_MAPPING_DATA_OVERRIDE", None)
     if mapping_override is not None:
         return mapping_override
+
+    now = time.monotonic()
+    if (
+        _local_cache["data"] is not None
+        and now - _local_cache["fetched_at"] < _LOCAL_CACHE_TTL_SECONDS
+    ):
+        return _local_cache["data"]
 
     data = cache.get(CACHE_KEY)
     if data is None:
@@ -30,6 +45,9 @@ def fetch_mapping_data():
             URL,
         )
         cache.set(CACHE_KEY, data)
+
+    _local_cache["data"] = data
+    _local_cache["fetched_at"] = now
     return data
 
 

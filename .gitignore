@@ -3,6 +3,7 @@ __pycache__
 *.egg-info/
 .env
 .coverage*
+.floppy/
 venv
 src/staticfiles
 src/db/db.sqlite3
@@ -56,3 +57,6 @@ docs/superpowers/
 .worktrees/
 desktop/
 dump.rdb
+
+# Database dumps hold real user data; keep them out of the repository
+*.sql.gz

@@ -2,6 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
+from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.test import TestCase, override_settings, tag
@@ -45,6 +46,57 @@ class ImportSimkl(TestCase):
             helpers.encrypt("token"),
             self.user,
             "new",
+        )
+
+    @override_settings(SIMKL_ID="test-simkl-id", SIMKL_SECRET="test-simkl-secret")
+    def test_refresh_token_replaces_the_expired_access_token(self):
+        """AUTH V2 schedules refresh the 7-day access token on every run."""
+        with patch(
+            "app.providers.services.api_request",
+            return_value={"access_token": "new-access", "refresh_token": "refresh"},
+        ) as api_request:
+            importer = simkl.SimklImporter(
+                helpers.encrypt("stale-access"),
+                self.user,
+                "new",
+                refresh_token=helpers.encrypt("refresh"),
+            )
+
+        self.assertEqual(importer.token, "new-access")
+        self.assertEqual(
+            api_request.call_args.args[2], "https://api.simkl.com/oauth2/token"
+        )
+        self.assertEqual(
+            api_request.call_args.kwargs["data"],
+            {
+                "client_id": "test-simkl-id",
+                "client_secret": "test-simkl-secret",
+                "grant_type": "refresh_token",
+                "refresh_token": "refresh",
+            },
+        )
+
+    @override_settings(SIMKL_ID="test-simkl-id", SIMKL_SECRET="test-simkl-secret")
+    def test_username_lookup_is_a_read(self):
+        """A read-only AUTH V2 token gets 403 on POST /users/settings."""
+        with patch(
+            "app.providers.services.api_request",
+            return_value={"user": {"name": "simkl-user"}},
+        ) as api_request:
+            self.assertEqual(simkl.get_username("access"), "simkl-user")
+
+        self.assertEqual(api_request.call_args.args[1], "GET")
+        self.assertEqual(
+            api_request.call_args.kwargs["params"],
+            {
+                "client_id": "test-simkl-id",
+                "app-name": "floppy",
+                "app-version": settings.VERSION,
+            },
+        )
+        self.assertEqual(
+            api_request.call_args.kwargs["headers"]["Authorization"],
+            "Bearer access",
         )
 
     @tag("network")

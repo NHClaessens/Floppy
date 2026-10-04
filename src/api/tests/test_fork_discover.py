@@ -86,6 +86,20 @@ class DiscoverTests(FloppyApiTestCase):
         self.assertEqual(response.status_code, HTTP.ACCEPTED)
         mock_schedule.assert_called_once()
 
+    def test_endpoints_404_when_discover_turned_off(self):
+        """Discover off applies to the REST endpoints too, not just the web page."""
+        self.user1.show_discover = False
+        self.user1.save(update_fields=["show_discover"])
+
+        for method, name in (
+            ("get", "api_discover"),
+            ("post", "api_discover_refresh"),
+            ("get", "api_discover_hidden"),
+        ):
+            with self.subTest(name=name):
+                response = self.call_api(method, name, headers=self.auth_headers)
+                self.assertEqual(response.status_code, HTTP.NOT_FOUND)
+
     def test_hide_and_unhide_item(self):
         """POST discover/hidden toggles NOT_INTERESTED feedback."""
         item = self.items_by_type[MediaTypes.MOVIE.value][0]

@@ -92,7 +92,7 @@
             <div class="text-lg font-bold text-[var(--color-text)] text-center">{% blocktranslate trimmed with value_1=total_minutes|intcomma %}{{ value_1 }}m{% endblocktranslate %}</div>
           </div>
         {% endif %}
-        {% if tracker and tracker.score %}
+        {% if tracker and tracker.score and user.ratings_enabled %}
           <div class="bg-[var(--color-surface)] p-3 rounded-lg">
             <h3 class="text-xs font-semibold text-[var(--color-text-muted)] mb-1 text-center">{% translate "YOUR SCORE" %}</h3>
             <div class="flex items-center justify-center">
@@ -106,7 +106,7 @@
   </div>
 
   {# Episodes list #}
-  <div class="mb-8">
+  <div class="mb-8" {% detail_section_attrs user "podcast" "content" "episodes" %}>
     <h2 class="text-2xl font-bold mb-4">{% translate "Episodes" %}</h2>
     <div class="bg-[var(--color-surface)] rounded-lg overflow-hidden">
       <div class="divide-y divide-gray-700">

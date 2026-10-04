@@ -339,6 +339,15 @@ MEDIA_COLUMNS: list[ColumnDef] = [
         default_order=100,
     ),
     ColumnDef(
+        key="entry_source",
+        label=gettext_noop("Source"),
+        th_classes="p-2 text-center",
+        td_classes="p-2 text-center",
+        cell_template="app/components/cells/media_entry_source_cell.html",
+        table_types=("media",),
+        default_order=102,
+    ),
+    ColumnDef(
         key="notes",
         label=gettext_noop("Notes"),
         th_classes="p-2",

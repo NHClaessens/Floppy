@@ -68,16 +68,38 @@ def resolve_episode_watch_replay(episode, *, user_id, season_id=None, item_id=No
     )
 
 
+def _find_external_episode(related_season, item, external_id):
+    """Return the episode play claimed by a client-supplied external id."""
+    return (
+        Episode.objects.filter(
+            related_season=related_season,
+            item=item,
+            external_id=external_id,
+        )
+        .select_related("related_season", "item")
+        .first()
+    )
+
+
 def create_episode_watch(
     related_season,
     item,
     end_date,
     *,
     watch_operation_id=None,
+    external_id=None,
     **episode_fields,
 ):
-    """Create one Episode watch, replaying a previously claimed private token."""
+    """Create one Episode watch, replaying a previously claimed private token.
+
+    ``watch_operation_id`` is the private web-form token; ``external_id`` is
+    the public client-supplied play id. Either one makes the call safe to
+    retry: a replay returns the winning play with ``created=False`` instead of
+    appending a second copy.
+    """
     operation_id = normalize_watch_operation_id(watch_operation_id)
+    if external_id is not None:
+        external_id = str(external_id).strip() or None
     identity = {
         "user_id": related_season.user_id,
         "season_id": related_season.id,
@@ -94,6 +116,11 @@ def create_episode_watch(
             if claimed is not None:
                 return _resolve_claimed_watch(claimed, **identity)
 
+        if external_id is not None:
+            existing = _find_external_episode(related_season, item, external_id)
+            if existing is not None:
+                return EpisodeWatchResult(episode=existing, created=False)
+
         try:
             with transaction.atomic():
                 episode = Episode.objects.create(
@@ -101,19 +128,29 @@ def create_episode_watch(
                     item=item,
                     end_date=end_date,
                     watch_operation_id=operation_id,
+                    external_id=external_id,
                     **episode_fields,
                 )
         except IntegrityError as error:
-            if operation_id is None:
+            if operation_id is None and external_id is None:
                 raise
-            claimed = (
-                Episode.objects.filter(watch_operation_id=operation_id)
-                .select_related("related_season", "item")
-                .first()
-            )
-            if claimed is None:
-                raise EpisodeWatchConflictError from error
-            return _resolve_claimed_watch(claimed, **identity)
+            if operation_id is not None:
+                claimed = (
+                    Episode.objects.filter(watch_operation_id=operation_id)
+                    .select_related("related_season", "item")
+                    .first()
+                )
+                if claimed is not None:
+                    return _resolve_claimed_watch(claimed, **identity)
+            if external_id is not None:
+                existing = _find_external_episode(
+                    related_season,
+                    item,
+                    external_id,
+                )
+                if existing is not None:
+                    return EpisodeWatchResult(episode=existing, created=False)
+            raise EpisodeWatchConflictError from error
         return EpisodeWatchResult(episode=episode, created=True)
 
     return run_retryable_db_operation(
@@ -129,6 +166,8 @@ def resolve_or_create_season(
     source,
     season_number,
     library_media_type="",
+    *,
+    prepare_only=False,
 ):
     """Return the user's tracked Season row, creating it if it doesn't exist.
 
@@ -170,15 +209,22 @@ def resolve_or_create_season(
                 "image": season_image,
             },
         )
-        related_season = Season.objects.create(
+        related_season = Season(
             item=item,
             user=user,
             score=None,
             status=Status.IN_PROGRESS.value,
             notes="",
         )
+        if prepare_only:
+            # Ordered destinations belong to an already tracked show. Resolve
+            # its identity without committing a tracking parent before sealing.
+            related_season.related_tv = related_season.get_tv()
+        else:
+            related_season.save()
 
-        logger.info("%s did not exist, it was created successfully.", related_season)
+        if not prepare_only:
+            logger.info("%s did not exist, it was created successfully.", related_season)
 
     _sync_library_media_type(related_season, library_media_type)
     return related_season

@@ -296,11 +296,14 @@ def _repair_plan_card(report: dict) -> str:
 
 def _timeout_body() -> str:
     return (
-        "<h1>The SQLite startup check timed out.</h1>"
-        "<p>Floppy paused before migrations and services. The check exceeded "
-        "its bound and was stopped. No recovery decision or migration "
-        "completed. No migration or recovery action completed; the database "
-        "result is unknown until preflight or an offline check finishes.</p>"
+        "<h1>The SQLite startup check stopped making progress.</h1>"
+        "<p>Floppy paused before migrations and services. The check read "
+        "nothing and used no CPU for several minutes, so it was stopped; a "
+        "check that is merely slow is left to finish. This usually means the "
+        "storage under the database stopped responding (a network share or "
+        "disk that went away), not that the database is damaged. No migration "
+        "or recovery action completed; the database result is unknown until "
+        "preflight or an offline check finishes.</p>"
     )
 
 
@@ -316,6 +319,8 @@ def _timeout_details(status: dict) -> str:
     read_bytes = status.get("read_bytes")
     items = [
         f"<li>Phase when stopped: <code>{phase}</code></li>",
+        "<li>Why it was stopped: "
+        f"{html.escape(str(status.get('error_message') or 'unknown'))}</li>",
         f"<li>Elapsed: {elapsed_text}</li>",
         f"<li>Phase elapsed: {phase_elapsed_text}</li>",
     ]

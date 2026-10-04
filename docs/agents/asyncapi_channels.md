@@ -25,7 +25,7 @@ This document specifies Floppy's asynchronous message channels, inbound webhook 
 | Channel Address | Operation ID | Service | Dispatches To Queue | Description |
 |---|---|---|---|---|
 | `webhook/plex/{token}` | `receivePlexWebhook` | Plex | `celery` | Inbound scrobble/playback and library update payloads from Plex Media Server. |
-| `webhook/jellyfin/{token}` | `receiveJellyfinWebhook` | Jellyfin | `celery` | Playback progress, start, stop, and item metadata notifications from Jellyfin. |
+| `webhook/jellyfin/{token}` | `receiveJellyfinWebhook` | Jellyfin | `celery` | Playback progress, start, stop, user-rating, watched-toggle, and item metadata notifications from Jellyfin. |
 | `webhook/emby/{token}` | `receiveEmbyWebhook` | Emby | `celery` | Playback state and library synchronization payloads from Emby Server. |
 | `webhook/jellyseerr/{token}` | `receiveJellyseerrWebhook` | Jellyseerr | `celery` | Media request approval, availability, and user issue notifications from Jellyseerr. |
 | `webhook/seerr/global/` | `receiveSeerrGlobalWebhook` | Overseerr / Jellyseerr | `celery` | Global non-tokenized webhook notifications from Overseerr instances. |

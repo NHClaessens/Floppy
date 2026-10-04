@@ -200,6 +200,80 @@ class MediaEpisodeTests(FloppyApiTestCase):
         self.assertEqual(payload["imdb_rating_count"], 4321)
 
     @patch("api.views.services.get_media_metadata")
+    def test_episode_detail_media_type_status_enabled_by_default(self, mock_metadata):
+        """Episode detail reports tv as enabled when nothing is disabled."""
+        tv_item = self.items_by_type[MediaTypes.TV.value][0]
+        season_item = self.items_by_type[MediaTypes.SEASON.value][0]
+        episode_item = self.items_by_type[MediaTypes.EPISODE.value][0]
+
+        mock_metadata.return_value = self.build_episode_metadata(
+            tv_item=tv_item,
+            season_number=season_item.season_number,
+            episode_number=episode_item.episode_number,
+            title=episode_item.title,
+            image=episode_item.image,
+        )
+
+        response = self.call_api(
+            "get",
+            "api_media_episode_detail",
+            args=(
+                MediaTypes.TV.value,
+                tv_item.source,
+                tv_item.media_id,
+                season_item.season_number,
+                episode_item.episode_number,
+            ),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["media_type_status"],
+            {"media_type": "tv", "enabled": True, "message": None},
+        )
+
+    @patch("api.views.services.get_media_metadata")
+    def test_episode_detail_media_type_status_disabled_via_library_media_type(
+        self,
+        mock_metadata,
+    ):
+        """A disabled anime library_media_type is surfaced with a redirect hint."""
+        tv_item = self.items_by_type[MediaTypes.TV.value][0]
+        season_item = self.items_by_type[MediaTypes.SEASON.value][0]
+        episode_item = self.items_by_type[MediaTypes.EPISODE.value][0]
+        self.user1.anime_enabled = False
+        self.user1.save(update_fields=["anime_enabled"])
+
+        mock_metadata.return_value = self.build_episode_metadata(
+            tv_item=tv_item,
+            season_number=season_item.season_number,
+            episode_number=episode_item.episode_number,
+            title=episode_item.title,
+            image=episode_item.image,
+        )
+
+        response = self.call_api(
+            "get",
+            "api_media_episode_detail",
+            args=(
+                MediaTypes.TV.value,
+                tv_item.source,
+                tv_item.media_id,
+                season_item.season_number,
+                episode_item.episode_number,
+            ),
+            params={"library_media_type": MediaTypes.ANIME.value},
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        status = response.json()["media_type_status"]
+        self.assertEqual(status["media_type"], "anime")
+        self.assertFalse(status["enabled"])
+        self.assertIn("tv", status["message"])
+
+    @patch("api.views.services.get_media_metadata")
     def test_episode_detail_patch_with_invalid_field_returns_400(self, mock_metadata):
         """Episode PATCH with unknown field should return 400."""
         tv_item = self.items_by_type[MediaTypes.TV.value][0]

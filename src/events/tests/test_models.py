@@ -2,7 +2,9 @@ import datetime
 from unittest import mock
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase
+from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from app.models import (
@@ -798,3 +800,66 @@ class EventManagerCrossBucketAnimeDedupTests(TestCase):
 
         self.assertEqual(list(events), [season_event])
         self.assertNotIn(anime_event, events)
+
+
+class CalendarActiveShowLoadTests(TestCase):
+    """The calendar reads the user's active shows once, and only the columns it needs."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="cal", password="pw")
+        self.when = timezone.now() + datetime.timedelta(days=1)
+
+    def _add_shows(self, count, start=0):
+        for index in range(start, start + count):
+            show = Item.objects.create(
+                media_id=f"cal-show-{index}",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.TV.value,
+                title=f"Show {index}",
+            )
+            TV.objects.create(
+                item=show,
+                user=self.user,
+                status=Status.IN_PROGRESS.value,
+            )
+            season = Item.objects.create(
+                media_id=f"cal-show-{index}",
+                source=Sources.TMDB.value,
+                media_type=MediaTypes.SEASON.value,
+                title=f"Show {index}",
+                season_number=1,
+            )
+            Event.objects.create(item=season, content_number=1, datetime=self.when)
+
+    def _run(self):
+        with CaptureQueriesContext(connection) as captured:
+            events = list(
+                Event.objects.get_user_events(
+                    self.user,
+                    self.when.date(),
+                    self.when.date(),
+                ),
+            )
+        return events, captured.captured_queries
+
+    def test_active_shows_are_loaded_once_without_unneeded_columns(self):
+        self._add_shows(3)
+
+        events, queries = self._run()
+
+        self.assertEqual(len(events), 3)
+        active_show_reads = [
+            query["sql"]
+            for query in queries
+            if 'FROM "app_item"' in query["sql"] and 'JOIN "app_tv"' in query["sql"]
+        ]
+        self.assertEqual(len(active_show_reads), 1)
+        self.assertNotIn('"app_item"."title"', active_show_reads[0])
+
+    def test_query_count_does_not_grow_with_library_size(self):
+        self._add_shows(3)
+        _events, small = self._run()
+        self._add_shows(30, start=3)
+        _events, large = self._run()
+
+        self.assertEqual(len(large), len(small))

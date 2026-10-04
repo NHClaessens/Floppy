@@ -1,10 +1,22 @@
+from datetime import UTC, datetime
+from datetime import timezone as dt_timezone
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from app.models import Item, MediaTypes, Movie, Status
+from app.models import (
+    TV,
+    Episode,
+    Item,
+    MediaTypes,
+    Movie,
+    MoviePlay,
+    Season,
+    Sources,
+    Status,
+)
 from integrations.imports.jellyfin_playback_reporting import (
     JellyfinPlaybackReportingImporter,
     parse_tsv,
@@ -176,7 +188,7 @@ class PlaybackReportingImporterTests(TestCase):
         mock_decrypt,
     ):
         season = SimpleNamespace(
-            watch=lambda episode_number, end_date, watch_operation_id: SimpleNamespace(
+            watch=lambda episode_number, end_date, watch_operation_id, entry_source=None: SimpleNamespace(
                 created=True,
             ),
         )
@@ -214,6 +226,138 @@ class PlaybackReportingImporterTests(TestCase):
             "tvdb",
             2,
         )
+
+    @patch(
+        "integrations.imports.jellyfin_playback_reporting.decrypt_or_raise",
+        return_value="api-key",
+    )
+    @patch(
+        "integrations.imports.jellyfin_playback_reporting.fork_services_episode.resolve_or_create_season"
+    )
+    @patch("integrations.jellyfin_client.JellyfinClient.iter_library_items")
+    def test_skips_episode_already_recorded_by_webhook(
+        self,
+        mock_library,
+        mock_resolve_season,
+        mock_decrypt,
+    ):
+        """Issue #1162: the webhook logs stop time, the import logs start
+        time, so a play recorded by one must still be recognized by the
+        other even though their timestamps differ.
+        """
+        tv_item = Item.objects.create(
+            media_id="series-42",
+            source=Sources.TVDB.value,
+            media_type=MediaTypes.TV.value,
+            title="Show",
+        )
+        tv = TV.objects.create(
+            user=self.user,
+            item=tv_item,
+            status=Status.IN_PROGRESS.value,
+        )
+        season_item = Item.objects.create(
+            media_id="series-42",
+            source=Sources.TVDB.value,
+            media_type=MediaTypes.SEASON.value,
+            title="Season 2",
+            season_number=2,
+        )
+        season = Season.objects.create(
+            user=self.user,
+            item=season_item,
+            related_tv=tv,
+            status=Status.IN_PROGRESS.value,
+        )
+        episode_item = Item.objects.create(
+            media_id="series-42",
+            source=Sources.TVDB.value,
+            media_type=MediaTypes.EPISODE.value,
+            title="Episode",
+            season_number=2,
+            episode_number=7,
+        )
+        # The webhook already recorded this play at playback-stop time.
+        Episode.objects.create(
+            item=episode_item,
+            related_season=season,
+            end_date=datetime(2024, 1, 2, 3, 34, 5, tzinfo=UTC),
+        )
+
+        mock_library.return_value = [
+            {
+                "Id": "jf-series",
+                "Type": "Series",
+                "ProviderIds": {"Tvdb": "series-42"},
+            },
+            {
+                "Id": "jf-episode",
+                "Type": "Episode",
+                "SeriesId": "jf-series",
+                "ParentIndexNumber": 2,
+                "IndexNumber": 7,
+            },
+        ]
+
+        # The import runs later and describes the same play at
+        # playback-start time, half an hour earlier.
+        counts, warnings = JellyfinPlaybackReportingImporter(
+            self.user,
+            self.account,
+        ).import_data(
+            playback_row(
+                timestamp="2024-01-02 03:04:05.1234567",
+                item_id="jf-episode",
+                item_type="Episode",
+            ),
+        )
+
+        self.assertEqual(counts[MediaTypes.EPISODE.value], 0)
+        self.assertIn("duplicate of an existing play", warnings)
+        self.assertEqual(Episode.objects.count(), 1)
+        mock_resolve_season.assert_not_called()
+
+    @patch(
+        "integrations.imports.jellyfin_playback_reporting.decrypt_or_raise",
+        return_value="api-key",
+    )
+    @patch("integrations.jellyfin_client.JellyfinClient.iter_library_items")
+    def test_skips_movie_already_recorded_by_webhook(
+        self,
+        mock_library,
+        mock_decrypt,
+    ):
+        item = Item.objects.create(
+            media_id="123",
+            source="tmdb",
+            media_type=MediaTypes.MOVIE.value,
+            title="Movie",
+            image="",
+        )
+        movie = Movie.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+            score=None,
+            notes="",
+            end_date=datetime(2024, 1, 2, 3, 34, 5, tzinfo=UTC),
+        )
+        mock_library.return_value = [
+            {
+                "Id": "jf-item",
+                "Type": "Movie",
+                "ProviderIds": {"Tmdb": "123"},
+            },
+        ]
+
+        counts, warnings = JellyfinPlaybackReportingImporter(
+            self.user,
+            self.account,
+        ).import_data(playback_row(timestamp="2024-01-02 03:04:05.1234567"))
+
+        self.assertEqual(counts[MediaTypes.MOVIE.value], 0)
+        self.assertIn("duplicate of an existing play", warnings)
+        self.assertEqual(MoviePlay.objects.filter(movie=movie).count(), 0)
 
 
 class PlaybackActivityAPIImportTests(TestCase):

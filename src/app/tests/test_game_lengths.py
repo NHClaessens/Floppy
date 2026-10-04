@@ -1,6 +1,7 @@
 import json
 from unittest.mock import MagicMock, patch
 
+import redis
 from django.test import TestCase
 
 from app.models import Item, MediaTypes, Sources
@@ -189,6 +190,20 @@ class GameLengthsServiceTests(TestCase):
         self.assertEqual(payload["single_player_table"][0]["label"], "Main Story")
         self.assertEqual(payload["platform_table"][0]["platform"], "PC")
         self.assertEqual(payload["platform_table"][0]["fastest_minutes"], 240)
+
+    @patch("app.services.game_lengths.provider_services._fallback_session.get")
+    @patch("app.services.game_lengths.provider_services.session.get")
+    def test_fetch_hltb_detail_falls_back_when_redis_breaks_the_limiter(
+        self, mock_get, mock_fallback_get
+    ):
+        """A mid-run Redis outage must not crash the HLTB detail fetch (#1166)."""
+        mock_get.side_effect = redis.exceptions.ConnectionError("refused")
+        mock_fallback_get.return_value = _mock_response(text=_detail_html())
+
+        payload = game_lengths.fetch_hltb_detail(160618)
+
+        self.assertEqual(payload["game_id"], 160618)
+        mock_fallback_get.assert_called_once()
 
     @patch("app.services.game_lengths.fetch_hltb_detail")
     @patch("app.services.game_lengths.fetch_hltb_search")

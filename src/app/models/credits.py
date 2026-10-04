@@ -8,6 +8,10 @@ from app.models.item import Item
 CREDITS_BACKFILL_VERSION = 4
 DISCOVER_MOVIE_METADATA_BACKFILL_VERSION = 1
 TRAKT_POPULARITY_BACKFILL_VERSION = 1
+# Bump to re-open every IMDB person for a TMDB profile lookup, e.g. when the
+# matching strategy changes. Without a bump, a person whose lookup already
+# completed is never searched again (see Person.profile_backfill_version).
+PERSON_PROFILE_BACKFILL_VERSION = 1
 
 
 class ItemProviderLink(models.Model):
@@ -156,6 +160,10 @@ class MetadataBackfillField(models.TextChoices):
     IGDB_RATINGS = "igdb_ratings", "IGDB Ratings"
     WATCH_PROVIDERS = "watch_providers", "Watch Providers"
     EXTERNAL_IDS = "external_ids", "External IDs"
+    STUDIOS = "studios", "Studios"
+    IMDB_MATCH = "imdb_match", "IMDB Title Match"
+    STATUS = "status", "Status"
+    TVDB_MIGRATION = "tvdb_migration", "TVDB Migration"
 
 
 class MetadataBackfillState(models.Model):
@@ -279,6 +287,20 @@ class Person(models.Model):
     death_date = models.DateField(null=True, blank=True)
     place_of_birth = models.CharField(max_length=255, blank=True, default="")
 
+    # Profile backfill bookkeeping. IMDB's public dataset carries neither image
+    # nor gender, so those are recovered by a name-only TMDB search. Most of
+    # those searches legitimately find nothing, and without a record of "we
+    # already asked" every run re-searched every person forever - ~2000 provider
+    # calls and ~11 minutes of background worker time that changed no row.
+    # 0 means "never completed a lookup".
+    profile_backfill_version = models.PositiveIntegerField(default=0)
+    # The name the completed lookup used. The name is the entire lookup key, so
+    # a corrected name makes the old answer stale.
+    profile_backfill_name = models.CharField(max_length=255, blank=True, default="")
+    # Set only while a transient provider failure is waiting to be retried.
+    profile_backfill_next_retry_at = models.DateTimeField(null=True, blank=True)
+    profile_backfill_fail_count = models.PositiveIntegerField(default=0)
+
     class Meta:
         """Meta options for the model."""
 
@@ -291,6 +313,7 @@ class Person(models.Model):
         ]
         indexes = [
             models.Index(fields=["source", "source_person_id"]),
+            models.Index(fields=["source", "profile_backfill_version"]),
         ]
 
     def __str__(self):

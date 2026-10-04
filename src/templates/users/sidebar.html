@@ -53,7 +53,7 @@
           {% translate "Control which media types are visible throughout the app (sidebar, search, calendar, notifications). Drag cards by their handles to set their sidebar order." %}
         </p>
 
-        {% include "users/components/media_type_picker.html" %}
+        {% include "users/components/media_type_picker.html" with show_discover_toggle=True %}
       </div>
 
       <div class="mt-5 pt-4 border-gray-600">

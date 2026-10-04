@@ -15,6 +15,10 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 _CORRUPTION_HINT = (
     "[entrypoint] The SQLite file may be corrupt (see README: SQLite "
@@ -35,6 +39,12 @@ _MAX_AFFECTED_TITLES = 5
 _REPORT_SUFFIX = ".integrity.json"
 _DECISION_SUFFIX = ".integrity.decision"
 _STATUS_SUFFIX = ".integrity.status.json"
+_VERIFIED_SUFFIX = ".integrity.verified.json"
+# The nightly snapshot re-verifies the database every day, so a record older
+# than two days means snapshots stopped and the startup scan must run again.
+_VERIFIED_FRESH_SECONDS = 48 * 3600.0
+_WARM_CHUNK_BYTES = 8 * 1024 * 1024
+_WARM_REPORT_INTERVAL_SECONDS = 10.0
 _RECOVERY_PAGE_NAME = "floppy-recovery.html"
 _PROGRESS_QUIET_AFTER_SECONDS = 45.0
 # Lock contention and scan duration are different failures and need different
@@ -253,30 +263,165 @@ def write_startup_status(
         _log(f"[entrypoint] Could not publish SQLite startup status: {error}")
 
 
-def read_startup_status(db_path: str) -> dict | None:
-    """Read the startup-status sidecar, or ``None`` if absent or unreadable."""
-    status_path = _status_path(db_path)
+def _read_sidecar(sidecar_path: Path, db_path: str) -> dict | None:
+    """Read a JSON sidecar that names this database, or ``None``."""
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(status_path, flags)
+        descriptor = os.open(sidecar_path, flags)
     except OSError:
         return None
     try:
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
             return None
-        with os.fdopen(descriptor) as status_file:
+        with os.fdopen(descriptor) as sidecar_file:
             descriptor = -1
-            status = json.load(status_file)
+            payload = json.load(sidecar_file)
     except (json.JSONDecodeError, OSError, TypeError, ValueError):
         return None
     finally:
         if descriptor != -1:
             os.close(descriptor)
-    if not isinstance(status, dict) or status.get("database") != str(
+    if not isinstance(payload, dict) or payload.get("database") != str(
         Path(db_path).resolve()
     ):
         return None
-    return status
+    return payload
+
+
+def read_startup_status(db_path: str) -> dict | None:
+    """Read the startup-status sidecar, or ``None`` if absent or unreadable."""
+    return _read_sidecar(_status_path(db_path), db_path)
+
+
+def _verified_path(db_path: str) -> Path:
+    database_path = Path(db_path).resolve()
+    return database_path.with_name(f"{database_path.name}{_VERIFIED_SUFFIX}")
+
+
+def record_verified_database(db_path: str, *, source: str) -> None:
+    """Record that a full storage check of this database just passed.
+
+    ``source`` is ``"startup"`` for the entrypoint's scan or ``"snapshot"`` for
+    the nightly snapshot, whose ``quick_check`` runs on a page-for-page copy
+    read from the live file. The device and inode tie the record to this exact
+    file, so a restored or replaced database never inherits it. Best-effort: a
+    missing record only means the next start runs the full scan.
+    """
+    database_path = Path(db_path).resolve()
+    try:
+        file_stat = database_path.stat()
+        payload = {
+            "commit_sha": os.environ.get("COMMIT_SHA"),
+            "database": str(database_path),
+            "device": file_stat.st_dev,
+            "inode": file_stat.st_ino,
+            "schema_version": 1,
+            "source": source,
+            "verified_at": datetime.now(UTC).isoformat(),
+            "version": os.environ.get("VERSION"),
+        }
+        _publish_report(
+            _verified_path(db_path),
+            json.dumps(payload, sort_keys=True) + "\n",
+            mode=0o644,
+        )
+    except OSError as error:
+        _log(f"[integrity] Could not record the verified database: {error}")
+
+
+def recent_verification(
+    db_path: str,
+    previous_status: dict | None,
+) -> tuple[dict | None, str]:
+    """Return the verification record that lets startup skip the full scan.
+
+    The full scan exists to catch storage damage and relationship conflicts
+    before migrations touch them. It is skipped only while a recent full check
+    still vouches for this exact file under this exact image, and nothing since
+    has cast doubt on it. ``previous_status`` is the startup-status sidecar as
+    the previous start left it, read before this start overwrites it. Returns
+    ``(record, reason)``; ``record`` is ``None`` when the full scan must run,
+    and ``reason`` says why either way.
+    """
+    record = _read_sidecar(_verified_path(db_path), db_path)
+    if record is None:
+        return None, "no verification on record"
+    verified_at = _parse_timestamp(record.get("verified_at"))
+    now = datetime.now(UTC)
+    if verified_at is None or verified_at > now:
+        return None, "verification record has no usable time"
+    age = (now - verified_at).total_seconds()
+    if age > _VERIFIED_FRESH_SECONDS:
+        return None, f"last verification is {age / 3600:.0f}h old"
+    # A local build bakes the placeholder "unknown" (Dockerfile ARG default),
+    # so two different local images would otherwise look identical.
+    commit_sha = (os.environ.get("COMMIT_SHA") or "").strip()
+    if commit_sha.lower() in {"", "unknown", "none"} or record.get("commit_sha") != commit_sha:
+        return None, "the image changed since the last verification"
+    try:
+        file_stat = Path(db_path).resolve().stat()
+    except OSError as error:
+        return None, f"database could not be inspected: {error}"
+    if (record.get("device"), record.get("inode")) != (
+        file_stat.st_dev,
+        file_stat.st_ino,
+    ):
+        return None, "the database file was replaced since the last verification"
+    report = _read_incident_report(db_path)
+    if report and report.get("status") != "resolved":
+        return None, f"a recovery report is {report.get('status')}"
+    if previous_status and previous_status.get("status") != "ok":
+        return None, (
+            f"the previous startup check ended as {previous_status.get('status')}"
+        )
+    return record, (
+        f"verified by {record.get('source', 'unknown')} at {record['verified_at']}"
+    )
+
+
+def warm_database_cache(
+    db_path: str,
+    *,
+    on_progress: Callable[[int], None] | None = None,
+) -> tuple[int, float]:
+    """Read the database and its WAL front to back, once, before the scan.
+
+    ``PRAGMA quick_check`` walks b-trees, so on a large, long-lived file it
+    issues hundreds of thousands of small reads scattered across the disk.
+    Slow storage (a NAS, a spinning disk) serves those at a few hundred per
+    second, which turns a one-minute check into a many-minute one. One
+    sequential pass is the fastest way a disk can deliver the same bytes, and
+    it leaves them in the page cache for the scan to read from memory. The
+    scan reads every page anyway, so this changes the order of the reads, not
+    how much is cached.
+
+    Best-effort: a read error ends the warm-up early and the scan runs as it
+    always did. Returns the bytes read and the seconds it took.
+    """
+    started = time.monotonic()
+    last_report = started
+    total = 0
+    buffer = bytearray(_WARM_CHUNK_BYTES)
+    for path in (Path(db_path), Path(f"{db_path}-wal")):
+        try:
+            with path.open("rb", buffering=0) as source:
+                advise = getattr(os, "posix_fadvise", None)
+                sequential = getattr(os, "POSIX_FADV_SEQUENTIAL", None)
+                if advise is not None and sequential is not None:
+                    with suppress(OSError):
+                        advise(source.fileno(), 0, 0, sequential)
+                while count := source.readinto(buffer):
+                    total += count
+                    now = time.monotonic()
+                    if on_progress and now - last_report >= _WARM_REPORT_INTERVAL_SECONDS:
+                        on_progress(total)
+                        last_report = now
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            _log(f"[integrity] Cache warm-up stopped early at {path.name}: {error}")
+            break
+    return total, time.monotonic() - started
 
 
 def _live_elapsed_text(status: dict) -> str:
@@ -381,7 +526,7 @@ def _format_seconds(value: object) -> str:
     return f"{value:.0f}s" if isinstance(value, int | float) else "unknown"
 
 
-def print_startup_heartbeat(db_path: str) -> None:
+def print_startup_heartbeat(db_path: str, extra: str = "") -> None:
     """Emit one operator heartbeat line from the startup-status sidecar.
 
     Called periodically by the entrypoint while the scan runs, in place of the
@@ -390,7 +535,8 @@ def print_startup_heartbeat(db_path: str) -> None:
     """
     status = read_startup_status(db_path)
     if status is None:
-        _log("[entrypoint] SQLite integrity scan heartbeat: still running")
+        suffix = f" {extra}" if extra else ""
+        _log(f"[entrypoint] SQLite integrity scan heartbeat: still running{suffix}")
         return
     phase = status.get("phase", "unknown")
     diagnostics = startup_progress_diagnostics(status)
@@ -415,24 +561,33 @@ def print_startup_heartbeat(db_path: str) -> None:
         else " last_progress=unknown"
     )
     detail += f" progress_state={diagnostics['progress_state']}"
+    if extra:
+        detail += f" {extra}"
     _log(f"[entrypoint] SQLite integrity scan heartbeat: {detail}")
 
 
-def mark_startup_status_timeout(db_path: str, timeout_seconds: float) -> None:
+def mark_startup_status_timeout(
+    db_path: str,
+    timeout_seconds: float,
+    *,
+    reason: str | None = None,
+    read_bytes: int | None = None,
+) -> None:
     """Ensure the sidecar reflects a timeout even if the scanner was killed.
 
-    Also logs the last observed phase/elapsed/bytes. The entrypoint's
-    external ``timeout`` wrapper can SIGKILL the scanner
-    before it publishes its own terminal status, so this is called from the
-    shell immediately after that happens. It preserves whatever the scanner
-    last reported and only fills in what is missing.
+    Also logs the last observed phase/elapsed/bytes. The startup watchdog
+    stops the scanner before it can publish its own terminal status, so the
+    watchdog calls this immediately after. It preserves whatever the scanner
+    last reported and only fills in what is missing. ``reason`` says why the
+    scan was stopped; ``read_bytes`` is what the watchdog saw it read.
     """
     previous = read_startup_status(db_path) or {}
     phase = previous.get("phase", "unknown")
     elapsed = previous.get("elapsed_seconds")
     elapsed = float(elapsed) if isinstance(elapsed, int | float) else float(timeout_seconds)
     elapsed = max(elapsed, float(timeout_seconds))
-    read_bytes = previous.get("read_bytes")
+    if read_bytes is None:
+        read_bytes = previous.get("read_bytes")
     progress_callbacks = previous.get("progress_callbacks")
     phase_started_at = previous.get("phase_started_at")
     last_progress_at = previous.get("last_progress_at")
@@ -447,7 +602,7 @@ def mark_startup_status_timeout(db_path: str, timeout_seconds: float) -> None:
         phase_started_at=phase_started_at,
         last_progress_at=last_progress_at,
         error_class="timeout",
-        error_message=f"scan exceeded {timeout_seconds:g}s",
+        error_message=reason or f"scan exceeded {timeout_seconds:g}s",
         version=previous.get("version") or os.environ.get("VERSION"),
         commit_sha=previous.get("commit_sha") or os.environ.get("COMMIT_SHA"),
     )
@@ -472,9 +627,10 @@ def mark_startup_status_timeout(db_path: str, timeout_seconds: float) -> None:
         else " last_progress=unknown"
     )
     detail += f" progress_state={diagnostics['progress_state']}"
+    because = f" ({reason})" if reason else ""
     _log(
         "[entrypoint] SQLite integrity scan timed out after "
-        f"{timeout_seconds:g}s; last observed {detail}",
+        f"{timeout_seconds:g}s{because}; last observed {detail}",
     )
 
 
@@ -909,6 +1065,41 @@ def create_live_database_snapshot(
         return None
 
 
+def _release_page_cache(descriptor: int, name: str) -> str:
+    """Ask the kernel to drop a written-and-durable file's page cache.
+
+    A snapshot of a multi-GiB database is charged to the container twice
+    over: once as it is written, and again as ``PRAGMA quick_check`` reads
+    every page back. Both land in the cgroup's *file* accounting, and nothing
+    in Floppy reads a snapshot again -- it exists for the day the live
+    database is unreadable. Until then those pages are cache the container is
+    paying for and nobody is using.
+
+    This is advisory in both directions. ``POSIX_FADV_DONTNEED`` drops only
+    *clean* pages, so it is issued strictly after ``fsync``: dirty pages are
+    left alone by the kernel, which means the hint can never cost durability
+    however it is timed. It is also never applied to the live database -- that
+    file's cache is doing useful work. And the file itself is untouched: no
+    truncate, no unlink, only a hint about the cache in front of it.
+
+    Returns "issued", "unsupported" (no ``posix_fadvise`` on this platform) or
+    "failed". Never raises: a hint that did not take must not turn a good
+    backup into a failed one.
+    """
+    advise = getattr(os, "posix_fadvise", None)
+    dontneed = getattr(os, "POSIX_FADV_DONTNEED", None)
+    if advise is None or dontneed is None:
+        return "unsupported"
+    try:
+        # offset 0, length 0 means "the whole file", including anything
+        # appended after this descriptor was opened.
+        advise(descriptor, 0, 0, dontneed)
+    except OSError as error:
+        _log(f"[db-snapshot] Could not release page cache for {name}: {error}")
+        return "failed"
+    return "issued"
+
+
 def _write_live_snapshot(
     database_path: Path,
     dest_dir: Path,
@@ -972,11 +1163,17 @@ def _write_live_snapshot(
                 os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
                 dir_fd=dest_descriptor,
             )
+            advice = "skipped"
             try:
                 if not stat.S_ISREG(os.fstat(staging_check).st_mode):
                     message = "snapshot staging path is not a regular file"
                     raise OSError(message)
+                snapshot_bytes = os.fstat(staging_check).st_size
                 os.fsync(staging_check)
+                # Strictly after fsync, and before the descriptor closes:
+                # the pages are clean now, so the kernel can actually drop
+                # them, and the hint needs a descriptor to name the file.
+                advice = _release_page_cache(staging_check, final_name)
             finally:
                 os.close(staging_check)
 
@@ -998,9 +1195,16 @@ def _write_live_snapshot(
             os.unlink(staging_name, dir_fd=dest_descriptor)
             os.fsync(dest_descriptor)
             succeeded = True
+            # The copy passed quick_check page for page, so it vouches for the
+            # live file it was read from and lets the next start skip the scan.
+            record_verified_database(str(database_path), source="snapshot")
             # Prune after the new copy is in place, never before -- see the
             # matching comment on the _create_verified_backup call site.
             _prune_recovery_backups(dest_dir, max_keep=max_keep)
+            _log(
+                f"[db-snapshot] page_cache_release path={final_name} "
+                f"bytes={snapshot_bytes} advice={advice}",
+            )
             return dest_dir / final_name
         finally:
             if destination is not None:
@@ -1472,6 +1676,7 @@ def inspect_database(db_path: str, *, timeout_seconds: float | None = None) -> d
     if timeout_seconds is not None:
         deadline = time.monotonic() + timeout_seconds
     try:
+        warm_database_cache(db_path)
         conn = sqlite3.connect(db_path, timeout=_SCAN_BUSY_TIMEOUT_SECONDS)
         if deadline is not None:
             # Returning non-zero from the handler aborts the running statement.

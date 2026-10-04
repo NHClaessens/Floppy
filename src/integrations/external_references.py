@@ -72,10 +72,30 @@ def plex_identity(metadata, *, show=False):
     guids = metadata.get("Guid") or metadata.get("guid") or []
     if isinstance(guids, (str, dict)):
         guids = [guids]
-    for guid in guids:
-        value = guid.get("id") if isinstance(guid, dict) else guid
-        if isinstance(value, str) and value.lower().startswith("plex://"):
+    guid_values = [
+        guid.get("id") if isinstance(guid, dict) else guid for guid in guids
+    ]
+    guid_values = [value for value in guid_values if isinstance(value, str)]
+
+    for value in guid_values:
+        if value.lower().startswith("plex://"):
             return "plex_guid", value
+
+    # No ratingKey and no plex:// guid — common for a library matched
+    # through an external metadata agent (see the many webhook test
+    # fixtures that only carry imdb/tvdb/tmdb Guids). Without a stable
+    # identity here, every event re-runs its own resolution independently
+    # instead of reusing what an earlier event in the same viewing already
+    # matched, and an occasional title-search drift can then attach a
+    # second, unrelated show to what is really one watch. Sorting picks a
+    # deterministic entry even if Plex varies the array order between
+    # events for the same item. See #1181.
+    provider_guids = sorted(
+        value for value in guid_values if not value.lower().startswith("plex://")
+    )
+    if provider_guids:
+        return "plex_provider_guid", provider_guids[0]
+
     return None
 
 

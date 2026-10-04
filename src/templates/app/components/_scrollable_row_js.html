@@ -255,6 +255,18 @@
     loadVisibleReleaseYears();
     initHomeRowInfiniteScroll();
     initActivePlaybackTicker();
+    scheduleActivePlaybackPoll();
+  }
+
+  function scheduleActivePlaybackPoll(delay = 10000) {
+    const container = document.getElementById('active-playback-container');
+    if (!container || container._playbackPending || container._playbackPollTimer) return;
+    container._playbackPollTimer = setTimeout(() => {
+      container._playbackPollTimer = null;
+      if (container.isConnected && !container._playbackPending) {
+        htmx.trigger(container, 'playback-poll');
+      }
+    }, delay);
   }
 
   if (document.readyState === 'loading') {
@@ -270,6 +282,12 @@
 
   document.body.addEventListener('htmx:beforeRequest', function(event) {
     const row = event.detail.elt;
+    if (row && row.id === 'active-playback-container') {
+      clearTimeout(row._playbackPollTimer);
+      row._playbackPollTimer = null;
+      row._playbackPending = true;
+      row._playbackStarted = performance.now();
+    }
     if (row && row.matches('[data-home-row="true"]')) {
       row.dataset.loading = 'true';
       row.dataset.pendingOffset = row.dataset.loadedCount || '0';
@@ -278,11 +296,24 @@
 
   document.body.addEventListener('htmx:afterRequest', function(event) {
     const row = event.detail.elt;
+    if (row && row.id === 'active-playback-container') {
+      row._playbackPending = false;
+      const slow = performance.now() - row._playbackStarted >= 10000;
+      const failed = !event.detail.successful;
+      row._playbackBackoff = slow || failed
+        ? Math.min(30000, (row._playbackBackoff || 10000) * 2)
+        : 10000;
+      scheduleActivePlaybackPoll(row._playbackBackoff);
+    }
     if (row && row.matches('[data-home-row="true"]')) {
       const xhr = event.detail.xhr;
       const freshTotal = xhr && xhr.getResponseHeader('X-Home-Row-Total');
       if (freshTotal !== null && freshTotal !== undefined) {
         row.dataset.totalCount = freshTotal;
+      }
+      const freshSeed = xhr && xhr.getResponseHeader('X-Home-Row-Seed');
+      if (freshSeed !== null && freshSeed !== undefined) {
+        row.dataset.seed = freshSeed;
       }
       row.dataset.loading = 'false';
     }

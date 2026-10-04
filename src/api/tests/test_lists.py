@@ -612,6 +612,30 @@ class ListsTests(FloppyApiTestCase):
         self.assertIn("results", payload)
         check_pagination_structure(self, payload["pagination"])
 
+    def test_list_items_default_order_preserves_custom_list_order(self):
+        """List item reads should preserve the persisted custom order."""
+        custom_list = self.lists_by_name["favorites"]
+        list_items = list(
+            CustomListItem.objects.filter(custom_list=custom_list).order_by("pk"),
+        )
+        now = timezone.now()
+        for index, list_item in enumerate(reversed(list_items)):
+            list_item.date_added = now + timezone.timedelta(seconds=index)
+        CustomListItem.objects.bulk_update(list_items, ["date_added"])
+
+        response = self.call_api(
+            "get",
+            "api_list_add_item",
+            args=(custom_list.id,),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            [item["item"]["media_id"] for item in response.json()["results"]],
+            ["2001", "1001", "701"],
+        )
+
     def test_list_items_sort_filter_returns_sorted_results(self):
         """List items endpoint should sort items when requested."""
         custom_list = self.lists_by_name["favorites"]

@@ -15,9 +15,11 @@ from dataclasses import dataclass
 from django.db import transaction
 from django.utils import timezone
 
-from app.models import Item, MediaTypes, Sources
+from app import history_cache
+from app.models import TV, Episode, Item, MediaTypes, Season, Sources
 from app.providers import tmdb, tvdb
 from app.services import item_merge
+from app.tasks_backfill_state import reset_backfill_state_for_identity_change
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +41,18 @@ def _resolve_tvdb_id(item: Item) -> str | None:
 
 
 def _local_season_items(item: Item) -> list[Item]:
+    # `migrate_tv_item_to_tvdb` only reaches here for non-anime items (grouped
+    # anime is bailed out on earlier), so exclude the anime bucket the same
+    # way `_scoped_season_item_qs()` does in season_details_views.py — a
+    # season/episode row's own library_media_type defaults to its media_type,
+    # not the show's, so matching `item.library_media_type` verbatim would
+    # exclude the show's own seasons/episodes.
     return list(
         Item.objects.filter(
             media_id=item.media_id,
             source=Sources.TMDB.value,
             media_type=MediaTypes.SEASON.value,
-        ),
+        ).exclude(library_media_type=MediaTypes.ANIME.value),
     )
 
 
@@ -55,7 +63,7 @@ def _local_episode_items(item: Item, season_numbers: list[int]) -> list[Item]:
             source=Sources.TMDB.value,
             media_type=MediaTypes.EPISODE.value,
             season_number__in=season_numbers,
-        ),
+        ).exclude(library_media_type=MediaTypes.ANIME.value),
     )
 
 
@@ -118,6 +126,85 @@ def _existing_tvdb_item(
     )
 
 
+def _tvdb_episode_payloads(tvdb_payload: dict) -> dict[tuple[int, int], dict]:
+    """Index normalized TVDB episode payloads by season and episode number."""
+    episode_payloads = {}
+    for season_key, season_payload in tvdb_payload.items():
+        if not season_key.startswith("season/") or not isinstance(season_payload, dict):
+            continue
+        try:
+            season_number = int(season_key.split("/", 1)[1])
+        except (IndexError, TypeError, ValueError):
+            continue
+        for episode_payload in season_payload.get("episodes") or []:
+            episode_number = episode_payload.get("episode_number")
+            if episode_number is not None:
+                episode_payloads[(season_number, episode_number)] = episode_payload
+    return episode_payloads
+
+
+def _apply_episode_title(episode_item: Item, episode_payload: dict) -> list[str]:
+    """Apply a usable provider episode title without erasing existing fields."""
+    title_fields = Item.title_fields_from_episode_metadata(episode_payload)
+    if not title_fields["title"]:
+        return []
+
+    changed_fields = [
+        field
+        for field, value in title_fields.items()
+        if getattr(episode_item, field) != value
+    ]
+    for field, value in title_fields.items():
+        setattr(episode_item, field, value)
+    return changed_fields
+
+
+def _user_ids_for_items(items: list[Item]) -> set[int]:
+    """Return users whose TV history can reference any of the given Items."""
+    item_ids = {item.pk for item in items if item is not None and item.pk}
+    if not item_ids:
+        return set()
+
+    user_ids = set(
+        TV.objects.filter(item_id__in=item_ids).values_list("user_id", flat=True),
+    )
+    user_ids.update(
+        Season.objects.filter(item_id__in=item_ids).values_list(
+            "user_id",
+            flat=True,
+        ),
+    )
+    user_ids.update(
+        Episode.objects.filter(item_id__in=item_ids).values_list(
+            "related_season__user_id",
+            flat=True,
+        ),
+    )
+    return user_ids
+
+
+def _invalidate_history_for_users(user_ids: tuple[int, ...]) -> None:
+    """Clear and rebuild history caches after provider identity changes."""
+    from app import statistics_cache
+
+    for user_id in user_ids:
+        history_cache.invalidate_history_cache(user_id, force=True)
+        # Titles and runtimes in every day payload may have changed with the
+        # provider identity.
+        statistics_cache.invalidate_all_statistics_days(
+            user_id, reason="tv_provider_migration"
+        )
+
+
+def _schedule_history_invalidation(user_ids: set[int]) -> None:
+    """Run history invalidation only after the surrounding migration commits."""
+    if user_ids:
+        user_ids_tuple = tuple(sorted(user_ids))
+        transaction.on_commit(
+            lambda: _invalidate_history_for_users(user_ids_tuple),
+        )
+
+
 def _pin(item: Item, reason: str) -> TvMigrationResult:
     item.metadata_migration_pinned_at = timezone.now()
     item.save(update_fields=["metadata_migration_pinned_at"])
@@ -147,6 +234,9 @@ def _merge_into_existing_tvdb_show(
     Seasons/episodes without an existing TVDB counterpart are re-keyed in
     place as usual.
     """
+    episode_payloads = _tvdb_episode_payloads(tvdb_payload)
+    user_ids = _user_ids_for_items([item, existing_show, *local_seasons, *local_episodes])
+
     with transaction.atomic():
         item_merge.merge_item(item, existing_show)
 
@@ -159,6 +249,7 @@ def _merge_into_existing_tvdb_show(
                 exclude_pk=season.pk,
             )
             if existing_season is not None:
+                user_ids.update(_user_ids_for_items([existing_season]))
                 item_merge.merge_item(season, existing_season)
                 continue
             season_payload = tvdb_payload.get(f"season/{season.season_number}") or {}
@@ -176,12 +267,36 @@ def _merge_into_existing_tvdb_show(
                 episode_number=episode.episode_number,
                 exclude_pk=episode.pk,
             )
+            episode_payload = episode_payloads.get(
+                (episode.season_number, episode.episode_number),
+            )
             if existing_episode is not None:
+                user_ids.update(_user_ids_for_items([existing_episode]))
                 item_merge.merge_item(episode, existing_episode)
+                if episode_payload is not None:
+                    changed_fields = _apply_episode_title(
+                        existing_episode,
+                        episode_payload,
+                    )
+                    if changed_fields:
+                        existing_episode.save(update_fields=changed_fields)
                 continue
             episode.media_id = tvdb_id
             episode.source = Sources.TVDB.value
-            episode.save(update_fields=["media_id", "source"])
+            update_fields = ["media_id", "source"]
+            if episode_payload is not None:
+                update_fields.extend(_apply_episode_title(episode, episode_payload))
+            episode.save(update_fields=update_fields)
+
+        # Every backfill verdict recorded against the old TMDB id described
+        # that id, not these rows. Clear them so migrated items become
+        # candidates again instead of inheriting a "this id does not
+        # exist" give-up.
+        reset_backfill_state_for_identity_change(
+            Item.objects.filter(source=Sources.TVDB.value, media_id=tvdb_id),
+        )
+
+        _schedule_history_invalidation(user_ids)
 
     logger.info(
         "Merged duplicate TV item %s into existing TVDB item %s (%s)",
@@ -268,6 +383,9 @@ def migrate_tv_item_to_tvdb(item: Item) -> TvMigrationResult:
         ):
             return _pin(item, "a separate episode item already exists under TVDB")
 
+    episode_payloads = _tvdb_episode_payloads(tvdb_payload)
+    user_ids = _user_ids_for_items([item, *local_seasons, *local_episodes])
+
     with transaction.atomic():
         item.media_id = tvdb_id
         item.source = Sources.TVDB.value
@@ -285,7 +403,23 @@ def migrate_tv_item_to_tvdb(item: Item) -> TvMigrationResult:
         for episode in local_episodes:
             episode.media_id = tvdb_id
             episode.source = Sources.TVDB.value
-            episode.save(update_fields=["media_id", "source"])
+            update_fields = ["media_id", "source"]
+            episode_payload = episode_payloads.get(
+                (episode.season_number, episode.episode_number),
+            )
+            if episode_payload is not None:
+                update_fields.extend(_apply_episode_title(episode, episode_payload))
+            episode.save(update_fields=update_fields)
+
+        # Every backfill verdict recorded against the old TMDB id described
+        # that id, not these rows. Clear them so migrated items become
+        # candidates again instead of inheriting a "this id does not
+        # exist" give-up.
+        reset_backfill_state_for_identity_change(
+            Item.objects.filter(source=Sources.TVDB.value, media_id=tvdb_id),
+        )
+
+        _schedule_history_invalidation(user_ids)
 
     logger.info(
         "Migrated TV item %s to TVDB %s (%s)",

@@ -5,6 +5,7 @@ from datetime import datetime, time, timedelta
 from urllib.parse import quote, urlparse
 from uuid import uuid4
 
+import requests
 from django.apps import apps
 from django.conf import settings
 from django.contrib import messages
@@ -21,6 +22,7 @@ from app import cache_utils, fork_services_episode, helpers, history_cache
 from app.activity_builders import _build_detail_activity_state
 from app.discover import tab_cache as discover_tab_cache
 from app.forms import EpisodeForm, get_form_class
+from app.history_processor import USER_EDIT_REASON
 from app.models import (
     TV,
     BasicMedia,
@@ -34,6 +36,7 @@ from app.models import (
     Status,
 )
 from app.providers import services
+from app.request_timing import boundary
 from app.services import metadata_resolution
 from app.services.episode_coordinates import (
     InvalidEpisodeCoordinateError,
@@ -202,16 +205,51 @@ def media_save(request):
         )
     else:
         try:
-            hydrated = ensure_item_metadata(
-                request.user,
+            with boundary("media_save_hydrate"):
+                hydrated = ensure_item_metadata(
+                    request.user,
+                    media_type,
+                    media_id,
+                    source,
+                    season_number,
+                    identity_media_type=identity_media_type,
+                    library_media_type=library_media_type,
+                    edition_id=(request.POST.get("edition_id") or "").strip() or None,
+                )
+        except services.ProviderNotConfiguredError:
+            # Setup guidance is rendered by the provider-error middleware.
+            raise
+        except services.ProviderAPIError as error:
+            # A provider that no longer has the title, or is down, is a failed
+            # save the user can read about, not a server error.
+            logger.warning(
+                "First-save metadata hydration hit a provider error for "
+                "media_type=%s source=%s media_id=%s status=%s user_id=%s",
                 media_type,
-                media_id,
                 source,
-                season_number,
-                identity_media_type=identity_media_type,
-                library_media_type=library_media_type,
-                edition_id=(request.POST.get("edition_id") or "").strip() or None,
+                media_id,
+                error.status_code,
+                request.user.id,
             )
+            if error.status_code == requests.codes.not_found:
+                message = gettext(
+                    "%(provider)s no longer has this title, so it can't be saved."
+                ) % {"provider": error.provider_label}
+            else:
+                message = gettext(
+                    "%(provider)s did not respond. Please try saving again."
+                ) % {"provider": error.provider_label}
+            if request.headers.get("HX-Request"):
+                # htmx follows a redirect and would swap the whole page in, and
+                # the messages framework is never rendered for it, so answer
+                # with a toast. It does not swap a non-2xx body.
+                response = HttpResponse(status=502)
+                response["HX-Trigger"] = json.dumps(
+                    {"showToast": {"message": message, "type": "error"}},
+                )
+                return response
+            messages.error(request, message)
+            return helpers.redirect_back(request)
         except Exception:
             logger.exception(
                 "First-save metadata hydration failed for "
@@ -254,24 +292,38 @@ def media_save(request):
         if not instance_id
         else pgettext("saved action", "Updated")
     )
-    if form.is_valid():
+    with boundary("media_save_validate"):
+        valid = form.is_valid()
+    if valid:
         if isinstance(instance, (Season, TV)):
             media = form.save(commit=False)
             media._pending_end_date = form.cleaned_data.get("end_date")
-            media.save()
+            # Recorded in history so an automatic change can be told apart
+            # from the user's own edit (#1133).
+            media._change_reason = USER_EDIT_REASON
+            with boundary("media_save_persist"):
+                media.save()
             if (
                 isinstance(media, Season)
                 and old_status == Status.COMPLETED.value
                 and media.status == Status.IN_PROGRESS.value
-                and media.rewatch_started_at is None
             ):
                 # The status dropdown is the only "reopen" affordance there
                 # is - treat it as starting a rewatch pass so a season with
                 # historical repeat plays can still complete normally, see #929.
+                # Deliberately bypasses start_rewatch's "a pass is already
+                # open" no-op: an explicit Completed -> In progress reopen is
+                # the user asking for a new pass from now, so the cutoff has to
+                # move. Only reachable from that transition - any future caller
+                # reaching this with an open pass would strand plays logged
+                # against the original cutoff as pre-cutoff history.
+                if media.rewatch_started_at is not None:
+                    media.rewatch_started_at = None
                 with contextlib.suppress(RewatchAlreadyCompleteError):
                     media.start_rewatch()
         else:
-            media = form.save()
+            with boundary("media_save_persist"):
+                media = form.save()
         if (
             media_type == MediaTypes.BOOK.value
             and "koreader_document_id" in request.POST
@@ -302,7 +354,8 @@ def media_save(request):
                             "That KOReader document ID is already linked to another book."
                         ),
                     )
-        BasicMedia.objects.annotate_max_progress([media], media_type)
+        with boundary("media_save_progress"):
+            BasicMedia.objects.annotate_max_progress([media], media_type)
         image_url = form.cleaned_data.get("image_url")
         if image_url and media.item.image != image_url:
             media.item.image = image_url
@@ -387,6 +440,10 @@ def media_save(request):
                     {
                         "media_instance_id": media.id,
                         "rating_value": media.formatted_score,
+                        "rate_url": reverse(
+                            "update_media_score",
+                            args=[media.item.media_type, media.id],
+                        ),
                         "user": request.user,
                     },
                     request=request,
@@ -993,7 +1050,8 @@ def episode_save(request):
         fallback_media_type=MediaTypes.TV.value,
     )
 
-    instance_id = request.POST.get("instance_id")
+    save_as_new_entry = request.POST.get("save_as_new_entry") == "1"
+    instance_id = None if save_as_new_entry else request.POST.get("instance_id")
     episode_instance = None
     if instance_id:
         episode_instance = BasicMedia.objects.get_media(
@@ -1043,10 +1101,13 @@ def episode_save(request):
             library_media_type=library_media_type,
         )
         try:
+            watch_operation_id = form.cleaned_data.get("watch_operation_id")
+            if save_as_new_entry and not watch_operation_id:
+                watch_operation_id = uuid4()
             result = related_season.watch(
                 episode_number,
                 form.cleaned_data.get("end_date"),
-                watch_operation_id=form.cleaned_data.get("watch_operation_id"),
+                watch_operation_id=watch_operation_id,
                 score=form.cleaned_data.get("score"),
                 status=form.cleaned_data.get("status") or Status.COMPLETED.value,
                 start_date=form.cleaned_data.get("start_date"),

@@ -93,7 +93,7 @@ def save_events(events_bulk):
         if event.content_number is not None
     }
     existing_without_content = {
-        event.item_id: event
+        (event.item_id, event.release_type, event.region): event
         for event in existing_events
         if event.content_number is None
     }
@@ -112,8 +112,10 @@ def save_events(events_bulk):
                 to_update.append(existing_event)
             else:
                 to_create.append(event)
-        elif event.item_id in existing_without_content:
-            existing_event = existing_without_content[event.item_id]
+        elif (key := (event.item_id, event.release_type, event.region)) in (
+            existing_without_content
+        ):
+            existing_event = existing_without_content[key]
             existing_event.datetime = event.datetime
             to_update.append(existing_event)
         else:
@@ -184,6 +186,37 @@ def cleanup_invalid_events(events_bulk):
             )
             events_to_delete.append(event.id)
 
+    events_to_delete.extend(stale_release_type_event_ids(events_bulk))
+
     if events_to_delete:
         deleted_count = Event.objects.filter(id__in=events_to_delete).delete()[0]
         logger.info("Deleted %s invalid events for updated items", deleted_count)
+
+
+def stale_release_type_event_ids(events_bulk):
+    """Return ids of digital/physical events a refreshed movie no longer has.
+
+    That covers a date TMDB removed and a user who changed region or stopped
+    tracking. Movies the refresh skipped are left alone.
+    """
+    movie_item_ids = {
+        event.item_id
+        for event in events_bulk
+        if event.content_number is None
+        and not event.release_type
+        and event.item.media_type == MediaTypes.MOVIE.value
+    }
+    kept = {
+        (event.item_id, event.release_type, event.region)
+        for event in events_bulk
+        if event.release_type
+    }
+    return [
+        event_id
+        for event_id, item_id, release_type, region in Event.objects.filter(
+            item_id__in=movie_item_ids,
+        )
+        .exclude(release_type="")
+        .values_list("id", "item_id", "release_type", "region")
+        if (item_id, release_type, region) not in kept
+    ]

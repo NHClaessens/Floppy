@@ -1,5 +1,11 @@
 import contextlib
+import logging
+from datetime import timedelta
 from io import BytesIO
+
+from django.conf import settings
+from django.db.models import Q
+from django.utils import timezone
 
 from app.log_safety import exception_summary
 from app.models import MediaTypes
@@ -8,13 +14,19 @@ from integrations import plex as plex_api
 from integrations.imports import helpers
 from integrations.upload_staging import open_import_file
 
+logger = logging.getLogger(__name__)
+
 ERROR_TITLE = "\n\n\n Couldn't import the following media: \n\n"
 IMPORT_COUNT_METRIC_KEYS = frozenset(
     {
         "created",
+        "failed",
+        "rejected",
         "updated",
         "skipped",
+        "skipped_ignored",
         "skipped_missing_ids",
+        "skipped_numbering_mismatch",
         "skipped_existing",
         "skipped_unknown_type",
         "skipped_other_user",
@@ -55,6 +67,49 @@ def _coerce_uploaded_file(file):
     raise TypeError(msg)
 
 
+# Last.fm and Koito backfills reschedule themselves across many task
+# invocations, so one run legitimately outlives any single task's time limit.
+SELF_RESCHEDULING_IMPORT_SOURCES = ("lastfm", "koito")
+
+# Stremio imports set their own limits, which can exceed a lowered global one.
+STREMIO_IMPORT_SOFT_TIME_LIMIT = 20 * 60
+STREMIO_IMPORT_TIME_LIMIT = 30 * 60
+
+
+def close_abandoned_import_runs():
+    """Mark import runs FAILED once their task can no longer be running.
+
+    A hard time limit or a container restart kills the task without running
+    any of its code, so its ImportRun would read "running" for ever. A run
+    older than the task time limit plus a margin cannot still be alive.
+    """
+    from integrations.imports.durable import recover_outboxes
+    from integrations.models import ImportRun
+
+    recover_outboxes()
+
+    time_limit = settings.CELERY_TASK_TIME_LIMIT
+    if not time_limit:
+        return 0
+    time_limit = max(time_limit, STREMIO_IMPORT_TIME_LIMIT)
+    now = timezone.now()
+    closed = (
+        ImportRun.objects.filter(
+            status=ImportRun.Status.RUNNING,
+            started_at__lt=now - timedelta(seconds=time_limit + 300),
+        ).filter(Q(lease_expires_at__isnull=True) | Q(lease_expires_at__lte=now))
+        .exclude(source__in=SELF_RESCHEDULING_IMPORT_SOURCES)
+        .update(status=ImportRun.Status.FAILED, finished_at=now)
+    )
+    if closed:
+        logger.warning(
+            "Marked %s import run(s) failed: still running past the task time "
+            "limit, so the worker was killed or restarted mid-import",
+            closed,
+        )
+    return closed
+
+
 def _run_file_import(importer_func, file, user_id, mode, **extra_kwargs):
     """Run a file-backed importer while cleaning staged task payloads."""
     from integrations.tasks._media_imports import import_media
@@ -86,12 +141,7 @@ def import_run_counts(imported_counts):
 def has_imported_media(imported_counts):
     """Return whether an importer run changed any media rows."""
     created, updated = import_run_counts(imported_counts)
-    if (
-        imported_counts.get("created") is not None
-        or imported_counts.get("updated") is not None
-    ):
-        return created + updated > 0
-    return any(imported_counts.values())
+    return created + updated > 0
 
 
 def format_media_type_display(count, media_type):

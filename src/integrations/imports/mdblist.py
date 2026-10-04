@@ -16,6 +16,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 import requests
+from django.utils import timezone
 from django.utils.dateparse import parse_datetime
 from simple_history.utils import bulk_update_with_history
 
@@ -24,7 +25,7 @@ from app.models import MediaTypes, Sources, Status
 from app.providers import services, tmdb
 from integrations import import_progress
 from integrations.imports import helpers
-from integrations.imports.helpers import MediaImportError
+from integrations.imports.helpers import ConnectionAuthError, MediaImportError
 from integrations.imports.trakt import TraktMetadataResolverMixin
 
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def request(api_key, path, params=None):
         status_code = getattr(error.response, "status_code", None)
         if status_code in (401, 403):
             msg = "MDBList API key is invalid or revoked."
-            raise MediaImportError(msg) from error
+            raise ConnectionAuthError(msg) from error
         raise
 
 
@@ -982,7 +983,10 @@ class MDBListImporter(TraktMetadataResolverMixin):
                 item__episode_number=episode_number,
             )
             if episodes.exists():
-                episodes.update(score=scaled_score)
+                episodes.exclude(score=scaled_score).update(
+                    score=scaled_score,
+                    scored_at=timezone.now(),
+                )
                 return
 
         ep_key = f"{tmdb_id}:{season_number}:{episode_number}"

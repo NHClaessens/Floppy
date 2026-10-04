@@ -1,4 +1,16 @@
-from config.runtime_profile import PROFILE, by_tier, gunicorn_threads, web_concurrency
+import gc
+import logging.handlers
+import os
+import time
+
+from config.runtime_profile import (
+    PROFILE,
+    by_tier,
+    gunicorn_max_worker_memory_bytes,
+    gunicorn_threads,
+    web_concurrency,
+    web_concurrency_warning,
+)
 
 bind = "localhost:8001"
 preload_app = True
@@ -21,10 +33,135 @@ max_requests = by_tier(200, 300, 500)
 max_requests_jitter = 10
 timeout = by_tier(120, 200, 200)
 
+# A request ceiling alone does not bound a worker. Floppy's expensive pages --
+# the talent fragment, a details page, a large media list -- cost hundreds of
+# times an ordinary request, so a worker can grow for hours without reaching
+# the count. Production showed one worker at 567 MiB of private memory after
+# three hours, never recycled, because real traffic had not yet served 500
+# requests. Celery already bounds its children by RSS; this is the same bound
+# for the web worker, checked after the response so no request is ever failed
+# by it.
+# Sized from a measured fresh worker, not a guess: with preload_app one starts
+# at 109-136 MiB RSS, because RSS counts the shared application image it was
+# forked from. A ceiling near that retires workers as fast as they start -- a
+# 120 MiB ceiling produced 30 workers in six minutes, none older than 16s.
+max_worker_memory_bytes = gunicorn_max_worker_memory_bytes()
+# However the ceiling is set, a worker must earn its keep before it can be
+# retired for size. Without this a misconfigured ceiling below the starting
+# size is a restart loop -- every worker crosses it on its first request -- and
+# the symptom (workers churning, latency spikes) points nowhere near the cause.
+#
+# The floor is a lifetime, not only a request count. A count alone is no
+# protection under load: at four concurrent clients a worker reaches 50
+# requests in about two seconds, and a 120 MiB ceiling still produced 42
+# workers in thirteen minutes. A minute of life bounds the respawn rate
+# whatever the request rate is.
+MINIMUM_REQUESTS_BEFORE_RETIREMENT = 50
+MINIMUM_SECONDS_BEFORE_RETIREMENT = 60
+_PAGE_SIZE = os.sysconf("SC_PAGE_SIZE")
+
+
+def _worker_rss_bytes():
+    """Return this worker's resident size, or None where /proc is absent."""
+    try:
+        with open("/proc/self/statm") as statm:  # noqa: PTH123 - hot path, no Path
+            return int(statm.read().split()[1]) * _PAGE_SIZE
+    except (OSError, IndexError, ValueError):
+        return None
+
+
+def _record_crash_markers(server):
+    """Leave evidence on the log volume for the next start (see run_state).
+
+    Gunicorn's own error log (worker timeouts, "Worker was sent SIGKILL!
+    Perhaps out of memory?") does not propagate to the root logger, so it never
+    reached floppy.log. Attach the root's file handler to it. Never fatal.
+    """
+    try:
+        from config import run_state
+
+        for handler in logging.getLogger().handlers:
+            if isinstance(handler, logging.handlers.RotatingFileHandler):
+                server.log.error_log.addHandler(handler)
+        run_state.enable_fault_log()
+        run_state.start()
+    except Exception:  # diagnostics must never stop the server
+        server.log.exception("[gunicorn] could not record crash markers")
+
+
+def on_exit(server):
+    """Mark a deliberate stop, so the next start can tell it from a crash."""
+    from config import run_state
+
+    run_state.stop()
+
+
+def when_ready(server):
+    """Move the preloaded application out of the garbage collector's reach.
+
+    preload_app imports Django once and forks workers from it, so the whole
+    application image starts shared. Collection then un-shares it: a pass
+    writes to the header of every object it examines, and a written page stops
+    being shared.
+
+    The cost is measured, not theoretical. Production's shared pages fell from
+    76 MiB to 30 MiB over three hours, and the master's private memory rose by
+    exactly what it lost -- the master never wrote those pages, but once a
+    child had written its own copy the master's became exclusively mapped and
+    was recounted as private. Every process converged on the same ~30 MiB,
+    which is the part nothing ever touched. A local run reproduces it: 36.9
+    MiB shared decaying to the same 30.6 MiB floor.
+
+    Freezing moves everything alive now into a generation collection never
+    visits, so those pages stay shared. Objects created afterwards are still
+    collected normally. Children inherit the frozen state through fork, so
+    this runs once here rather than in each of them.
+    """
+    _record_crash_markers(server)
+    gc.collect()
+    gc.freeze()
+    server.log.info(
+        "[gunicorn] froze %s preloaded objects to keep them shared after fork",
+        gc.get_freeze_count(),
+    )
+
+
+def post_worker_init(worker):
+    """Record when this worker started, for the retirement floor below."""
+    worker.floppy_started_at = time.monotonic()
+
+
+def post_request(worker, req, environ, resp):  # gunicorn's hook signature
+    """Retire a worker that has outgrown its ceiling, once its response is sent.
+
+    Marking the worker not-alive lets it finish what it is holding and exit;
+    the arbiter forks a replacement, which with preload_app is nearly free.
+    """
+    if not max_worker_memory_bytes:
+        return
+    if getattr(worker, "nr", 0) < MINIMUM_REQUESTS_BEFORE_RETIREMENT:
+        return
+    started_at = getattr(worker, "floppy_started_at", None)
+    if (
+        started_at is not None
+        and time.monotonic() - started_at < MINIMUM_SECONDS_BEFORE_RETIREMENT
+    ):
+        return
+    resident = _worker_rss_bytes()
+    if resident is not None and resident > max_worker_memory_bytes:
+        worker.alive = False
+
 print(  # noqa: T201  # gunicorn has no logger configured this early
     f"[gunicorn] {PROFILE.describe()} -> workers={workers} threads={threads} "
-    f"max_requests={max_requests} timeout={timeout}",
+    f"max_requests={max_requests} timeout={timeout} "
+    f"max_worker_memory={max_worker_memory_bytes // (1024 * 1024)}MiB",
 )
+
+# Repeated on every restart in `docker logs`, which is the only place an
+# override saved in an orchestrator's own template becomes visible.
+_override_warning = web_concurrency_warning()
+if _override_warning:
+    print(f"[gunicorn] {_override_warning}")  # noqa: T201  # see above
 
 # Nginx owns the request log. A second Gunicorn access line duplicates every
 # dynamic request and can include the raw query string. Keep Gunicorn errors.

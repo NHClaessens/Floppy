@@ -404,6 +404,10 @@ if (!window.__floppyDateTimePickerBound) {
       if (!pairedInput || pairedInput === this.$refs.hiddenInput) {
         return;
       }
+      if (pairedInput.value) {
+        // Don't overwrite a date the user (or an earlier quick action) already set.
+        return;
+      }
 
       if (window.Alpine) {
         try {
@@ -480,8 +484,8 @@ if (!window.__floppyDateTimePickerBound) {
       return this.suggestionLabel || gettext("Suggested date");
     },
 
-    applySuggestion() {
-      const iso = this.resolvedSuggestionDate();
+    applySuggestion(date) {
+      const iso = date || this.resolvedSuggestionDate();
       if (!iso) {
         return;
       }

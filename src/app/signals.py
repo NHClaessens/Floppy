@@ -2,13 +2,20 @@ import json
 import logging
 from contextlib import contextmanager
 from contextvars import ContextVar
+from datetime import date, datetime
 
 from celery import states
 from celery.signals import before_task_publish, task_failure, task_success
 from django.apps import apps
 from django.conf import settings
 from django.db import transaction
-from django.db.models.signals import m2m_changed, post_delete, post_save, pre_save
+from django.db.models.signals import (
+    m2m_changed,
+    post_delete,
+    post_save,
+    pre_delete,
+    pre_save,
+)
 from django.db.utils import OperationalError
 from django.dispatch import receiver
 from django.utils import timezone
@@ -54,6 +61,16 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_UNKNOWN_FAILED = 999999  # runtime completely unknown / failed lookup
 
+
+@receiver([pre_save, pre_delete])
+def fence_overwrite_tracking_writes(sender, instance, **kwargs):
+    """Cooperate with a durable replacement before mutating its original scope."""
+    from integrations.import_scope import TRACKING_MODELS, guard_instances
+
+    if (not kwargs.get("raw") and instance._meta.apps is apps
+            and instance._meta.app_label == "app" and instance._meta.model_name in TRACKING_MODELS):
+        guard_instances([instance])
+
 RUNTIME_BACKFILL_SOURCES = ("tmdb", "tvdb", "mal", "simkl")
 GENRE_BACKFILL_SOURCES = ("tmdb", "tvdb", "mal", "simkl", "igdb", "bgg")
 TRACKED_TASK_NAMES = frozenset(
@@ -65,6 +82,7 @@ TRACKED_TASK_NAMES = frozenset(
         "Import from MyAnimeList",
         "Import from AniList",
         "Import from Kitsu",
+        "Import from MangaBaka",
         "Import from Yamtrack",
         "Import from HowLongToBeat",
         "Import from Grouvee",
@@ -81,12 +99,21 @@ TRACKED_TASK_NAMES = frozenset(
         "Import MDBList Lists",
         "Import from Plex",
         "Sync Plex Watchlist",
+        "Sync Plex Watched Marks",
         "Import from Radarr",
         "Import from Radarr (Recurring)",
         "Import from Sonarr",
         "Import from Sonarr (Recurring)",
+        "Import from Mylar3",
+        "Import from Mylar3 (Recurring)",
+        "Import from Kapowarr",
+        "Import from Kapowarr (Recurring)",
         "Import from Audiobookshelf",
         "Import from Audiobookshelf (Recurring)",
+        "Import from Kavita",
+        "Import from Kavita (Recurring)",
+        "Import from Komga",
+        "Import from Komga (Recurring)",
         "Import from Storyteller",
         "Import from Storyteller (Recurring)",
         "Import from Pocket Casts",
@@ -97,6 +124,7 @@ TRACKED_TASK_NAMES = frozenset(
         "Import from Stremio (Recurring)",
         "Import from Last.fm History",
         "Import from Hardcover",
+        "Import from Hardcover Account",
         "Import from StoryGraph",
         "Import from Koito History",
         "Scheduled backup export",
@@ -106,8 +134,6 @@ TRACKED_TASK_NAMES = frozenset(
 )
 DISCOVER_PRIORITY_HISTORY_DEBOUNCE_SECONDS = 15
 DISCOVER_PRIORITY_HISTORY_COUNTDOWN = 15
-DISCOVER_PRIORITY_STATISTICS_DEBOUNCE_SECONDS = 20
-DISCOVER_PRIORITY_STATISTICS_COUNTDOWN = 20
 _SUPPRESS_MEDIA_CACHE_CHANGE_SIGNALS: ContextVar[bool] = ContextVar(
     "suppress_media_cache_change_signals",
     default=False,
@@ -510,20 +536,6 @@ def _invalidate_history_for_media_change(
         )
 
 
-def _schedule_statistics_refresh_for_media_change(
-    user_id: int, *, prioritized: bool
-) -> None:
-    if prioritized:
-        statistics_cache.schedule_all_ranges_refresh(
-            user_id,
-            debounce_seconds=DISCOVER_PRIORITY_STATISTICS_DEBOUNCE_SECONDS,
-            countdown=DISCOVER_PRIORITY_STATISTICS_COUNTDOWN,
-        )
-        return
-
-    statistics_cache.schedule_all_ranges_refresh(user_id)
-
-
 def _clear_media_runtime_caches(user_id: int, changed_media_type: str) -> None:
     from app.cache_utils import (
         clear_home_row_cache_for_user,
@@ -551,6 +563,7 @@ def _handle_media_cache_change(
     schedule_statistics: bool = True,
     force_history_days: bool = False,
     clear_runtime_caches: bool = True,
+    history_dates_may_have_moved: bool = True,
 ) -> None:
     if not user_id:
         return
@@ -588,13 +601,22 @@ def _handle_media_cache_change(
         for day_keys, _logging_styles in history_specs or []
         for day_key in day_keys or []
     )
+    statistics_marked = False
     if history_specs and not has_history_days:
         # Planning activity is commonly undated. There is no day key to
         # invalidate in that case, but it can still appear in a title's
-        # history and affect cached all-time/statistics payloads.
-        history_cache.invalidate_history_cache(user_id)
+        # history. Statistics read undated rows straight from the database
+        # when aggregating, so no day payload is affected: re-aggregating the
+        # ranges is enough. History day payloads are dropped only when the save
+        # may have taken a dated row's date away (its old day is unknown here):
+        # otherwise adding or updating an undated entry, Planning above all,
+        # threw away every cached day and left the repair task to rebuild them.
+        if history_dates_may_have_moved:
+            history_cache.invalidate_history_cache(
+                user_id, reason="undated_media_change"
+            )
         statistics_cache.invalidate_statistics_cache(user_id)
-        statistics_cache.invalidate_all_statistics_days(user_id, reason=reason)
+        statistics_marked = True
 
     normalized_stat_days = [
         day_value for day_value in (statistics_day_values or []) if day_value
@@ -605,9 +627,12 @@ def _handle_media_cache_change(
             day_values=normalized_stat_days,
             reason=reason,
         )
+        statistics_marked = True
 
-    if schedule_statistics:
-        _schedule_statistics_refresh_for_media_change(user_id, prioritized=prioritized)
+    if schedule_statistics and not statistics_marked:
+        # Status, score and count changes reach every range without touching a
+        # day payload; recording the change is what makes the sync rebuild.
+        statistics_cache.invalidate_statistics_cache(user_id)
 
 
 def _invalidate_discover_from_item_tag(instance) -> None:
@@ -798,6 +823,11 @@ def refresh_discover_cache_on_item_person_credit_change(sender, instance, **kwar
     item = getattr(instance, "item", None)
     if item is None and getattr(instance, "item_id", None):
         item = Item.objects.filter(id=instance.item_id).only("id", "media_type").first()
+    invalidate_discover_for_credit_item(item)
+
+
+def invalidate_discover_for_credit_item(item):
+    """Refresh Discover for the users tracking a movie/TV item whose credits changed."""
     user_ids, media_type = _discover_user_ids_for_credit_item(item)
     if not media_type:
         return
@@ -836,10 +866,15 @@ def capture_episode_history_identity(sender, instance, **kwargs):
     if instance.pk:
         previous = (
             Episode.objects.filter(pk=instance.pk)
-            .values_list("related_season__user_id", "end_date")
+            .values_list("related_season__user_id", "end_date", "start_date")
             .first()
         )
     instance._previous_history_identity = previous
+
+
+def _episode_history_day_key(end_date, start_date):
+    """Return the day an Episode is listed on: its finish, else its start."""
+    return history_cache.history_day_key(end_date or start_date)
 
 
 @receiver(post_save, sender=Episode)
@@ -856,12 +891,12 @@ def refresh_history_cache_on_episode_save(sender, instance, **kwargs):
     if hasattr(instance, "_previous_history_identity"):
         delattr(instance, "_previous_history_identity")
     user_id = getattr(getattr(instance, "related_season", None), "user_id", None)
-    day_key = history_cache.history_day_key(getattr(instance, "end_date", None))
+    day_key = _episode_history_day_key(instance.end_date, instance.start_date)
     changes = {}
     for changed_user_id, changed_day_key in (
         (
             previous[0] if previous else None,
-            history_cache.history_day_key(previous[1]) if previous else None,
+            _episode_history_day_key(previous[1], previous[2]) if previous else None,
         ),
         (user_id, day_key),
     ):
@@ -895,7 +930,7 @@ def refresh_history_cache_on_episode_delete(sender, instance, **kwargs):
     ):
         return
     user_id = getattr(getattr(instance, "related_season", None), "user_id", None)
-    day_key = history_cache.history_day_key(getattr(instance, "end_date", None))
+    day_key = _episode_history_day_key(instance.end_date, instance.start_date)
     changes = {user_id: [day_key]} if user_id and day_key else {}
     runtime_user_ids = [user_id] if user_id else []
     transaction.on_commit(
@@ -905,6 +940,94 @@ def refresh_history_cache_on_episode_delete(sender, instance, **kwargs):
         ),
         using=kwargs.get("using"),
     )
+
+
+def _statistics_days_for_dates(start_dt, end_dt):
+    # Unsaved assignments can still hold a plain date; treat it as that day.
+    start_dt, end_dt = (
+        timezone.make_aware(datetime.combine(value, datetime.min.time()))
+        if isinstance(value, date) and not isinstance(value, datetime)
+        else value
+        for value in (start_dt, end_dt)
+    )
+    days = set(history_cache.history_day_keys_for_range(start_dt, end_dt) or [])
+    for value in (start_dt, end_dt):
+        if day_key := history_cache.history_day_key(value):
+            days.add(day_key)
+    return days
+
+
+@receiver(pre_save, sender=Movie)
+@receiver(pre_save, sender=Music)
+@receiver(pre_save, sender=Podcast)
+@receiver(pre_save, sender=Game)
+@receiver(pre_save, sender=BoardGame)
+@receiver(pre_save, sender=Anime)
+@receiver(pre_save, sender=Manga)
+@receiver(pre_save, sender=Book)
+@receiver(pre_save, sender=Comic)
+def capture_statistics_previous_dates(sender, instance, **kwargs):
+    """Remember a row's persisted dates, so moving them re-marks the old days.
+
+    The change handlers only see the new dates; without this the day an entry
+    moved away from kept counting it until something else rebuilt it.
+    """
+    if kwargs.get("raw"):
+        return
+    if not instance.pk:
+        instance._history_had_dates = False
+        return
+    if media_cache_change_signals_suppressed() or media_change_side_effects_suppressed():
+        return
+    previous = (
+        sender.objects.filter(pk=instance.pk).values_list("start_date", "end_date").first()
+    )
+    instance._statistics_previous_dates = previous
+    instance._history_had_dates = previous is None or any(previous)
+
+
+@receiver(post_save, sender=Movie)
+@receiver(post_save, sender=Music)
+@receiver(post_save, sender=Podcast)
+@receiver(post_save, sender=Game)
+@receiver(post_save, sender=BoardGame)
+@receiver(post_save, sender=Anime)
+@receiver(post_save, sender=Manga)
+@receiver(post_save, sender=Book)
+@receiver(post_save, sender=Comic)
+def mark_statistics_previous_dates(sender, instance, **kwargs):
+    """Mark the days a row's dates moved away from."""
+    previous = instance.__dict__.pop("_statistics_previous_dates", None)
+    if kwargs.get("raw") or not previous:
+        return
+    if previous == (instance.start_date, instance.end_date):
+        return
+    old_days = _statistics_days_for_dates(*previous) - _statistics_days_for_dates(
+        instance.start_date, instance.end_date
+    )
+    if old_days:
+        statistics_cache.invalidate_statistics_days(
+            instance.user_id, old_days, reason="media_date_moved"
+        )
+
+
+def _history_dates_may_have_moved(instance, signal_kwargs) -> bool:
+    """Whether an undated save or delete may have left a history day stale.
+
+    History places a row by its dates, and the receivers only see the new
+    ones. An undated row that is new, deleted, or saved without touching its
+    dates cannot have left a day it used to be on; only a save that may have
+    cleared existing dates needs the whole-cache fallback.
+    """
+    had_dates = instance.__dict__.pop("_history_had_dates", None)
+    if signal_kwargs.get("signal") is post_delete or signal_kwargs.get("created"):
+        return False
+    update_fields = signal_kwargs.get("update_fields")
+    if update_fields is not None and not {"start_date", "end_date"} & set(
+        update_fields
+    ):
+        return False
+    return had_dates is not False
 
 
 @receiver([post_save, post_delete], sender=Movie)
@@ -923,6 +1046,7 @@ def refresh_history_cache_on_movie_change(sender, instance, **kwargs):
         reason="movie_change",
         history_specs=[([day_key] if day_key else [], ("sessions", "repeats"))],
         statistics_day_values=[day_key] if day_key else [],
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1002,6 +1126,7 @@ def refresh_history_cache_on_music_change(sender, instance, **kwargs):
         reason="music_change",
         history_specs=[([day_key] if day_key else [], ("sessions", "repeats"))],
         statistics_day_values=[day_key] if day_key else [],
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1016,12 +1141,24 @@ def refresh_history_cache_on_podcast_change(sender, instance, **kwargs):
         return
     user_id = getattr(instance, "user_id", None)
     day_key = history_cache.history_day_key(getattr(instance, "end_date", None))
+    history_specs = [([day_key] if day_key else [], ("sessions", "repeats"))]
+    update_fields = kwargs.get("update_fields")
+    if not day_key and (
+        kwargs.get("created")
+        or (update_fields is not None and "end_date" not in update_fields)
+    ):
+        # History places podcasts by end date only. An undated save that
+        # cannot have cleared one touches no history day, so skip the
+        # whole-cache clear an undated change otherwise falls back to; GPodder
+        # progress polls made exactly these saves (#1158).
+        history_specs = None
     _handle_media_cache_change(
         user_id,
         MediaTypes.PODCAST.value,
         reason="podcast_change",
-        history_specs=[([day_key] if day_key else [], ("sessions", "repeats"))],
+        history_specs=history_specs,
         statistics_day_values=[day_key] if day_key else [],
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1117,6 +1254,7 @@ def refresh_statistics_cache_on_anime_change(sender, instance, **kwargs):
         reason="anime_change",
         history_specs=[(history_day_keys, ("sessions", "repeats"))],
         statistics_day_values=day_keys,
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1164,6 +1302,7 @@ def refresh_statistics_cache_on_manga_change(sender, instance, **kwargs):
         reason="manga_change",
         history_specs=[(history_day_keys, ("sessions", "repeats"))],
         statistics_day_values=day_keys,
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1185,6 +1324,7 @@ def refresh_statistics_cache_on_book_change(sender, instance, **kwargs):
         reason="book_change",
         history_specs=[(history_day_keys, ("sessions", "repeats"))],
         statistics_day_values=day_keys,
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1206,6 +1346,7 @@ def refresh_statistics_cache_on_comic_change(sender, instance, **kwargs):
         reason="comic_change",
         history_specs=[(history_day_keys, ("sessions", "repeats"))],
         statistics_day_values=day_keys,
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1254,6 +1395,7 @@ def refresh_statistics_cache_on_game_change(sender, instance, **kwargs):
             ([session_key] if session_key else [], ("sessions",)),
         ],
         statistics_day_values=stats_day_keys,
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1287,6 +1429,7 @@ def refresh_statistics_cache_on_boardgame_change(sender, instance, **kwargs):
             ([session_key] if session_key else [], ("sessions",)),
         ],
         statistics_day_values=stats_day_keys,
+        history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
     )
 
 
@@ -1403,15 +1546,20 @@ def schedule_runtime_backfill_on_item_save(
         ):
             from app.tasks import enqueue_runtime_backfill_items
 
-            enqueue_runtime_backfill_items([instance.id])
+            transaction.on_commit(
+                lambda item_id=instance.id: enqueue_runtime_backfill_items([item_id]),
+                robust=True,
+            )
         elif (
             instance.media_type == MediaTypes.EPISODE.value
             and instance.season_number is not None
         ):
             from app.tasks import enqueue_episode_runtime_backfill
 
-            enqueue_episode_runtime_backfill(
-                [(instance.media_id, instance.source, instance.season_number)],
+            transaction.on_commit(
+                lambda coordinate=(instance.media_id, instance.source, instance.season_number):
+                    enqueue_episode_runtime_backfill([coordinate]),
+                robust=True,
             )
 
     genre_backfill_applicable = (
@@ -1438,7 +1586,10 @@ def schedule_runtime_backfill_on_item_save(
     ):
         from app.tasks import enqueue_genre_backfill_items
 
-        enqueue_genre_backfill_items([instance.id])
+        transaction.on_commit(
+            lambda item_id=instance.id: enqueue_genre_backfill_items([item_id]),
+            robust=True,
+        )
 
     if (
         instance.source == Sources.TMDB.value
@@ -1454,4 +1605,7 @@ def schedule_runtime_backfill_on_item_save(
     ):
         from app.tasks import enqueue_credits_backfill_items
 
-        enqueue_credits_backfill_items([instance.id])
+        transaction.on_commit(
+            lambda item_id=instance.id: enqueue_credits_backfill_items([item_id]),
+            robust=True,
+        )

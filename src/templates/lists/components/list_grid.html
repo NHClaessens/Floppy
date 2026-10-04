@@ -16,6 +16,13 @@
                hx-swap="outerHTML"></div>
         </a>
 
+        {% if custom_list.is_smart %}
+          <span class="absolute bottom-2 right-2 z-20 flex h-6 w-6 items-center justify-center rounded-full bg-black/50 text-yellow-400 pointer-events-none"
+                title="{% translate "Smart List" %}"
+                role="img"
+                aria-label="{% translate "Smart List" %}">{% include "app/icons/bolt.svg" with classes="w-3.5 h-3.5" %}</span>
+        {% endif %}
+
         {% if not profile_username and custom_list.can_edit %}
           <button class="absolute top-2 right-2 z-20 p-2 bg-black/50 hover:bg-black/75 rounded-full opacity-0 group-hover:opacity-100 pointer-coarse:opacity-100 focus-visible:opacity-100 transition-all duration-200 text-white hover:text-indigo-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)] cursor-pointer"
                   hx-get="{% url 'list_edit_form' custom_list.id %}"

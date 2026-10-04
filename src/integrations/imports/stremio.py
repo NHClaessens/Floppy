@@ -28,9 +28,10 @@ import app
 import app.providers.mal
 import app.providers.trakt
 from app.models import MediaTypes, Sources, Status
+from app.models.tv import PRODUCTION_STATUS_ENDED, classify_production_status
 from app.providers import services
 from app.services import grouped_anime
-from integrations import anime_mapping, import_progress
+from integrations import anime_mapping, connection_health, import_progress
 from integrations.imports import helpers
 from integrations.imports.helpers import MediaImportError, MediaImportUnexpectedError
 from integrations.models import StremioAccount
@@ -38,6 +39,7 @@ from integrations.models import StremioAccount
 logger = logging.getLogger(__name__)
 
 STREMIO_API_BASE_URL = "https://api.strem.io/api"
+STREMIO_INVALID_SESSION_CODE = 1
 CINEMETA_VIDEO_IDS_URL = (
     "https://v3-cinemeta.strem.io/catalog/series/video-ids/imdbIds={ids}"
 )
@@ -64,6 +66,10 @@ def classify_stremio_id(entry_id):
         return (namespace, raw)
     return None
 
+
+# History label for status changes this sync makes (#1133).
+STREMIO_IMPORT_REASON = "Stremio import"
+
 # Forward-only status ranking used to decide whether the recurring sync may
 # advance an already-tracked Movie/TV/Season's status (see #580: the sync
 # must pick up completion the webhook deferred to it, but must never
@@ -74,6 +80,15 @@ _STATUS_RANK = {
     Status.COMPLETED.value: 2,
 }
 
+
+
+def _is_invalid_session(error):
+    """Return whether a Stremio API error means the auth key is no longer valid."""
+    if isinstance(error, dict):
+        if error.get("code") == STREMIO_INVALID_SESSION_CODE:
+            return True
+        error = error.get("message", "")
+    return "session does not exist" in str(error).lower()
 
 def _api_call(method, auth_key=None, **params):
     """Call a Stremio API method and unwrap the result envelope."""
@@ -95,6 +110,11 @@ def _api_call(method, auth_key=None, **params):
         else:
             message = str(error)
         msg = f"Stremio API error: {message}"
+        # Stremio answers an expired or revoked auth key with code 1,
+        # "Session does not exist". Any other envelope error is not about
+        # the credentials.
+        if _is_invalid_session(error):
+            raise helpers.ConnectionAuthError(msg)
         raise MediaImportError(msg)
 
     result = response.get("result")
@@ -204,14 +224,13 @@ class StremioImporter:
         try:
             self.auth_key = helpers.decrypt_or_raise(self.account.auth_key)
         except MediaImportError as decrypt_error:
-            self.account.connection_broken = True
-            self.account.last_error_message = str(decrypt_error)
-            self.account.save(
-                update_fields=["connection_broken", "last_error_message", "updated_at"],
-            )
+            connection_health.record_failure(self.account, decrypt_error, auth=True)
             raise
 
         self.existing_media = helpers.get_existing_media(user)
+        # Shows/movies the user deleted stay deleted, even though Stremio's
+        # library (often fed by Trakt) still lists them (#1133).
+        self.deleted_media = helpers.get_deleted_media(user)
         self.to_delete = defaultdict(lambda: defaultdict(set))
         self.bulk_media = defaultdict(list)
         self.bulk_season_by_item_id = {}
@@ -227,7 +246,11 @@ class StremioImporter:
         try:
             items = get_library_items(self.auth_key)
         except MediaImportError as error:
-            self._mark_broken(str(error))
+            connection_health.record_failure(
+                self.account,
+                error,
+                auth=isinstance(error, helpers.ConnectionAuthError),
+            )
             raise
 
         movies, series, anime = self._partition_items(items)
@@ -308,16 +331,7 @@ class StremioImporter:
         helpers.bulk_create_media(self.bulk_media, self.user)
 
         self.account.last_sync_at = timezone.now()
-        self.account.connection_broken = False
-        self.account.last_error_message = ""
-        self.account.save(
-            update_fields=[
-                "last_sync_at",
-                "connection_broken",
-                "last_error_message",
-                "updated_at",
-            ],
-        )
+        connection_health.record_success(self.account, extra_fields=["last_sync_at"])
 
         imported_counts = {
             media_type: len(media_list)
@@ -325,16 +339,6 @@ class StremioImporter:
         }
         return imported_counts, "\n".join(dict.fromkeys(self.warnings))
 
-    def _mark_broken(self, message):
-        self.account.connection_broken = True
-        self.account.last_error_message = message
-        self.account.save(
-            update_fields=[
-                "connection_broken",
-                "last_error_message",
-                "updated_at",
-            ],
-        )
 
     def _partition_items(self, items):
         """Split library items into importable movies, series, and anime."""
@@ -453,6 +457,22 @@ class StremioImporter:
             status = Status.PLANNING.value
         return status, watched
 
+    @staticmethod
+    def _show_has_definitely_ended(tv_instance):
+        """Return whether the provider positively reports the show as finished.
+
+        False when the provider is unreachable, carries no status, or reports
+        one we don't recognize, so a recurring sync never finalizes a show on
+        missing or unfamiliar information.
+        """
+        production_status = tv_instance.resolve_production_status()
+        if production_status is None:
+            return False
+        return (
+            classify_production_status(production_status)
+            == PRODUCTION_STATUS_ENDED
+        )
+
     def _advance_status_in_place(self, instance, new_status, **field_updates):
         """Advance an already-tracked instance's status forward-only.
 
@@ -467,9 +487,25 @@ class StremioImporter:
         if old_rank is None or new_rank is None or new_rank <= old_rank:
             return False
 
+        if (
+            isinstance(instance, app.models.TV)
+            and new_status == Status.COMPLETED.value
+            and not self._show_has_definitely_ended(instance)
+        ):
+            # A background sync only ever sees the episodes Cinemeta happens to
+            # list, so "everything watched" is not evidence a show is over.
+            # Completing it here overwrites a status the user set (#375), so
+            # require positive evidence from the provider instead - and require
+            # it whether the row is Planning or In progress, so the two can't
+            # disagree. Watching still moves a Planning show to In progress.
+            new_status = Status.IN_PROGRESS.value
+            if _STATUS_RANK[new_status] <= old_rank:
+                return False
+
         instance.status = new_status
         for field, value in field_updates.items():
             setattr(instance, field, value)
+        instance._change_reason = STREMIO_IMPORT_REASON
         instance.save()
         return True
 
@@ -512,6 +548,7 @@ class StremioImporter:
             Sources.TMDB.value,
             media_id,
             self.mode,
+            deleted_media=self.deleted_media,
         ):
             return
 
@@ -601,6 +638,7 @@ class StremioImporter:
             Sources.TMDB.value,
             media_id,
             self.mode,
+            deleted_media=self.deleted_media,
         ):
             return
 
@@ -839,6 +877,7 @@ class StremioImporter:
                         [existing_season],
                         app.models.Season,
                         ["status"],
+                        default_change_reason=STREMIO_IMPORT_REASON,
                     )
                 season_instance = existing_season
             elif season_item.id in self.bulk_season_by_item_id:
@@ -861,7 +900,13 @@ class StremioImporter:
                     item=season_item,
                     user=self.user,
                     related_tv=tv_instance,
-                    status=season_status,
+                    # A dropped/paused show keeps new seasons off the In
+                    # progress shelf; the plays are still recorded.
+                    status=(
+                        tv_instance.status
+                        if tv_instance.status in app.models.USER_HELD_STATUSES
+                        else season_status
+                    ),
                 )
                 season_instance._history_date = history_date
                 self.bulk_media[MediaTypes.SEASON.value].append(season_instance)
@@ -1087,6 +1132,7 @@ class StremioImporter:
             Sources.MAL.value,
             media_id,
             self.mode,
+            deleted_media=self.deleted_media,
         ):
             return
 

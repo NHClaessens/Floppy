@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import requests
 from django.contrib.auth import get_user_model
+from django.db import OperationalError
 from django.template.loader import render_to_string
 from django.test import RequestFactory, TestCase, override_settings
 from django.urls import reverse
@@ -16,6 +17,7 @@ from app.models import (
     Anime,
     Artist,
     ArtistTracker,
+    Book,
     CollectionEntry,
     DiscoverFeedback,
     DiscoverFeedbackType,
@@ -139,6 +141,40 @@ class TrackModalViewTests(TestCase):
             count,
         )
 
+    @patch("app.services.metadata_resolution.ItemProviderLink.objects.update_or_create")
+    def test_existing_tv_modal_does_not_write_provider_links(self, upsert):
+        """Opening a home card editor must not wait on optional persistence."""
+        upsert.side_effect = OperationalError("database is locked")
+        item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            title="Breaking Bad",
+        )
+        tracked = TV.objects.create(
+            user=self.user,
+            item=item,
+            status=Status.IN_PROGRESS.value,
+        )
+        with patch(
+            "app.providers.services.get_media_metadata",
+            return_value=_tv_with_seasons_payload("1396", Sources.TMDB.value),
+        ):
+            response = self.client.get(
+                reverse(
+                    "track_modal",
+                    kwargs={
+                        "source": Sources.TMDB.value,
+                        "media_type": MediaTypes.TV.value,
+                        "media_id": item.media_id,
+                    },
+                ),
+                {"instance_id": tracked.id, "home_row_id": "continue"},
+                HTTP_HX_REQUEST="true",
+            )
+        self.assertEqual(response.status_code, 200)
+        upsert.assert_not_called()
+
     def test_track_modal_view_existing_media(self):
         """Test the track modal view for existing media."""
         response = self.client.get(
@@ -164,10 +200,15 @@ class TrackModalViewTests(TestCase):
         self.assertTrue(response.context["discover_tab_available"])
         self.assertFalse(response.context["is_hidden_from_discover"])
         content = response.content.decode()
-        self.assertEqual(content.count("Start Now"), 2)
-        self.assertEqual(content.count("Just Finished"), 2)
-        self.assertEqual(content.count("Release Date"), 4)
-        self.assertEqual(content.count(':disabled="!resolvedSuggestionDate()"'), 2)
+        # Split per #1243: the start-date picker shows Start Now + Release
+        # Date, the end-date picker shows only Just Finished. "Release Date"
+        # also appears once per picker in the unconditional x-data config
+        # (see suggestionLabel below), plus once as the start field's
+        # visible quick-action label.
+        self.assertEqual(content.count("Start Now"), 1)
+        self.assertEqual(content.count("Just Finished"), 1)
+        self.assertEqual(content.count("Release Date"), 3)
+        self.assertEqual(content.count(':disabled="!resolvedSuggestionDate()"'), 1)
         general_field_names = [
             field.name for field in response.context["general_fields"]
         ]
@@ -182,6 +223,7 @@ class TrackModalViewTests(TestCase):
         self.assertContains(response, "Image URL")
         self.assertContains(response, "Save Image")
         self.assertContains(response, "Metadata Provider")
+        self.assertContains(response, "Fix match")
         self.assertContains(response, "Custom")
         self.assertContains(response, "Currently visible in Discover.")
         self.assertContains(response, 'hx-post="/discover/toggle-hidden"', html=False)
@@ -328,7 +370,7 @@ class TrackModalViewTests(TestCase):
         self.assertEqual(response.context["media"], episode)
         self.assertEqual(
             [field.name for field in response.context["general_fields"]],
-            ["score", "status", "start_date", "end_date"],
+            ["score", "status", "start_date", "end_date", "entry_source"],
         )
         self.assertContains(response, 'name="score"', html=False)
         self.assertContains(response, 'value="7.0"', html=False)
@@ -348,8 +390,8 @@ class TrackModalViewTests(TestCase):
         add_form = content[form_start : content.index("</form>", form_start)]
         self.assertRegex(add_form, r'name="csrfmiddlewaretoken" value="[^"]+"')
 
-        # Bound to a real watch, so Delete is live and a rewatch is still one
-        # click away via "Add new entry".
+        # Bound to a real watch, so Delete is live and the current values can be
+        # saved as a new entry in one submission.
         self.assertEqual(response.context["general_existing_instance"], episode)
         delete_start = content.index('hx-post="/media_delete')
         delete_button = content[delete_start : content.index("</button>", delete_start)]
@@ -357,8 +399,9 @@ class TrackModalViewTests(TestCase):
         self.assertNotIn("disabled", delete_button)
         self.assertIn('hx-post="/media_delete', content)
         self.assertIn('hx-include="closest form"', content)
-        self.assertIn("is_create=1", response.context["episode_create_url"])
-        self.assertContains(response, "Add new entry")
+        self.assertTrue(response.context["episode_save_as_new"])
+        self.assertContains(response, "Save as new entry")
+        self.assertContains(response, 'name="save_as_new_entry"', html=False)
 
     def _create_tracked_episode(self):
         """Create a show/season/episode chain and return the tracked episode."""
@@ -596,6 +639,32 @@ class TrackModalViewTests(TestCase):
         self.assertFalse(response.context["metadata_tab_available"])
         self.assertContains(response, "General")
         self.assertNotContains(response, "Metadata")
+
+    def test_music_tracker_modal_marks_existing_entries_for_edit(self):
+        """Saved trackers carry the marker that stops End date auto-filling to now (#1377)."""
+        artist = Artist.objects.create(name="Test Artist")
+        album = Album.objects.create(title="Test Album", artist=artist)
+        url = reverse("album_track_modal", args=[album.id]) + "?return_url=/music"
+
+        self.assertNotContains(self.client.get(url), "data-existing-instance")
+
+        AlbumTracker.objects.create(
+            user=self.user,
+            album=album,
+            status=Status.COMPLETED.value,
+            end_date=datetime(2020, 5, 6, 7, 8, 9, tzinfo=UTC),
+        )
+        self.assertContains(self.client.get(url), "data-existing-instance")
+
+        ArtistTracker.objects.create(
+            user=self.user,
+            artist=artist,
+            status=Status.COMPLETED.value,
+        )
+        response = self.client.get(
+            reverse("artist_track_modal", args=[artist.id]) + "?return_url=/music",
+        )
+        self.assertContains(response, "data-existing-instance")
 
     def test_album_track_modal_renders_release_date_shortcuts(self):
         """Album trackers should expose the shared release-date shortcut."""
@@ -877,6 +946,74 @@ class TrackModalViewTests(TestCase):
         self.assertEqual(content.count("suggestionRuntimeMinutes: '95'"), 2)
         self.assert_release_shortcut_labels(response)
         self.assertNotContains(response, "Save Image")
+
+    @patch("app.providers.services.get_media_metadata")
+    def test_track_modal_untracked_movie_defaults_to_planning(self, mock_get_metadata):
+        """An untracked movie opens as Planning, released or not (#1305)."""
+        for media_id, release_date in (("901", "2099-06-01"), ("902", "2001-01-15")):
+            with self.subTest(release_date=release_date):
+                mock_get_metadata.return_value = {
+                    "media_id": media_id,
+                    "title": "New Movie",
+                    "media_type": MediaTypes.MOVIE.value,
+                    "source": Sources.TMDB.value,
+                    "image": "http://example.com/image.jpg",
+                    "details": {"release_date": release_date},
+                    "max_progress": 1,
+                }
+
+                response = self.client.get(
+                    reverse(
+                        "track_modal",
+                        kwargs={
+                            "source": Sources.TMDB.value,
+                            "media_type": MediaTypes.MOVIE.value,
+                            "media_id": media_id,
+                        },
+                    ),
+                )
+
+                self.assertEqual(response.status_code, 200)
+                form = response.context["form"]
+                self.assertEqual(form.initial["status"], Status.PLANNING.value)
+                self.assertContains(
+                    response,
+                    '<option value="Planning" selected>',
+                    html=False,
+                )
+
+    def test_track_modal_tracked_movie_keeps_its_status(self):
+        """A tracked movie still shows its saved status, not the new-entry default."""
+        Movie.objects.create(
+            item=self.item,
+            user=self.user,
+            status=Status.COMPLETED.value,
+        )
+
+        response = self.client.get(
+            reverse(
+                "track_modal",
+                kwargs={
+                    "source": Sources.TMDB.value,
+                    "media_type": MediaTypes.MOVIE.value,
+                    "media_id": "238",
+                },
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.context["form"]["status"].value(),
+            Status.COMPLETED.value,
+        )
+
+    def test_create_entry_form_defaults_to_planning(self):
+        """The manual add-entry form pre-selects Planning."""
+        response = self.client.get(reverse("create_entry"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, '<option value="Planning" selected>', html=False)
+        self.assertNotContains(response, '<option value="Completed" selected>')
 
     def test_update_item_image(self):
         """Existing tracked items should allow image overrides from metadata."""
@@ -1239,6 +1376,7 @@ class TrackModalViewTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "Episode Plays")
+        self.assertContains(response, "Episode ordering")
         self.assertEqual(
             response.context["episode_plays_form"].initial["first_episode_number"],
             1,
@@ -1251,7 +1389,11 @@ class TrackModalViewTests(TestCase):
             response.context["episode_plays_form"]["distribution_mode"].value(),
             "air_date",
         )
-        self.assertContains(response, "Release Date", count=6)
+        # Split per #1243: each date/time picker's Start Now / Just Finished
+        # / Release Date shortcuts are scoped to their own field via
+        # quick_action_mode, on both the General tab's start/end pickers and
+        # the Episode Plays bulk-range start/end pickers.
+        self.assertContains(response, "Release Date", count=4)
         self.assertEqual(
             response.context["episode_plays_domain"]["seasonEpisodeMap"]["1"][0][
                 "runtime_minutes"
@@ -1759,3 +1901,84 @@ class EpisodeTrackButtonTests(TestCase):
 
         self.assertIn('"instance_id": "7"', markup)
         self.assertNotIn("is_create", markup)
+
+
+class ProxyCoverSaveTests(TestCase):
+    """Books whose cover is a Floppy proxy path can still be edited (#1316)."""
+
+    def setUp(self):
+        """Log in a user tracking an audiobook."""
+        self.credentials = {"username": "proxy", "password": "12345"}
+        self.user = get_user_model().objects.create_user(**self.credentials)
+        self.client.login(**self.credentials)
+
+    def _book(self, source, image):
+        item = Item.objects.create(
+            media_id=f"{source}-1",
+            source=source,
+            media_type=MediaTypes.BOOK.value,
+            title="Project Hail Mary",
+            image=image,
+            format="audiobook",
+            runtime_minutes=960,
+        )
+        return Book.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            progress=300,
+        )
+
+    def _save_status_from_modal(self, book, status):
+        """Post the modal's own initial values back with a new status."""
+        response = self.client.get(
+            reverse(
+                "track_modal",
+                kwargs={
+                    "source": book.item.source,
+                    "media_type": MediaTypes.BOOK.value,
+                    "media_id": book.item.media_id,
+                },
+            )
+            + f"?instance_id={book.id}",
+        )
+        form = response.context["form"]
+        self.assertNotIn("image_url", form.initial)
+        data = {
+            name: form.initial.get(name, field.initial) or ""
+            for name, field in form.fields.items()
+        }
+        data.update(
+            {
+                "instance_id": book.id,
+                "status": status,
+                "start_date": "",
+                "end_date": "",
+            },
+        )
+        self.client.post(reverse("media_save"), data)
+        book.refresh_from_db()
+        return book
+
+    def test_audiobookshelf_book_status_saves(self):
+        """The ABS cover proxy path no longer blocks the save."""
+        book = self._book(
+            Sources.AUDIOBOOKSHELF.value,
+            "/import/audiobookshelf/cover/MTppdGVtLTE=:sig",
+        )
+
+        book = self._save_status_from_modal(book, Status.PAUSED.value)
+
+        self.assertEqual(book.status, Status.PAUSED.value)
+        self.assertEqual(
+            book.item.image,
+            "/import/audiobookshelf/cover/MTppdGVtLTE=:sig",
+        )
+
+    def test_plex_book_status_saves(self):
+        """Plex covers use the same kind of proxy path."""
+        book = self._book(Sources.PLEX.value, "/import/plex/cover/abc:sig")
+
+        book = self._save_status_from_modal(book, Status.DROPPED.value)
+
+        self.assertEqual(book.status, Status.DROPPED.value)

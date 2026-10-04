@@ -413,8 +413,12 @@ document.addEventListener("alpine:init", () => {
       const progressField = this.$el.querySelector('[name="progress"]');
       const instanceIdField = this.$el.querySelector('[name="instance_id"]');
 
-      // Check if this is a new form (no instance_id) vs editing existing record
-      const isNewForm = !instanceIdField || !instanceIdField.value;
+      // Check if this is a new form vs editing an existing record. Media forms
+      // carry an instance_id; music/podcast trackers have none, so the modal
+      // marks them with data-existing-instance instead (#1377).
+      const isNewForm =
+        (!instanceIdField || !instanceIdField.value) &&
+        !("existingInstance" in this.$el.dataset);
 
       // Store original values for edit forms
       if (!isNewForm) {

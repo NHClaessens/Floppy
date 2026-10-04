@@ -3,6 +3,42 @@
 {% load app_tags user_tags widget_tweaks %}
 
 <div class="space-y-6">
+  {% if match_item and media_type == MediaTypes.MOVIE.value or match_item and media_type == MediaTypes.TV.value or media_type == MediaTypes.TV.value and current_instance or tv_provider_switch_target %}
+    <section class="space-y-3">
+      <div>
+        <h3 class="text-xl font-semibold text-[var(--color-text)]">{% translate "Match & Ordering" %}</h3>
+        <p class="text-sm text-[var(--color-text-muted)] mt-1">
+          {% translate "Correct which title this entry is matched to, or change how its episodes are ordered." %}
+        </p>
+        {% if media_type == MediaTypes.TV.value and current_instance and current_instance.active_episode_order %}
+          <p class="text-sm text-[var(--color-text-secondary)] mt-1">
+            {% translate "Episode order:" %} <span class="font-semibold">{{ current_instance.active_episode_order.label }}</span>
+          </p>
+        {% endif %}
+      </div>
+      <div class="flex flex-wrap gap-2">
+        {% if match_item and media_type == MediaTypes.MOVIE.value or match_item and media_type == MediaTypes.TV.value %}
+          <a href="{% url 'match_fix' match_item.id %}"
+             class="inline-flex items-center rounded-md border border-[var(--color-surface-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] shadow-sm transition-colors hover:bg-[var(--color-surface-muted)]">
+            {% translate "Fix match" %}
+          </a>
+        {% endif %}
+        {% if tv_provider_switch_target %}
+          <a href="{% url 'switch_tv_provider' match_item.id %}"
+             class="inline-flex items-center rounded-md border border-[var(--color-surface-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] shadow-sm transition-colors hover:bg-[var(--color-surface-muted)]">
+            {% if tv_provider_switch_target == "tvdb" %}{% translate "Move tracking to TVDB" %}{% else %}{% translate "Move tracking to TMDB" %}{% endif %}
+          </a>
+        {% endif %}
+        {% if media_type == MediaTypes.TV.value and current_instance %}
+          <a href="{% url 'episode_ordering_settings' current_instance.pk %}"
+             class="inline-flex items-center rounded-md border border-[var(--color-surface-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] shadow-sm transition-colors hover:bg-[var(--color-surface-muted)]">
+            {% translate "Episode ordering" %}
+          </a>
+        {% endif %}
+      </div>
+    </section>
+  {% endif %}
+
   {% if can_update_metadata_provider and metadata_provider_options and metadata_item %}
     <section class="space-y-3">
       <div>

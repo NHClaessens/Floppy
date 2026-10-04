@@ -1,6 +1,7 @@
 from unittest.mock import call, patch
 
 from django.contrib.auth import get_user_model
+from django.db import connection
 from django.test import TestCase, override_settings
 from django.urls import reverse
 
@@ -196,3 +197,99 @@ class TraktListsDeviceFlowTests(TestCase):
         self.assertEqual(response.status_code, 204)
         self.assertNotIn("HX-Redirect", response)
         self.assertIn(TRAKT_LISTS_DEVICE_SESSION_KEY, self.client.session)
+
+
+class TraktListImportTransactionTests(TestCase):
+    """Network work must finish before the rebuild takes the write lock."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="trakt-txn-user")
+        # TestCase wraps each test in a transaction; the import's own atomic
+        # block is the one that must not be open during network calls.
+        self.baseline_depth = len(connection.atomic_blocks)
+        self.depths = []
+
+    def _record_depth(self, value):
+        def recorder(*_args, **_kwargs):
+            self.depths.append(len(connection.atomic_blocks))
+            return value
+
+        return recorder
+
+    def test_network_calls_happen_outside_the_rebuild_transaction(self):
+        entry = {"type": "movie", "movie": {"title": "Heat", "ids": {"tmdb": 949}}}
+        metadata = {"title": "Heat", "image": "https://example.com/heat.jpg"}
+
+        with (
+            patch.object(
+                trakt,
+                "_get_trakt_lists",
+                side_effect=self._record_depth([{"name": "L", "ids": {"trakt": 1}}]),
+            ),
+            patch.object(
+                trakt, "_get_trakt_list_items", side_effect=self._record_depth([entry])
+            ),
+            patch.object(
+                trakt, "_get_trakt_watchlist_items", side_effect=self._record_depth([])
+            ),
+            patch.object(
+                trakt, "_get_metadata", side_effect=self._record_depth(metadata)
+            ),
+        ):
+            trakt.import_trakt_lists(self.user, "token")
+
+        self.assertTrue(self.depths)
+        self.assertEqual(set(self.depths), {self.baseline_depth})
+        self.assertEqual(
+            CustomList.objects.filter(owner=self.user, source="trakt").count(), 2
+        )
+
+
+class TraktListImportFailureTests(TestCase):
+    """A failed import must not cost the user lists they already imported."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(username="trakt-fail-user")
+        CustomList.objects.create(
+            name="Watchlist",
+            owner=self.user,
+            source="trakt",
+            source_id="watchlist",
+        )
+        CustomList.objects.create(
+            name="Old List", owner=self.user, source="trakt", source_id="7"
+        )
+
+    def test_resolution_failure_aborts_before_deleting(self):
+        entry = {"type": "movie", "movie": {"title": "Heat", "ids": {"tmdb": 949}}}
+        with (
+            patch.object(trakt, "_get_trakt_lists", return_value=[]),
+            patch.object(trakt, "_get_trakt_watchlist_items", return_value=[entry]),
+            patch.object(
+                trakt, "_get_metadata", side_effect=RuntimeError("TMDB is down")
+            ),
+            self.assertRaises(RuntimeError),
+        ):
+            trakt.import_trakt_lists(self.user, "token")
+
+        self.assertEqual(
+            CustomList.objects.filter(owner=self.user, source="trakt").count(), 2
+        )
+
+    def test_watchlist_fetch_failure_keeps_the_existing_watchlist(self):
+        with (
+            patch.object(trakt, "_get_trakt_lists", return_value=[]),
+            patch.object(
+                trakt,
+                "_get_trakt_watchlist_items",
+                side_effect=RuntimeError("Trakt is down"),
+            ),
+        ):
+            trakt.import_trakt_lists(self.user, "token")
+
+        remaining = set(
+            CustomList.objects.filter(owner=self.user, source="trakt").values_list(
+                "source_id", flat=True
+            )
+        )
+        self.assertEqual(remaining, {"watchlist"})

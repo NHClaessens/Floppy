@@ -182,6 +182,20 @@ def _validate_steam(values):
     )
 
 
+def _validate_gcd(values):
+    """Check a GCD login against a one-request series lookup."""
+    username = values.get("username", "")
+    password = values.get("password", "")
+    if not username or not password:
+        return None
+    return _probe(
+        "GET",
+        "https://www.comics.org/api/series/1/",
+        params={"format": "json"},
+        auth=(username, password),
+    )
+
+
 def _validate_trakt(values):
     """Check a Trakt client ID against a public endpoint."""
     client_id = values.get("client_id", "")
@@ -297,6 +311,14 @@ REGISTRY: dict[str, ProviderCredentialSpec] = {
             ),
         ),
         ProviderCredentialSpec(
+            slug="opencritic",
+            user_scope=True,
+            label="OpenCritic",
+            description="Critic scores for games. The free RapidAPI plan is enough.",
+            docs_url="https://rapidapi.com/opencritic-opencritic-default/api/opencritic-api",
+            fields=(CredentialField("api_key", "RapidAPI key", "OPENCRITIC_API_KEY"),),
+        ),
+        ProviderCredentialSpec(
             slug="bgg",
             user_scope=True,
             label="BoardGameGeek",
@@ -311,6 +333,21 @@ REGISTRY: dict[str, ProviderCredentialSpec] = {
             description="Comic and graphic novel metadata.",
             docs_url="https://comicvine.gamespot.com/api/",
             fields=(CredentialField("api_key", "API key", "COMICVINE_API"),),
+        ),
+        ProviderCredentialSpec(
+            slug="gcd",
+            user_scope=True,
+            validator=_validate_gcd,
+            label="Grand Comics Database",
+            description=(
+                "Comic and issue metadata. Needs a free GCD account: anonymous "
+                "access is limited to 30 requests an hour."
+            ),
+            docs_url="https://www.comics.org/accounts/register/",
+            fields=(
+                CredentialField("username", "Username", "GCD_USERNAME", secret=False),
+                CredentialField("password", "Password", "GCD_PASSWORD"),
+            ),
         ),
         ProviderCredentialSpec(
             slug="trakt",

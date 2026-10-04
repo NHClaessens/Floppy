@@ -220,6 +220,7 @@ class AnimeMigrationTests(TestCase):
             if media_type in {MediaTypes.ANIME.value, MediaTypes.TV.value}:
                 return {
                     "max_progress": 3,
+                    "details": {"status": "Ended"},
                     "related": {"seasons": [{"season_number": 1}]},
                 }
             if media_type == "tv_with_seasons":

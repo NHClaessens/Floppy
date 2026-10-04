@@ -52,99 +52,9 @@
           </span>
         </a>
 
-        <div class="relative" @click.outside="dropdownOpen = false; statusSubmenuType = null">
-          <button type="button"
-                  class="h-10 px-3 text-sm bg-[var(--color-surface-strong)] hover:bg-[var(--color-surface-hover)] rounded-md transition-colors flex items-center gap-2 cursor-pointer"
-                  @click="actionsOpen = false; statusSubmenuType = null; dropdownOpen = !dropdownOpen"
-                  :aria-expanded="dropdownOpen">
-            {% include "app/icons/funnel.svg" with classes="w-4 h-4" %}
-            <span class="block min-w-0 truncate max-w-[10rem] sm:max-w-[14rem]"
-                  x-text="dropdownLabel()"></span>
-            <svg xmlns="http://www.w3.org/2000/svg"
-                 viewBox="0 0 20 20"
-                 class="w-4 h-4 ml-1"
-                 aria-hidden="true">
-              <path d="M10 14 L4.5 7 H15.5 Z" fill="currentColor"></path>
-            </svg>
-          </button>
-
-          <div x-cloak
-               x-show="dropdownOpen"
-               x-transition:enter="transition ease-out duration-100"
-               x-transition:enter-start="transform opacity-0 scale-95"
-               x-transition:enter-end="transform opacity-100 scale-100"
-               x-transition:leave="transition ease-in duration-75"
-               x-transition:leave-start="transform opacity-100 scale-100"
-               x-transition:leave-end="transform opacity-0 scale-95"
-               class="absolute right-0 mt-2 w-64 rounded-md bg-[var(--color-surface-strong)] border border-[var(--color-border)] shadow-lg overflow-hidden z-40">
-            <div x-show="!statusSubmenuType" x-cloak>
-              <div class="flex items-center justify-between gap-2 px-3 py-2 border-b border-[var(--color-border)]">
-                <div class="text-xs uppercase tracking-wide text-[var(--color-text-secondary)]">{% translate "Media Types" %}</div>
-                <button type="button"
-                        class="text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
-                        @click="toggleAllTypes()"
-                        x-text="allTypesSelected() ? 'Hide all' : 'Show all'"></button>
-              </div>
-              <div class="max-h-64 overflow-y-auto">
-                <template x-for="type in availableMediaTypes" :key="type.value">
-                  <div class="flex items-center w-full text-sm text-[var(--color-text-secondary)]"
-                       :class="{ 'opacity-50': !type.inMonth }">
-                    <button type="button"
-                            class="flex items-center flex-1 min-w-0 px-4 py-2 text-left transition-colors cursor-pointer hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                            @click="toggleMediaType(type.value)">
-                      <span x-text="mediaTypeLabel(type)"></span>
-                      <span class="ml-auto" x-show="isTypeSelected(type.value)">
-                        {% include "app/icons/checkmark.svg" with classes="w-4 h-4 text-green-400" %}
-                      </span>
-                    </button>
-                    <button type="button"
-                            class="shrink-0 p-2 mr-2 rounded hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer"
-                            x-show="hasStatusOptions(type.value)"
-                            x-cloak
-                            @click="openStatusSubmenu(type.value)"
-                            :aria-label="`Filter ${type.label} by status`">
-                      {% include "app/icons/chevron-right.svg" with classes="w-3.5 h-3.5" %}
-                    </button>
-                    <span class="shrink-0 p-2 mr-2 inline-flex items-center justify-center invisible pointer-events-none"
-                          x-show="!hasStatusOptions(type.value)"
-                          x-cloak
-                          aria-hidden="true">
-                      {% include "app/icons/chevron-right.svg" with classes="w-3.5 h-3.5" %}
-                    </span>
-                  </div>
-                </template>
-              </div>
-            </div>
-            <div x-show="!!statusSubmenuType" x-cloak>
-              <div class="flex items-center gap-2 px-2 py-1 border-b border-[var(--color-border)]">
-                <button type="button"
-                        class="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors cursor-pointer"
-                        @click="closeStatusSubmenu()"
-                        aria-label="{% translate "Back to media types" %}">
-                  {% include "app/icons/chevron-left.svg" with classes="w-4 h-4" %}
-                </button>
-                <div class="text-xs uppercase tracking-wide text-[var(--color-text-secondary)]"
-                     x-text="submenuTypeLabel() + ' Status'"></div>
-                <button type="button"
-                        class="ml-auto text-xs text-[var(--color-text-secondary)] hover:text-[var(--color-text)] transition-colors"
-                        @click="toggleAllStatusesForType(statusSubmenuType)"
-                        x-text="allStatusesSelectedForType(statusSubmenuType) ? 'Hide all' : 'Show all'"></button>
-              </div>
-              <div class="max-h-64 overflow-y-auto">
-                <template x-for="status in (availableStatusesByType[statusSubmenuType] || [])" :key="status.value">
-                  <button type="button"
-                          class="flex items-center w-full px-4 py-2 text-left text-sm transition-colors cursor-pointer text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                          :class="{ 'opacity-50': !status.inMonth }"
-                          @click="toggleStatus(statusSubmenuType, status.value)">
-                    <span x-text="status.label"></span>
-                    <span class="ml-auto" x-show="isStatusSelected(statusSubmenuType, status.value)">
-                      {% include "app/icons/checkmark.svg" with classes="w-4 h-4 text-green-400" %}
-                    </span>
-                  </button>
-                </template>
-              </div>
-            </div>
-          </div>
+        <div class="h-10 flex items-center bg-[var(--color-surface-strong)] hover:bg-[var(--color-surface-hover)] rounded-md px-1 transition-colors"
+             @click="actionsOpen = false">
+          {% include "app/components/filter_menu.html" with filter_data_id="calendar-filter-data" filter_show_media_types=True filter_media_types_only=True filter_type_statuses=True filter_release_types=True %}
         </div>
 
         <div class="relative" @click.outside="actionsOpen = false">
@@ -152,7 +62,7 @@
                   aria-label="{% translate "Calendar Actions" %}"
                   title="{% translate "Calendar Actions" %}"
                   class="w-10 h-10 text-sm bg-[var(--color-surface-strong)] hover:bg-[var(--color-surface-hover)] rounded-md transition-colors flex items-center justify-center cursor-pointer"
-                  @click="dropdownOpen = false; actionsOpen = !actionsOpen"
+                  @click="actionsOpen = !actionsOpen"
                   :aria-expanded="actionsOpen">
             {% include "app/icons/settings.svg" with classes="w-4 h-4" %}
           </button>
@@ -225,6 +135,12 @@
              '{{ status }}',
            {% endfor %}
          ],
+         selectedReleaseTypes: [
+           {% for value, label in release_type_choices %}
+             '{{ value }}',
+           {% endfor %}
+         ],
+         releaseTypeCount: {{ release_type_choices|length }},
          calendarBaseUrl: '{{ request.scheme }}://{{ request.get_host }}{% url 'download_calendar' token=user.token %}',
          get calendarExportUrl() {
            const params = new URLSearchParams();
@@ -234,6 +150,15 @@
            this.selectedStatuses.forEach((status) => {
              params.append('status', status);
            });
+           // Left out when every release date is shown, the feed's default.
+           if (this.selectedReleaseTypes.length < this.releaseTypeCount) {
+             this.selectedReleaseTypes.forEach((releaseType) => {
+               params.append('release_types', releaseType);
+             });
+             if (!this.selectedReleaseTypes.length) {
+               params.append('release_types', 'none');
+             }
+           }
            const query = params.toString();
            return query ? `${this.calendarBaseUrl}?${query}` : this.calendarBaseUrl;
          }
@@ -303,6 +228,32 @@
       </div>
     </div>
 
+    <div class="mb-4">
+      <div class="flex items-center mb-3">
+        {% include "app/icons/calendar.svg" with classes="w-5 h-5 text-[var(--color-link)] mr-2" %}
+        <h4 class="text-sm font-semibold">{% translate "Movie Release Dates" %}</h4>
+      </div>
+      <p class="text-[var(--color-text-muted)] mb-3 text-xs">
+        {% translate "Choose which digital and physical release dates to include in this calendar URL." %}
+      </p>
+      <div class="grid gap-3 md:grid-cols-3">
+        {% for value, label in release_type_choices %}
+          <div class="flex items-center justify-between p-3 bg-[var(--color-surface-strong)] rounded-md">
+            <span class="text-[var(--color-text-secondary)] text-sm">{{ label }}</span>
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input class="sr-only peer"
+                     type="checkbox"
+                     value="{{ value }}"
+                     x-model="selectedReleaseTypes"
+                     checked>
+              <div class="w-9 h-5 bg-gray-600 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-px after:left-0.5 after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4.5 after:w-4.5 after:transition-all peer-checked:bg-indigo-600">
+              </div>
+            </label>
+          </div>
+        {% endfor %}
+      </div>
+    </div>
+
     <div class="bg-[var(--color-surface-dim)] p-3 rounded-md mb-4">
       <input readonly=""
              class="w-full py-2 px-3 bg-[var(--color-surface-dim)] rounded-md text-[var(--color-text-secondary)] text-sm border-0 focus:ring-0 outline-none font-mono"
@@ -313,26 +264,38 @@
 {% endblock content %}
 
 {% block js %}
+  {% include "app/components/filter_toolbar_scripts.html" %}
   {{ block.super }}
   <script>
     function calendarFilters() {
+      // The filter menu is the shared media list one (filter_menu.html), so the
+      // media type state comes from libraryFilterState; filtering is client side.
+      const mediaTypes = [
+        {% for media_type in filter_media_types %}
+          {
+            value: '{{ media_type }}',
+            label: '{{ media_type|media_type_readable|escapejs }}',
+            inMonth: {% if media_type in available_media_types %}true{% else %}false{% endif %},
+          }{% if not forloop.last %},{% endif %}
+        {% endfor %}
+      ];
       return {
-        dropdownOpen: false,
-        statusSubmenuType: null,
+        ...libraryFilterState({}, {}, { available: mediaTypes }),
         actionsOpen: false,
+        statusType: null,
         storageKey: 'yamtrack.calendar.filters.{{ user.id }}',
-        availableMediaTypes: [
-          {% for media_type in filter_media_types %}
+        releaseTypeOptions: [
+          {% for value, label in release_type_choices %}
             {
-              value: '{{ media_type }}',
-              label: '{{ media_type|media_type_readable|escapejs }}',
-              inMonth: {% if media_type in available_media_types %}true{% else %}false{% endif %},
+              value: '{{ value }}',
+              label: '{{ label|escapejs }}',
+              inMonth: {% if value in available_release_types %}true{% else %}false{% endif %},
             }{% if not forloop.last %},{% endif %}
           {% endfor %}
         ],
-        selectedMediaTypes: [
-          {% for media_type in filter_media_types %}
-            '{{ media_type }}'{% if not forloop.last %},{% endif %}
+        selectedReleaseTypes: [
+          {% for value, label in release_type_choices %}
+            '{{ value }}'{% if not forloop.last %},{% endif %}
           {% endfor %}
         ],
         availableStatusesByType: {
@@ -364,7 +327,11 @@
         filteredListHtml: '',
         init() {
           this.loadSavedFilters();
-          this.$watch('selectedMediaTypes', () => {
+          this.$watch('selectedTypes', () => {
+            this.applyFilter();
+            this.persistFilters();
+          });
+          this.$watch('selectedReleaseTypes', () => {
             this.applyFilter();
             this.persistFilters();
           });
@@ -384,9 +351,21 @@
             const saved = JSON.parse(raw);
             const validTypes = new Set(this.availableMediaTypes.map(type => type.value));
 
-            if (Array.isArray(saved.selectedMediaTypes)) {
-              this.selectedMediaTypes = saved.selectedMediaTypes.filter(
+            // Saved under the name the old calendar dropdown used.
+            const savedTypes = saved.selectedTypes || saved.selectedMediaTypes;
+            if (Array.isArray(savedTypes)) {
+              this.selectedTypes = savedTypes.filter(
                 mediaType => validTypes.has(mediaType),
+              );
+            }
+
+            // Saved before release dates existed: leave them all shown.
+            if (Array.isArray(saved.selectedReleaseTypes)) {
+              const validReleaseTypes = new Set(
+                this.releaseTypeOptions.map(type => type.value),
+              );
+              this.selectedReleaseTypes = saved.selectedReleaseTypes.filter(
+                value => validReleaseTypes.has(value),
               );
             }
 
@@ -420,12 +399,36 @@
         persistFilters() {
           try {
             window.localStorage.setItem(this.storageKey, JSON.stringify({
-              selectedMediaTypes: this.selectedMediaTypes,
+              selectedTypes: this.selectedTypes,
+              selectedReleaseTypes: this.selectedReleaseTypes,
               selectedStatusesByType: this.selectedStatusesByType,
             }));
           } catch (error) {
             // Ignore storage failures (private mode or disabled storage).
           }
+        },
+        // Show everything again: every type, status and release date.
+        clearFilters() {
+          this.selectedTypes = this.availableMediaTypes.map(type => type.value);
+          this.selectedReleaseTypes = this.releaseTypeOptions.map(type => type.value);
+          const allStatuses = {};
+          this.availableMediaTypes.forEach((type) => {
+            allStatuses[type.value] = (
+              this.availableStatusesByType[type.value] || []
+            ).map(status => status.value);
+          });
+          this.selectedStatusesByType = allStatuses;
+        },
+        // The button label also flags filters the Media Types pane hides.
+        extraFilterLabels() {
+          const labels = [];
+          if (this.selectedTypes.some(type => this.hasPartialStatusFilter(type))) {
+            labels.push(gettext('Status'));
+          }
+          if (this.selectedReleaseTypes.length < this.releaseTypeOptions.length) {
+            labels.push(this.releaseTypesLabel());
+          }
+          return labels;
         },
         hasPartialStatusFilter(mediaType) {
           return (
@@ -433,62 +436,35 @@
             && !this.allStatusesSelectedForType(mediaType)
           );
         },
-        mediaTypeLabel(type) {
+        typeLabel(type) {
           const statusMarker = this.hasPartialStatusFilter(type.value) ? ' ·' : '';
           return `${type.label}${statusMarker}`;
         },
-        dropdownLabel() {
-          const statusFiltered = this.selectedMediaTypes.some(
-            mediaType => this.hasPartialStatusFilter(mediaType),
+        releaseTypesLabel() {
+          const total = this.releaseTypeOptions.length;
+          const selected = this.selectedReleaseTypes.length;
+          if (!total || selected === total) {
+            return gettext('All');
+          }
+          if (selected === 0) {
+            return gettext('None');
+          }
+          const match = this.releaseTypeOptions.find(
+            type => type.value === this.selectedReleaseTypes[0],
           );
-          const statusMarker = statusFiltered ? ' ·' : '';
-          if (this.allTypesSelected()) {
-            return `All Types${statusMarker}`;
-          }
-          if (this.selectedMediaTypes.length === 0) {
-            return 'No Types';
-          }
-          if (this.selectedMediaTypes.length === 1) {
-            const selectedType = this.availableMediaTypes.find(
-              type => type.value === this.selectedMediaTypes[0],
-            );
-            return selectedType ? `${selectedType.label}${statusMarker}` : '1 Type';
-          }
-          return `${this.selectedMediaTypes.length} Types${statusMarker}`;
+          return selected === 1 && match ? match.label : `${selected}/${total}`;
         },
-        allTypesSelected() {
-          return (
-            this.availableMediaTypes.length > 0
-            && this.selectedMediaTypes.length === this.availableMediaTypes.length
-          );
+        isReleaseTypeSelected(value) {
+          return this.selectedReleaseTypes.includes(value);
         },
-        isTypeSelected(mediaType) {
-          return this.selectedMediaTypes.includes(mediaType);
-        },
-        toggleMediaType(mediaType) {
-          if (this.isTypeSelected(mediaType)) {
-            this.selectedMediaTypes = this.selectedMediaTypes.filter(
-              selectedType => selectedType !== mediaType,
+        toggleReleaseType(value) {
+          if (this.isReleaseTypeSelected(value)) {
+            this.selectedReleaseTypes = this.selectedReleaseTypes.filter(
+              selected => selected !== value,
             );
           } else {
-            this.selectedMediaTypes = [...this.selectedMediaTypes, mediaType];
+            this.selectedReleaseTypes = [...this.selectedReleaseTypes, value];
           }
-          this.applyFilter();
-        },
-        toggleAllTypes() {
-          if (this.allTypesSelected()) {
-            this.clearAll();
-            return;
-          }
-          this.selectAll();
-        },
-        selectAll() {
-          this.selectedMediaTypes = this.availableMediaTypes.map(type => type.value);
-          this.applyFilter();
-        },
-        clearAll() {
-          this.selectedMediaTypes = [];
-          this.applyFilter();
         },
         hasStatusOptions(mediaType) {
           return (
@@ -496,33 +472,24 @@
             && this.availableStatusesByType[mediaType].length > 0
           );
         },
-        openStatusSubmenu(mediaType) {
-          if (this.hasStatusOptions(mediaType)) {
-            this.statusSubmenuType = mediaType;
-          }
-        },
-        closeStatusSubmenu() {
-          this.statusSubmenuType = null;
-        },
-        submenuTypeLabel() {
+        statusTypeLabel() {
           const selectedType = this.availableMediaTypes.find(
-            type => type.value === this.statusSubmenuType,
+            type => type.value === this.statusType,
           );
           return selectedType ? selectedType.label : '';
         },
-        isStatusSelected(mediaType, status) {
+        isTypeStatusSelected(mediaType, status) {
           return (this.selectedStatusesByType[mediaType] || []).includes(status);
         },
-        toggleStatus(mediaType, status) {
+        toggleTypeStatus(mediaType, status) {
           const selectedStatuses = this.selectedStatusesByType[mediaType] || [];
-          if (this.isStatusSelected(mediaType, status)) {
+          if (this.isTypeStatusSelected(mediaType, status)) {
             this.selectedStatusesByType[mediaType] = selectedStatuses.filter(
               selectedStatus => selectedStatus !== status,
             );
           } else {
             this.selectedStatusesByType[mediaType] = [...selectedStatuses, status];
           }
-          this.applyFilter();
         },
         allStatusesSelectedForType(mediaType) {
           const availableStatuses = this.availableStatusesByType[mediaType] || [];
@@ -540,7 +507,6 @@
               this.availableStatusesByType[mediaType] || []
             ).map(status => status.value);
           }
-          this.applyFilter();
         },
         applyFilter() {
           if (this.$refs.gridTemplate) {
@@ -552,7 +518,8 @@
           this.$nextTick(() => this.bindMobileCalendar());
         },
         filterReleaseMarkup(html) {
-          const selectedTypes = new Set(this.selectedMediaTypes);
+          const selectedTypes = new Set(this.selectedTypes);
+          const selectedReleaseTypes = new Set(this.selectedReleaseTypes);
           const container = document.createElement('div');
           container.innerHTML = html;
 
@@ -560,7 +527,9 @@
             const type = el.dataset.releaseMediaType;
             const status = el.dataset.releaseStatus;
             const selectedForType = this.selectedStatusesByType[type] || [];
-            const typeHidden = !selectedTypes.has(type);
+            const releaseType = el.dataset.releaseType;
+            const typeHidden = !selectedTypes.has(type)
+              || (releaseType && !selectedReleaseTypes.has(releaseType));
             const statusHidden = status && !selectedForType.includes(status);
             if (typeHidden || statusHidden) {
               el.remove();
@@ -641,10 +610,10 @@
 
             const eventCount = releaseCountByDay.get(day) || 0;
             if (agendaTitle) {
-              agendaTitle.textContent = monthName ? `${monthName} ${day}` : `Day ${day}`;
+              agendaTitle.textContent = monthName ? `${monthName} ${day}` : `${gettext('Day')} ${day}`;
             }
             if (agendaCount) {
-              agendaCount.textContent = eventCount === 1 ? '1 release' : `${eventCount} releases`;
+              agendaCount.textContent = `${eventCount} ${gettext(eventCount === 1 ? 'release' : 'releases')}`;
             }
           };
 

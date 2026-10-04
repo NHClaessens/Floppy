@@ -157,6 +157,10 @@ def metadata_default_source(user, media_type: str) -> str:
             provider = getattr(user, "tv_metadata_source_default", None)
         elif media_type == MediaTypes.ANIME.value:
             provider = getattr(user, "anime_metadata_source_default", None)
+        elif media_type == MediaTypes.BOOK.value:
+            provider = getattr(user, "book_metadata_source_default", None)
+        elif media_type in (MediaTypes.COMIC.value, MediaTypes.COMIC_ISSUE.value):
+            provider = getattr(user, "comic_metadata_source_default", None)
 
     provider = provider or config.get_default_source_name(media_type).value
     if provider_is_enabled(provider, user):
@@ -172,9 +176,7 @@ def metadata_default_source(user, media_type: str) -> str:
         # rows, silently changing the shape of their library. Keep them on a
         # grouped provider whenever one is usable.
         grouped = [
-            source
-            for source in available
-            if source.value in GROUPED_ANIME_PROVIDERS
+            source for source in available if source.value in GROUPED_ANIME_PROVIDERS
         ]
         if grouped:
             return grouped[0].value
@@ -185,10 +187,14 @@ def metadata_default_source(user, media_type: str) -> str:
 def metadata_language_default(user, item: Item | None = None) -> str:
     """Return the effective preferred metadata language for a user/item."""
     if item is not None and user and getattr(user, "is_authenticated", False):
-        preference = MetadataProviderPreference.objects.filter(
-            user=user,
-            item=item,
-        ).only("language").first()
+        preference = (
+            MetadataProviderPreference.objects.filter(
+                user=user,
+                item=item,
+            )
+            .only("language")
+            .first()
+        )
         if preference and preference.language:
             return preference.language
 
@@ -273,8 +279,7 @@ def prefers_grouped_anime(user) -> bool:
     if not getattr(user, "anime_enabled", False):
         return False
     return (
-        metadata_default_source(user, MediaTypes.ANIME.value)
-        in GROUPED_ANIME_PROVIDERS
+        metadata_default_source(user, MediaTypes.ANIME.value) in GROUPED_ANIME_PROVIDERS
     )
 
 
@@ -451,6 +456,25 @@ def _normalize_external_ids(
     }
 
 
+def _upsert_provider_link(*, defaults: dict, **lookup):
+    """Upsert one provider link, skipping the write when nothing changed.
+
+    Detail pages and the track modal call this on GET. update_or_create saves
+    an existing row even when every field matches, and on SQLite that write
+    queues behind any background writer; a matching row needs no write.
+    """
+    existing = ItemProviderLink.objects.filter(**lookup).first()
+    if existing is not None and all(
+        getattr(existing, field) == value for field, value in defaults.items()
+    ):
+        return existing, False
+    return update_or_create_race_safe(
+        ItemProviderLink.objects,
+        defaults=defaults,
+        **lookup,
+    )
+
+
 def upsert_provider_links(
     item: Item | None,
     metadata: dict | None,
@@ -490,8 +514,7 @@ def upsert_provider_links(
         if episode_offset is not None:
             link_defaults["episode_offset"] = episode_offset
         provider_link_outcome = run_retryable_db_operation(
-            lambda: update_or_create_race_safe(
-                ItemProviderLink.objects,
+            lambda: _upsert_provider_link(
                 item=item,
                 provider=normalized_provider,
                 provider_media_type=normalized_media_type,
@@ -523,8 +546,7 @@ def upsert_provider_links(
             candidate_provider=candidate_provider,
             external_id=external_id,
         ):
-            return update_or_create_race_safe(
-                ItemProviderLink.objects,
+            return _upsert_provider_link(
                 item=item,
                 provider=candidate_provider,
                 provider_media_type=normalized_media_type,
@@ -626,6 +648,22 @@ def get_or_create_tracked_season_item(
     of) the resolved item, so corruption repairs itself the next time any
     caller touches that show/season, with no manual command required.
     """
+    from app.services.order_resolution import order_from_media_id
+
+    order = order_from_media_id(media_id, source)
+    if order is not None:
+        item, _ = Item.objects.get_or_create(
+            episode_order=order,
+            media_id=order.media_id,
+            source=order.provider,
+            media_type=MediaTypes.SEASON.value,
+            season_number=season_number,
+            episode_number=None,
+            library_media_type=library_media_type,
+            defaults=defaults or {},
+        )
+        return item
+
     link = (
         ItemProviderLink.objects.filter(
             provider=provider,
@@ -930,6 +968,7 @@ def resolve_provider_media_id(
     persistence_mode: str = "required",
     retry_max_retries: int | None = None,
     on_deferred: Callable[[Exception], None] | None = None,
+    persist_links: bool = True,
 ) -> str | None:
     """Return the mapped provider ID for a tracked item."""
     if item is None:
@@ -993,13 +1032,14 @@ def resolve_provider_media_id(
                 return None
             if not identity or identity.media_type != MediaTypes.TV.value:
                 return None
-            persist_mal_tmdb_identity(
-                item,
-                identity,
-                persistence_mode=persistence_mode,
-                retry_max_retries=retry_max_retries,
-                on_deferred=on_deferred,
-            )
+            if persist_links:
+                persist_mal_tmdb_identity(
+                    item,
+                    identity,
+                    persistence_mode=persistence_mode,
+                    retry_max_retries=retry_max_retries,
+                    on_deferred=on_deferred,
+                )
             return identity.media_id
 
         mapped_series_id = anime_mapping.resolve_provider_series_id(
@@ -1008,22 +1048,23 @@ def resolve_provider_media_id(
         )
 
         if mapped_series_id:
-            run_retryable_db_operation(
-                lambda: update_or_create_race_safe(
-                    ItemProviderLink.objects,
-                    item=item,
-                    provider=provider,
-                    provider_media_type=provider_media_type,
-                    season_number=season_number,
-                    defaults={"provider_media_id": str(mapped_series_id)},
-                ),
-                mode=persistence_mode,
-                fallback=lambda: (None, False),
-                operation_name="grouped-anime provider-link upsert",
-                operation_logger=logger,
-                on_deferred=on_deferred,
-                **retry_kwargs,
-            )
+            if persist_links:
+                run_retryable_db_operation(
+                    lambda: update_or_create_race_safe(
+                        ItemProviderLink.objects,
+                        item=item,
+                        provider=provider,
+                        provider_media_type=provider_media_type,
+                        season_number=season_number,
+                        defaults={"provider_media_id": str(mapped_series_id)},
+                    ),
+                    mode=persistence_mode,
+                    fallback=lambda: (None, False),
+                    operation_name="grouped-anime provider-link upsert",
+                    operation_logger=logger,
+                    on_deferred=on_deferred,
+                    **retry_kwargs,
+                )
             return str(mapped_series_id)
 
     return None
@@ -1330,6 +1371,7 @@ def resolve_detail_metadata(
     persistence_mode: str = "required",
     retry_max_retries: int | None = None,
     on_persistence_deferred: Callable[[Exception], None] | None = None,
+    persist_links: bool = True,
 ) -> MetadataResolutionResult:
     """Resolve the detail-page display provider and overlay metadata when mapped."""
     provider = get_preferred_provider(
@@ -1371,6 +1413,7 @@ def resolve_detail_metadata(
             persistence_mode=persistence_mode,
             retry_max_retries=retry_max_retries,
             on_deferred=on_persistence_deferred,
+            persist_links=persist_links,
         )
         if provider_media_id:
             overlay_metadata = services.get_media_metadata(
@@ -1418,7 +1461,7 @@ def resolve_detail_metadata(
                 )
         else:
             mapping_status = "missing"
-    elif item is not None and isinstance(base_metadata, dict):
+    elif persist_links and item is not None and isinstance(base_metadata, dict):
         upsert_provider_links(
             item,
             base_metadata,

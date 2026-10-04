@@ -18,19 +18,13 @@ from integrations.imports.helpers import MediaImportError, MediaImportUnexpected
 logger = logging.getLogger(__name__)
 
 
-def get_token(request, redirect_uri=None):
-    """View for getting the SIMKL OAuth2 token."""
-    code = request.GET["code"]
-    url = "https://api.simkl.com/oauth/token"
+def get_token(request, redirect_uri=None, code_verifier=None):
+    """View for getting the SIMKL OAuth2 token.
 
-    headers = {
-        "Content-Type": "application/json",
-    }
-
-    params = {
-        "client_id": credentials.get("simkl", "client_id"),
-        "client_secret": credentials.get("simkl", "client_secret"),
-        "code": code,
+    AUTH V2 sends a PKCE verifier; AUTH V1 apps have none and no refresh token.
+    """
+    data = {
+        "code": request.GET["code"],
         "grant_type": "authorization_code",
         "redirect_uri": redirect_uri
         or app_helpers.build_absolute_app_url(
@@ -38,39 +32,104 @@ def get_token(request, redirect_uri=None):
             reverse("import_simkl_private"),
         ),
     }
-
-    try:
-        token_response = app.providers.services.api_request(
-            "SIMKL",
-            "POST",
-            url,
-            headers=headers,
-            params=params,
-        )
-    except services.ProviderAPIError as error:
-        if error.status_code == requests.codes.unauthorized:
-            msg = "Invalid SIMKL secret key."
-            raise MediaImportError(msg) from error
-        raise
+    if code_verifier:
+        data["code_verifier"] = code_verifier
+    token_response = _request_token(data, auth_v1=not code_verifier)
 
     return {
         "access_token": token_response["access_token"],
+        "refresh_token": token_response.get("refresh_token"),
         "username": get_username(token_response["access_token"]),
+    }
+
+
+def get_access_token(encrypted_refresh_token):
+    """Get access token from encrypted refresh token.
+
+    SIMKL refresh tokens don't rotate, so the stored one stays valid.
+    """
+    return _request_token(
+        {
+            "grant_type": "refresh_token",
+            "refresh_token": helpers.decrypt_or_raise(encrypted_refresh_token),
+        },
+    )["access_token"]
+
+
+def _request_token(data, auth_v1=False):
+    """Exchange a code or refresh token at SIMKL's token endpoint."""
+    headers = {
+        "simkl-api-key": credentials.get("simkl", "client_id"),
+        "User-Agent": f"Floppy/{settings.VERSION}",
+    }
+    data = {
+        "client_id": credentials.get("simkl", "client_id"),
+        "client_secret": credentials.get("simkl", "client_secret"),
+        **data,
+    }
+
+    try:
+        if auth_v1:
+            # AUTH V1 takes a JSON body; remove when it retires (~April 2027)
+            return app.providers.services.api_request(
+                "SIMKL",
+                "POST",
+                "https://api.simkl.com/oauth/token",
+                headers=headers,
+                params=data,
+            )
+        return app.providers.services.api_request(
+            "SIMKL",
+            "POST",
+            "https://api.simkl.com/oauth2/token",
+            headers=headers,
+            data=data,
+        )
+    except requests.exceptions.HTTPError as error:
+        # api_request re-raises HTTP errors as-is, so a rejected exchange
+        # surfaced as a 500 page instead of this message (#1318).
+        if error.response.status_code in (
+            requests.codes.unauthorized,
+            requests.codes.forbidden,
+        ):
+            msg = (
+                "SIMKL rejected the Client ID and Client secret. Check them in "
+                "Settings > Metadata, and that the SIMKL app's redirect URI "
+                "matches this Floppy address."
+            )
+            raise MediaImportError(msg) from error
+        raise
+
+
+def _api_headers(token):
+    """Headers SIMKL requires on authenticated API calls."""
+    return {
+        "Authorization": f"Bearer {token}",
+        "simkl-api-key": credentials.get("simkl", "client_id"),
+        "User-Agent": f"Floppy/{settings.VERSION}",
+    }
+
+
+def _api_params():
+    """Query parameters SIMKL requires on every API call."""
+    return {
+        "client_id": credentials.get("simkl", "client_id"),
+        "app-name": "floppy",
+        "app-version": settings.VERSION,
     }
 
 
 def get_username(token):
     """Get the username from SIMKL using the provided token."""
     try:
+        # GET: AUTH V2 tokens without a scope are read-only, and SIMKL
+        # treats POST /users/settings as a write
         user_info = app.providers.services.api_request(
             "SIMKL",
-            "POST",
+            "GET",
             "https://api.simkl.com/users/settings",
-            headers={
-                "Authorization": f"Bearer {token}",
-                "simkl-api-key": credentials.get("simkl", "client_id"),
-                "Content-Type": "application/json",
-            },
+            headers=_api_headers(token),
+            params=_api_params(),
         )
     except services.ProviderAPIError as error:
         if error.status_code == requests.codes.unauthorized:
@@ -81,9 +140,15 @@ def get_username(token):
     return user_info["user"]["name"]
 
 
-def importer(token, user, mode, anime_destination=MediaTypes.ANIME.value):
+def importer(
+    token,
+    user,
+    mode,
+    anime_destination=MediaTypes.ANIME.value,
+    refresh_token=None,
+):
     """Import tv shows, movies and anime from SIMKL."""
-    simkl_importer = SimklImporter(token, user, mode)
+    simkl_importer = SimklImporter(token, user, mode, refresh_token=refresh_token)
     return simkl_importer.import_data()
 
 
@@ -92,7 +157,14 @@ class SimklImporter:
 
     SIMKL_API_BASE_URL = "https://api.simkl.com"
 
-    def __init__(self, token, user, mode, anime_destination=MediaTypes.ANIME.value):
+    def __init__(
+        self,
+        token,
+        user,
+        mode,
+        anime_destination=MediaTypes.ANIME.value,
+        refresh_token=None,
+    ):
         """Initialize the importer with token, user, and mode.
 
         Args:
@@ -105,8 +177,14 @@ class SimklImporter:
                 Both now follow one rule, so the third shape it produced only
                 created shows tracked in two libraries at once. Recurring
                 schedules persist this kwarg, so it is still accepted.
+            refresh_token (str, optional): Encrypted AUTH V2 refresh token.
+                Recurring schedules store it because the access token expires
+                after 7 days; schedules from AUTH V1 have none.
         """
-        self.token = helpers.decrypt_or_raise(token)
+        if refresh_token:
+            self.token = get_access_token(refresh_token)
+        else:
+            self.token = helpers.decrypt_or_raise(token)
         self.user = user
         self.mode = mode
         self.warnings = []
@@ -150,11 +228,8 @@ class SimklImporter:
     def _get_user_list(self):
         """Get the user's list from Simkl."""
         url = f"{self.SIMKL_API_BASE_URL}/sync/all-items/"
-        headers = {
-            "Authorization": f"Bearer: {self.token}",
-            "simkl-api-key": credentials.get("simkl", "client_id"),
-        }
         params = {
+            **_api_params(),
             "extended": "full",
             "episode_watched_at": "yes",
             "memos": "yes",
@@ -164,7 +239,7 @@ class SimklImporter:
             "SIMKL",
             "GET",
             url,
-            headers=headers,
+            headers=_api_headers(self.token),
             params=params,
         )
 

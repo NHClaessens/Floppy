@@ -34,8 +34,6 @@ def bulk_episode_plays_task(
     library_media_type: str | None = None,
 ):
     """Apply a bulk episode play range in the background after the modal has closed."""
-    from datetime import date
-
     from app.models import PodcastShow
     from app.services import bulk_episode_tracking, metadata_resolution
 
@@ -128,10 +126,18 @@ def bulk_episode_plays_task(
         if first_ep["order"] <= ep["order"] <= last_ep["order"]
     ]
 
+    # Keep the picker's time-of-day (when TRACK_TIME gave the user one) instead
+    # of collapsing the range to whole dates — see #1232.
     start_date = (
-        date.fromisoformat(start_date_str.split("T")[0]) if start_date_str else None
+        bulk_episode_tracking.coerce_episode_datetime(start_date_str)
+        if start_date_str
+        else None
     )
-    end_date = date.fromisoformat(end_date_str.split("T")[0]) if end_date_str else None
+    end_date = (
+        bulk_episode_tracking.coerce_episode_datetime(end_date_str)
+        if end_date_str
+        else None
+    )
 
     result = bulk_episode_tracking.apply_bulk_episode_plays(
         user,
@@ -166,8 +172,6 @@ def bulk_music_plays_task(
     end_date_str: str | None,
 ):
     """Apply a bulk music play range in the background after the modal has closed."""
-    from datetime import date
-
     from app.models import Album, Artist
     from app.services import bulk_music_tracking
 
@@ -227,10 +231,18 @@ def bulk_music_plays_task(
         if first_ep["order"] <= ep["order"] <= last_ep["order"]
     ]
 
+    # Keep the picker's time-of-day instead of collapsing the range to whole
+    # dates — same defect as #1232's episode task, applied here too.
     start_date = (
-        date.fromisoformat(start_date_str.split("T")[0]) if start_date_str else None
+        bulk_music_tracking.coerce_episode_datetime(start_date_str)
+        if start_date_str
+        else None
     )
-    end_date = date.fromisoformat(end_date_str.split("T")[0]) if end_date_str else None
+    end_date = (
+        bulk_music_tracking.coerce_episode_datetime(end_date_str)
+        if end_date_str
+        else None
+    )
 
     result = bulk_music_tracking.apply_bulk_music_plays(
         user,

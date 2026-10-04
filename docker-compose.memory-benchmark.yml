@@ -3,13 +3,35 @@ services:
     # The harness always sets this before `up`; a default lets `exec` and
     # `down` re-read this file during cleanup without requiring interpolation.
     image: ${FLOPPY_BENCHMARK_IMAGE:-floppy:memory-benchmark}
+    mem_limit: ${FLOPPY_BENCHMARK_MEMORY_LIMIT:-1000000000}
+    memswap_limit: ${FLOPPY_BENCHMARK_MEMORY_LIMIT:-1000000000}
+    # The sampler reads /proc/<pid>/smaps_rollup for every supervised process.
+    # This diagnostic-only capability is not part of the application runtime.
+    cap_add:
+      - SYS_PTRACE
     environment:
       SECRET: memory-benchmark-only-secret
       REDIS_URL: redis://redis:6379
       DEBUG: "False"
       DEMO_ACCOUNT_ENABLED: "False"
       REGISTRATION: "False"
-      FLOPPY_RESOURCE_TIER: standard
+      # The harness sets these from --topology. Keep defaults so ad-hoc compose
+      # inspection remains possible without its environment.
+      FLOPPY_RESOURCE_TIER: ${FLOPPY_BENCHMARK_RESOURCE_TIER:-standard}
+      WEB_CONCURRENCY: ${FLOPPY_BENCHMARK_WEB_CONCURRENCY:-1}
+      GUNICORN_THREADS: ${FLOPPY_BENCHMARK_GUNICORN_THREADS:-4}
+      CELERY_WORKER_CONCURRENCY: ${FLOPPY_BENCHMARK_CELERY_CONCURRENCY:-1}
+      FLOPPY_CELERY_QUEUES: ${FLOPPY_BENCHMARK_CELERY_QUEUES:-celery,discover}
+      FLOPPY_CELERY_ROLE: ${FLOPPY_BENCHMARK_CELERY_ROLE:-background}
+      FLOPPY_START_INTERACTIVE_WORKER: ${FLOPPY_BENCHMARK_START_INTERACTIVE_WORKER:-true}
+      FLOPPY_START_DISCOVER_WORKER: ${FLOPPY_BENCHMARK_START_DISCOVER_WORKER:-false}
+      # Gunicorn reads this itself. Empty by default so the image's own sizing
+      # applies; a harness sets it to disable worker recycling, which otherwise
+      # hides per-request retention behind a restart.
+      GUNICORN_CMD_ARGS: ${FLOPPY_BENCHMARK_GUNICORN_CMD_ARGS:-}
+      # Lets a harness drive the worker's RSS ceiling far below its tier
+      # default, so the recycling path itself can be exercised in minutes.
+      FLOPPY_GUNICORN_MAX_WORKER_MEMORY_BYTES: ${FLOPPY_BENCHMARK_MAX_WORKER_MEMORY_BYTES:-}
     depends_on:
       redis:
         condition: service_started

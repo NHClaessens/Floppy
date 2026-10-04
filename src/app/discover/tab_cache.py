@@ -664,6 +664,35 @@ def _acquire_refresh_lock(
     return True
 
 
+def release_refresh_lock(user_id: int, media_type: str, *, show_more: bool) -> None:
+    """Drop a tab refresh lock the task did not need to use."""
+    _cache_delete(
+        _refresh_lock_key(
+            user_id, _normalize_media_type(media_type), show_more=show_more
+        )
+    )
+
+
+def release_refresh_reservation(
+    user_id: int, media_type: str, *, show_more: bool
+) -> None:
+    """Drop a queued refresh's lock and scheduled marker when it will not run.
+
+    Unlike release_refresh_lock, this also clears the scheduled marker, so a later
+    request can queue a real rebuild instead of waiting out the marker's TTL.
+    """
+    media_type = _normalize_media_type(media_type)
+    release_refresh_lock(user_id, media_type, show_more=show_more)
+    _cache_delete(
+        _refresh_scheduled_key(
+            user_id,
+            media_type,
+            show_more=show_more,
+            activity_version=_get_activity_version(user_id, media_type),
+        )
+    )
+
+
 def _reserve_scheduled_refresh(
     user_id: int,
     media_type: str,
@@ -1225,6 +1254,8 @@ def schedule_user_tab_warmup(
     show_more: bool = False,
 ) -> int:
     """Schedule missing or stale Discover tabs for a user in the background."""
+    if not user.show_discover:
+        return 0
     priority_media_type = _normalize_media_type(prioritize_media_type or ALL_MEDIA_KEY)
     targets = media_types or get_user_tab_targets(user)
     normalized_targets = list(

@@ -1,15 +1,14 @@
-import calendar
 import contextlib
 import logging
 import time
 from collections import defaultdict
 from datetime import date, timedelta
+from functools import partial
 from itertools import pairwise
 from urllib.parse import urlencode
 
 from django.apps import apps
 from django.conf import settings
-from django.core.exceptions import ObjectDoesNotExist
 from django.core.paginator import EmptyPage, Paginator
 from django.db.models.functions import ExtractDay, ExtractMonth
 from django.db.utils import OperationalError
@@ -25,12 +24,10 @@ from app import (
     helpers,
     history_cache,
     history_cache_reader,
-    history_processor,
 )
 from app import statistics as stats
 from app.models import (
     Anime,
-    BasicMedia,
     BoardGame,
     Book,
     Comic,
@@ -57,78 +54,6 @@ _MONTH_CACHE_UNSUPPORTED_FILTER_KEYS = frozenset(
         "tv",
     },
 )
-
-
-@require_GET
-def history_modal(
-    request,
-    source,
-    media_type,
-    media_id,
-    season_number=None,
-    episode_number=None,
-):
-    """Return the history page for a media item."""
-    instance_id = request.GET.get("instance_id")
-    if instance_id:
-        try:
-            media = BasicMedia.objects.get_media(
-                request.user,
-                media_type,
-                instance_id,
-            )
-            user_medias = [media]
-        except (ObjectDoesNotExist, ValueError, TypeError):
-            user_medias = BasicMedia.objects.filter_media(
-                request.user,
-                media_id,
-                media_type,
-                source,
-                season_number=season_number,
-                episode_number=episode_number,
-            )
-    else:
-        user_medias = BasicMedia.objects.filter_media(
-            request.user,
-            media_id,
-            media_type,
-            source,
-            season_number=season_number,
-            episode_number=episode_number,
-        )
-
-    try:
-        total_medias = user_medias.count()
-    except TypeError:
-        total_medias = len(user_medias)
-    timeline_entries = []
-    for index, media in enumerate(user_medias, start=1):
-        history = (
-            media.history.filter(end_date__isnull=False)
-            if hasattr(media.history, "filter")
-            else [h for h in media.history.all() if h.end_date]
-        )
-        if history:
-            media_entry_number = total_medias - index + 1
-            timeline_entries.extend(
-                history_processor.process_history_entries(
-                    history,
-                    media_type,
-                    media_entry_number,
-                    request.user,
-                ),
-            )
-    return render(
-        request,
-        "app/components/fill_history.html",
-        {
-            "user": request.user,
-            "media_type": media_type,
-            "timeline": timeline_entries,
-            "total_medias": total_medias,
-            "return_url": request.GET.get("return_url", ""),
-        },
-    )
 
 
 @require_http_methods(["DELETE"])
@@ -412,7 +337,7 @@ def _build_release_history_days(
 
     if include_episodes:
         Episode = apps.get_model("app", "Episode")
-        episode_qs = Episode.objects.filter(
+        episode_qs = Episode.all_objects.filter(
             related_season__user=user,
             item__release_datetime__isnull=False,
         ).select_related(
@@ -605,18 +530,17 @@ def _build_release_history_days(
 
 def _filter_history_by_enabled_media_types(history_days, user):
     """Filter history entries to only include enabled media types."""
-    enabled_types = user.get_enabled_media_types()
-    if not enabled_types:
+    allowed_types = _enabled_history_media_types(user)
+    if allowed_types is None:
         return history_days
-
-    allowed_types = set(enabled_types)
-    if MediaTypes.TV.value in allowed_types:
-        allowed_types.add(MediaTypes.EPISODE.value)
-        allowed_types.add(MediaTypes.SEASON.value)
 
     filtered_days = []
     for day in history_days:
         if isinstance(day, dict):
+            if day.get("_entries_filtered"):
+                if day.get("entries"):
+                    filtered_days.append(day)
+                continue
             entries = day.get("entries", [])
             filtered_entries = [
                 entry for entry in entries if entry.get("media_type") in allowed_types
@@ -636,6 +560,16 @@ def _filter_history_by_enabled_media_types(history_days, user):
             filtered_days.append(day)
 
     return filtered_days
+
+
+def _enabled_history_media_types(user):
+    enabled_types = user.get_enabled_media_types()
+    if not enabled_types:
+        return None
+    allowed_types = set(enabled_types)
+    if MediaTypes.TV.value in allowed_types:
+        allowed_types.update({MediaTypes.EPISODE.value, MediaTypes.SEASON.value})
+    return allowed_types
 
 
 def _can_use_cached_month_history(
@@ -718,6 +652,12 @@ def _cached_history_entry_matches_filters(entry, filters):
     )
 
 
+def _cached_history_entry_is_visible(entry, *, filters, allowed_types):
+    if allowed_types is not None and entry.get("media_type") not in allowed_types:
+        return False
+    return not filters or _cached_history_entry_matches_filters(entry, filters)
+
+
 def _filter_cached_history_days(history_days, filters):
     if not filters:
         return history_days
@@ -725,6 +665,15 @@ def _filter_cached_history_days(history_days, filters):
     filtered_days = []
     for day in history_days:
         if not isinstance(day, dict):
+            continue
+        if day.get("_entries_filtered"):
+            if day.get("entries"):
+                filtered_day = day.copy()
+                total_minutes = filtered_day.get("total_minutes") or 0
+                filtered_day["total_runtime_display"] = (
+                    helpers.minutes_to_hhmm(total_minutes) if total_minutes else "0min"
+                )
+                filtered_days.append(filtered_day)
             continue
 
         filtered_entries = [
@@ -761,15 +710,29 @@ def _annotate_history_day_for_template(day):
     if not isinstance(day, dict):
         return None
     annotated_day = day.copy()
+    day_date = annotated_day.get("date")
+    if isinstance(day_date, str):
+        day_date = parse_date(day_date)
+    if day_date:
+        annotated_day["weekday"] = formats.date_format(day_date, "l")
+        annotated_day["date_display"] = formats.date_format(
+            day_date,
+            "DATE_FORMAT",
+        )
     entries = list(annotated_day.get("entries", []))
+    entry_count = annotated_day.get("entry_count", len(entries))
+    entry_offset = annotated_day.get("_entry_window_offset", 0)
     annotated_day.update(
         {
             "day_key": _history_day_key(annotated_day),
-            "entry_count": len(entries),
-            "entry_offset": 0,
-            "next_entry_offset": len(entries),
-            "has_more": False,
-            "remaining_entry_count": 0,
+            "entry_count": entry_count,
+            "entry_offset": entry_offset,
+            "next_entry_offset": entry_offset + len(entries),
+            "has_more": entry_offset + len(entries) < entry_count,
+            "remaining_entry_count": max(
+                entry_count - entry_offset - len(entries),
+                0,
+            ),
         },
     )
     return annotated_day
@@ -950,10 +913,14 @@ def _prepare_history_day_page(day, user, filters, offset=0):
 
     page_size = history_cache.HISTORY_ENTRIES_PER_DAY_PAGE
     entries = annotated_day["entries"]
-    annotated_day["entries"] = entries[offset : offset + page_size]
+    window_offset = day.get("_entry_window_offset", 0)
+    local_offset = max(offset - window_offset, 0)
+    annotated_day["entries"] = entries[local_offset : local_offset + page_size]
     annotated_day["entry_offset"] = offset
-    annotated_day["next_entry_offset"] = offset + page_size
-    annotated_day["has_more"] = offset + page_size < annotated_day["entry_count"]
+    annotated_day["next_entry_offset"] = offset + len(annotated_day["entries"])
+    annotated_day["has_more"] = (
+        annotated_day["next_entry_offset"] < annotated_day["entry_count"]
+    )
     annotated_day["remaining_entry_count"] = max(
         annotated_day["entry_count"] - annotated_day["next_entry_offset"],
         0,
@@ -1045,7 +1012,7 @@ def history_genres(request):
                     str(g).strip() for g in implied_genres_list if _is_valid_genre(g)
                 )
 
-    for genres_list in Episode.objects.filter(
+    for genres_list in Episode.all_objects.filter(
         related_season__user=request.user
     ).values_list("related_season__related_tv__item__genres", flat=True):
         if genres_list:
@@ -1127,11 +1094,18 @@ def history(request):
         history_refreshing = False
 
         if use_month_cache:
+            allowed_types = _enabled_history_media_types(request.user)
+            entry_filter = partial(
+                _cached_history_entry_is_visible,
+                filters=filters,
+                allowed_types=allowed_types,
+            )
             history_days, cache_meta = history_cache.get_month_history(
                 request.user,
                 view_year,
                 view_month,
                 logging_style_override=logging_style,
+                entry_filter=entry_filter,
             )
             history_days = [
                 prepared_day
@@ -1160,8 +1134,14 @@ def history(request):
             else:
                 next_year, next_month = view_year, view_month + 1
 
-            prev_month_name = calendar.month_abbr[prev_month]
-            next_month_name = calendar.month_abbr[next_month]
+            prev_month_name = formats.date_format(
+                date(prev_year, prev_month, 1),
+                "M",
+            )
+            next_month_name = formats.date_format(
+                date(next_year, next_month, 1),
+                "M",
+            )
             is_current_month = view_year == now.year and view_month == now.month
             show_next_month = next_year < now.year or (
                 next_year == now.year and next_month <= now.month
@@ -1245,7 +1225,11 @@ def history(request):
         if history_mode == "release":
             active_filters["history_mode"] = "release"
         month_nav_query = urlencode(active_filters)
-        month_name = calendar.month_name[view_month] if use_month_cache else None
+        month_name = (
+            formats.date_format(date(view_year, view_month, 1), "F")
+            if use_month_cache
+            else None
+        )
 
         for day in history_days:
             if day.get("has_more"):
@@ -1391,7 +1375,18 @@ def history_day_fragment(request, day_key):
         request.user,
         normalized_day_key,
         logging_style_override=logging_style,
+        entry_offset=entry_offset,
+        max_entries=history_cache.HISTORY_ENTRIES_PER_DAY_PAGE,
+        entry_filter=partial(
+            _cached_history_entry_is_visible,
+            filters=filters,
+            allowed_types=_enabled_history_media_types(request.user),
+        ),
     )
+    if day is not None and entry_offset > day.get(
+        "entry_count", len(day.get("entries", []))
+    ):
+        return HttpResponseBadRequest("Invalid history entry offset.")
     prepared_day = _prepare_history_day_page(
         day,
         request.user,
@@ -1400,9 +1395,6 @@ def history_day_fragment(request, day_key):
     )
     if prepared_day is None:
         return HttpResponseNotFound("History day not found.")
-    if entry_offset > prepared_day["entry_count"]:
-        return HttpResponseBadRequest("Invalid history entry offset.")
-
     prepared_day["next_entry_query"] = _history_day_fragment_query(
         request,
         prepared_day["next_entry_offset"],

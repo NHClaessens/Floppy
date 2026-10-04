@@ -122,6 +122,41 @@ class SidebarViewTests(TestCase):
         self.assertEqual(len(messages), 1)
         self.assertIn("Settings updated", str(messages[0]))
 
+    def test_sidebar_post_turns_discover_off_and_on(self):
+        """The Show Discover switch is saved from the Sidebar settings page."""
+        self.assertTrue(self.user.show_discover)
+
+        response = self.client.post(reverse("sidebar"), {})
+        self.assertRedirects(response, reverse("sidebar"))
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.show_discover)
+
+        self.client.post(reverse("sidebar"), {"show_discover": "on"})
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.show_discover)
+
+    def test_sidebar_link_hidden_when_discover_off(self):
+        """The sidebar shows the Discover link only while Discover is on."""
+        discover_link = f'href="{reverse("discover")}"'
+        self.assertContains(self.client.get(reverse("home")), discover_link)
+
+        self.user.show_discover = False
+        self.user.save(update_fields=["show_discover"])
+        self.assertNotContains(self.client.get(reverse("home")), discover_link)
+
+    def test_preferences_post_turns_recommendations_off(self):
+        """The Recommendations preference is saved from the Preferences page."""
+        self.assertTrue(self.user.show_recommendations)
+
+        self.client.post(reverse("preferences"), {"show_recommendations": "0"})
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.show_recommendations)
+
+        # A post that omits the field (e.g. the theme toggle) leaves it alone.
+        self.client.post(reverse("preferences"), {"theme": "dark"})
+        self.user.refresh_from_db()
+        self.assertFalse(self.user.show_recommendations)
+
     def test_sidebar_post_demo_user(self):
         """Test POST request from a demo user to preferences."""
         self.user.is_demo = True
@@ -146,63 +181,61 @@ class SidebarViewTests(TestCase):
         self.assertIn("view-only for demo accounts", str(messages[0]))
 
     @override_settings(TVDB_API_KEY="")
-    @patch("users.views.tmdb.watch_provider_regions")
-    def test_preferences_get_hides_tvdb_when_not_configured(
-        self, mock_watch_provider_regions
-    ):
-        """TVDB preference controls should stay disabled until credentials exist."""
-        mock_watch_provider_regions.return_value = [("UNSET", "Not set")]
-
-        response = self.client.get(reverse("preferences"))
+    def test_metadata_settings_flags_tvdb_as_not_configured(self):
+        """TVDB should still be listed for TV, just flagged as not configured."""
+        response = self.client.get(reverse("metadata_settings"))
 
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(response.context["tvdb_enabled"])
-        self.assertNotContains(response, "TheTVDB</option>", html=False)
-        self.assertContains(response, "TVDB unavailable until")
+        tv_entry = next(
+            entry
+            for entry in response.context["provider_summary"]
+            if entry["media_type"] == MediaTypes.TV.value
+        )
+        self.assertTrue(tv_entry["configurable"])
+        self.assertEqual(tv_entry["current_label"], "The Movie Database")
+        tvdb_choice = next(
+            choice
+            for choice in tv_entry["choices"]
+            if choice["value"] == MetadataSourceDefaultChoices.TVDB.value
+        )
+        self.assertFalse(tvdb_choice["configured"])
+
+    def test_metadata_settings_lists_every_enabled_media_type(self):
+        """Media types without a per-user provider preference still show their source."""
+        self.user.movie_enabled = True
+        self.user.save(update_fields=["movie_enabled"])
+
+        response = self.client.get(reverse("metadata_settings"))
+
+        media_types = [
+            entry["media_type"] for entry in response.context["provider_summary"]
+        ]
+        self.assertIn(MediaTypes.MOVIE.value, media_types)
+        movie_entry = next(
+            entry
+            for entry in response.context["provider_summary"]
+            if entry["media_type"] == MediaTypes.MOVIE.value
+        )
+        self.assertFalse(movie_entry["configurable"])
+        self.assertEqual(movie_entry["current_label"], "The Movie Database")
 
     @override_settings(TVDB_API_KEY="test-tvdb-key")
-    @patch("users.views.tmdb.watch_provider_regions")
-    def test_preferences_post_updates_metadata_provider_defaults(
-        self, mock_watch_provider_regions
-    ):
-        """Preferences POST should persist metadata provider defaults and library mode."""
-        mock_watch_provider_regions.return_value = [("UNSET", "Not set")]
+    def test_set_media_type_provider_updates_defaults_and_library_mode(self):
+        """Posting a provider default should persist it, and anime can also set library mode."""
+        response = self.client.post(
+            reverse("set_media_type_provider", args=[MediaTypes.TV.value]),
+            {"source": MetadataSourceDefaultChoices.TVDB},
+        )
+        self.assertRedirects(response, reverse("metadata_settings"))
 
         response = self.client.post(
-            reverse("preferences"),
+            reverse("set_media_type_provider", args=[MediaTypes.ANIME.value]),
             {
-                "date_format": self.user.date_format,
-                "time_format": self.user.time_format,
-                "activity_history_view": self.user.activity_history_view,
-                "game_logging_style": self.user.game_logging_style,
-                "mobile_grid_layout": self.user.mobile_grid_layout,
-                "media_card_subtitle_display": self.user.media_card_subtitle_display,
-                "title_display_preference": self.user.title_display_preference,
-                "top_talent_sort_by": self.user.top_talent_sort_by,
-                "rating_scale": self.user.rating_scale,
-                "hide_completed_recommendations": "1"
-                if self.user.hide_completed_recommendations
-                else "0",
-                "hide_zero_rating": "1" if self.user.hide_zero_rating else "0",
-                "quick_season_update_mobile": "1"
-                if self.user.quick_season_update_mobile
-                else "0",
-                "book_comic_manga_progress_percentage": "1"
-                if self.user.book_comic_manga_progress_percentage
-                else "0",
-                "show_planned_on_home": self.user.show_planned_on_home,
-                "auto_pause_enabled": "1"
-                if self.user.auto_pause_in_progress_enabled
-                else "0",
-                "auto_pause_rules": "[]",
-                "watch_provider_region": "UNSET",
-                "tv_metadata_source_default": MetadataSourceDefaultChoices.TVDB,
-                "anime_metadata_source_default": MetadataSourceDefaultChoices.TMDB,
+                "source": MetadataSourceDefaultChoices.TMDB,
                 "anime_library_mode": AnimeLibraryModeChoices.BOTH,
             },
         )
-
-        self.assertRedirects(response, reverse("preferences"))
+        self.assertRedirects(response, reverse("metadata_settings"))
 
         self.user.refresh_from_db()
         self.assertEqual(

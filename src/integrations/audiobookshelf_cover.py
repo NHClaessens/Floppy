@@ -14,8 +14,8 @@ hosts.
 import base64
 import binascii
 
+from django.conf import settings
 from django.core.signing import BadSignature, Signer
-from django.urls import reverse
 
 SIGNER_SALT = "floppy.abs-cover"
 
@@ -32,7 +32,10 @@ def build_cover_proxy_url(account_id, library_item_id):
     payload = f"{account_id}:{library_item_id}"
     token = base64.urlsafe_b64encode(payload.encode("utf-8")).decode("ascii")
     signed = _signer().sign(token)
-    return reverse("audiobookshelf_cover", kwargs={"token": signed})
+    path = f"{PROXY_PATH_PREFIX}{signed}"
+    if settings.FORCE_SCRIPT_NAME:
+        return settings.FORCE_SCRIPT_NAME.rstrip("/") + path
+    return path
 
 
 def resolve_cover_proxy_token(token):

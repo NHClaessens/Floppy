@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch
 
@@ -138,3 +139,70 @@ class ImportIMDB(TestCase):
         self.assertEqual(imported_counts.get(MediaTypes.MOVIE.value, 0), 5)
 
         self.assertIn("They were matched to the same TMDB ID 155", warnings)
+
+
+class IMDBStreamingTests(TestCase):
+    """Exercise local import semantics without a live provider."""
+
+    def setUp(self):
+        """Create a user and resolve test identifiers deterministically."""
+        self.user = get_user_model().objects.create_user(username="stream-imdb")
+        patcher = patch.object(
+            imdb.IMDBImporter,
+            "_lookup_in_tmdb",
+            side_effect=lambda identifier, _: {
+                "media_id": int(identifier[2:]),
+                "title": "Resolved",
+                "image": "",
+                "media_type": MediaTypes.MOVIE,
+            },
+        )
+        self.lookup = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def upload(self, rows):
+        """Build a valid CSV with a multiline title."""
+        return BytesIO(("Const,Title,Title Type,Created,Your Rating\n" + rows).encode())
+
+    def test_duplicate_validation_precedes_overwrite(self):
+        """Duplicates spanning the file never delete existing tracking."""
+        imdb.importer(
+            self.upload("tt1,Original,Movie,2025-01-01,8\n"), self.user, "new"
+        )
+        counts, warnings = imdb.importer(
+            self.upload(
+                'tt1,"First\nTitle",Movie,2025-01-01,9\n'
+                "tt2,Other,Movie,2025-01-01,7\n"
+                "tt1,Duplicate,Movie,2025-01-01,10\n",
+            ),
+            self.user,
+            "overwrite",
+        )
+        self.assertEqual(counts, {MediaTypes.MOVIE: 1})
+        self.assertIn("First\nTitle", warnings)
+        self.assertEqual(Movie.objects.get(item__media_id="1").score, 8)
+        self.assertEqual(self.lookup.call_count, 4)
+
+    def test_late_invalid_encoding_preserves_existing_media(self):
+        """An invalid suffix cannot trigger partial overwrite writes."""
+        imdb.importer(
+            self.upload("tt1,Original,Movie,2025-01-01,8\n"), self.user, "new"
+        )
+        file = self.upload("tt1,Replacement,Movie,2025-01-01,9\n")
+        file.seek(0, 2)
+        file.write(b"\xff")
+        file.seek(0)
+        with self.assertRaises(imdb.MediaImportError):
+            imdb.importer(file, self.user, "overwrite")
+        self.assertEqual(Movie.objects.get(item__media_id="1").score, 8)
+
+    def test_batches_preserve_history_and_new_mode(self):
+        """Multiple persistence batches retain row counts and history."""
+        rows = "".join(f"tt{i},Title,Movie,2025-01-01,8\n" for i in range(1, 253))
+        counts, warnings = imdb.importer(self.upload(rows), self.user, "new")
+        self.assertEqual(counts, {MediaTypes.MOVIE: 252})
+        self.assertIsNone(warnings)
+        self.assertEqual(Movie.objects.count(), 252)
+        self.assertEqual(Movie.history.count(), 252)
+        counts, _ = imdb.importer(self.upload(rows), self.user, "new")
+        self.assertEqual(counts, {})

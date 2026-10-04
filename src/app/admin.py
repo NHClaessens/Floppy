@@ -37,7 +37,7 @@ class EpisodeAdmin(admin.ModelAdmin):
     """Custom admin for Episode model with search and filter options."""
 
     search_fields = ["item__title", "related_season__item__title"]
-    list_display = ["__str__", "end_date"]
+    list_display = ["__str__", "end_date", "external_id"]
 
 
 @admin.register(MoviePlay)
@@ -135,6 +135,11 @@ SpecialModels = [
     "WatchState",
     "WatchStateChange",
     "WatchStateSequence",
+    "EpisodeOrder",
+    "EpisodeOrderChange",
+    "StatisticsDirtyDay",
+    "StatisticsSnapshot",
+    "StatisticsSyncState",
 ]
 for model in app_models:
     if (

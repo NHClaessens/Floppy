@@ -7,7 +7,7 @@
 {# djlint:on #}
 {% with watched=episode.history|watched_count %}
   <button hx-get="{% media_view_url 'track_modal' episode %}"
-    {# With a watch on record the modal edits it (instance_id) so the fields prefill and Delete works; "Add new entry" inside the modal covers rewatches. #}
+    {# With a watch on record the modal edits it (instance_id) so the fields prefill and Delete works; "Save as new entry" records a rewatch directly. #}
     hx-vals='{"return_url": "{{ detail_return_url|default:request.path|urlencode }}", "episode_number": "{{ episode.episode_number }}", {% if episode.history %}"instance_id": "{{ episode.history.0.id }}"{% else %}"is_create": "1"{% endif %}}'
     hx-target="#{% component_id 'track' episode %}{{ target_suffix }}"
     hx-trigger="click"

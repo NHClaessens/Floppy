@@ -21,6 +21,7 @@ from app.models import (
     Sources,
     Status,
     Studio,
+    Track,
 )
 from app.templatetags import app_tags
 from users.models import DateFormatChoices, TimeFormatChoices
@@ -134,6 +135,29 @@ class AppTagsTests(TestCase):
         self.assertEqual(app_tags.slug("★★★"), "%E2%98%85%E2%98%85%E2%98%85")
         self.assertEqual(app_tags.slug("[Oshi no Ko]"), "oshi-no-ko")
         self.assertEqual(app_tags.slug("_____"), "_____")
+
+    def test_slug_is_one_path_segment(self):
+        """Titles made of path characters still produce a usable URL segment."""
+        self.assertEqual(app_tags.slug("/"), "2f")
+        self.assertEqual(app_tags.slug("//"), "2f2f")
+        self.assertEqual(app_tags.slug("."), "2e")
+        self.assertEqual(app_tags.slug(".."), "2e2e")
+        self.assertEqual(app_tags.slug("..."), "...")
+
+    def test_media_url_episode_titled_slash(self):
+        """An episode titled "/" links to its page instead of raising (#1322)."""
+        episode = {
+            "media_type": MediaTypes.EPISODE.value,
+            "source": Sources.TMDB.value,
+            "media_id": "1411",
+            "title": "/",
+            "season_number": 3,
+            "episode_number": 17,
+        }
+
+        url = app_tags.media_url(episode)
+
+        self.assertEqual(url, "/details/tmdb/tv/1411/2f/season/3/episode/17")
 
     def test_title_preserve_acronyms(self):
         """Test acronym-preserving title casing."""
@@ -399,6 +423,27 @@ class AppTagsTests(TestCase):
             ),
         )
 
+    def test_music_track_url_returns_nested_canonical_details_path(self):
+        """Music tracks should resolve under their album on the shared route."""
+        artist = Artist.objects.create(name="The Amazing Artist")
+        album = Album.objects.create(title="First Record", artist=artist)
+        track = Track.objects.create(album=album, title="Opening Song")
+
+        self.assertEqual(
+            app_tags.music_track_url(track),
+            reverse(
+                "music_track_details",
+                kwargs={
+                    "artist_id": artist.id,
+                    "artist_slug": "the-amazing-artist",
+                    "album_id": album.id,
+                    "album_slug": "first-record",
+                    "track_id": track.id,
+                    "track_slug": "opening-song",
+                },
+            ),
+        )
+
     def test_studio_url_returns_canonical_details_path(self):
         """Studio objects should resolve to the canonical shared details route."""
         studio = Studio.objects.create(
@@ -467,7 +512,6 @@ class AppTagsTests(TestCase):
                 "user": self.user,
                 "title": item.title,
                 "show_status_chip": False,
-                "show_progress_chip": False,
             },
             request=request,
         )
@@ -516,7 +560,6 @@ class AppTagsTests(TestCase):
                 "user": self.user,
                 "title": item.title,
                 "show_status_chip": False,
-                "show_progress_chip": False,
                 "from_grid": True,
             },
             request=request,
@@ -646,7 +689,6 @@ class AppTagsTests(TestCase):
                 "title": item.title,
                 "from_grid": True,
                 "show_status_chip": False,
-                "show_progress_chip": False,
             },
             request=request,
         )
@@ -763,7 +805,6 @@ class AppTagsTests(TestCase):
                 "title": self.tv_item.title,
                 "from_grid": True,
                 "show_status_chip": False,
-                "show_progress_chip": False,
                 "enable_bulk_select": True,
             },
             request=request,
@@ -1945,3 +1986,70 @@ class SafeCountFilterTests(TestCase):
 
     def test_non_numeric_string_defaults_to_zero(self):
         self.assertEqual(app_tags.safe_count("TBA"), 0)
+
+
+class DetailScoreChipsTemplateTests(TestCase):
+    """Non-numeric provider score_count must not crash blocktranslate (#1147).
+
+    Season metadata is a plain dict assembled by different code paths per
+    provider/sync state, so score_count isn't guaranteed to be a real int
+    even when it isn't None (e.g. a freshly-migrated TVDB season). Without
+    the `|safe_count` filter this raises
+    `TemplateSyntaxError: 'count' argument to 'blocktranslate' tag must be a
+    number.` and 500s the season detail page.
+    """
+
+    def _render(self, score_count):
+        return render_to_string(
+            "app/components/detail_score_chips.html",
+            {
+                "media": {"media_id": "1", "source": "tvdb", "score_count": score_count},
+                "display_provider": Sources.TVDB.value,
+                "Sources": Sources,
+                "MediaTypes": MediaTypes,
+                "trakt_score": None,
+                "imdb_score": None,
+                "mal_score": None,
+                "user_medias": None,
+                "current_instance": None,
+                "public_view": False,
+                "media_type": MediaTypes.SEASON.value,
+                "provider_series_graph_data": None,
+                "trakt_series_graph_data": None,
+                "imdb_series_graph_data": None,
+                "csrf_token": "x",
+                "user": None,
+            },
+        )
+
+    def test_non_numeric_score_count_does_not_crash(self):
+        html = self._render("")
+        self.assertIn("votes", html)
+
+    def test_numeric_score_count_still_renders(self):
+        html = self._render(42)
+        self.assertIn("42", html)
+
+
+class EntrySourceLabelTests(TestCase):
+    """Test the entry_source_label display filter (issue #1258)."""
+
+    def test_built_in_lowercase_sources_are_capitalized(self):
+        self.assertEqual(app_tags.entry_source_label("plex"), "Plex")
+        self.assertEqual(app_tags.entry_source_label("jellyfin"), "Jellyfin")
+
+    def test_special_casing_and_underscores(self):
+        self.assertEqual(app_tags.entry_source_label("lastfm"), "Last.fm")
+        self.assertEqual(app_tags.entry_source_label("imdb"), "IMDb")
+        self.assertEqual(
+            app_tags.entry_source_label("jellyfin_playback_reporting"),
+            "Jellyfin playback reporting",
+        )
+
+    def test_user_typed_text_is_kept_as_typed(self):
+        self.assertEqual(app_tags.entry_source_label("Theatre"), "Theatre")
+        self.assertEqual(app_tags.entry_source_label("my BluRay"), "my BluRay")
+
+    def test_empty_values(self):
+        self.assertEqual(app_tags.entry_source_label(""), "")
+        self.assertEqual(app_tags.entry_source_label(None), "")

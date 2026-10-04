@@ -1,12 +1,16 @@
 """Tests for importing audiobooks kept in a Plex Music library."""
 
 import logging
-from unittest.mock import patch
+import tempfile
+from unittest.mock import Mock, patch
 
+import requests
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
+from app import image_cache
 from app.models import Book, Item, MediaTypes, Music, Sources, Status
+from integrations import plex_cover
 from integrations.imports.plex import PlexHistoryImporter
 from integrations.models import PlexAccount
 
@@ -380,3 +384,74 @@ class TestAlbumCacheScoping(PlexAudiobookImportTestCase):
             importer._album_cache_key("/library/metadata/100"),
             ("server-a", "100"),
         )
+
+
+class PlexCoverProxyUrlCeleryTests(TestCase):
+    """build_cover_proxy_url must work from a Celery worker (#1199).
+
+    The scheduled/manual Plex import runs inside a Celery worker, whose
+    ROOT_URLCONF is deliberately empty since it never serves HTTP. reverse()
+    must not depend on that setting the way the Plex webhook view (a real
+    request) implicitly does.
+    """
+
+    @override_settings(ROOT_URLCONF="config.celery_urls")
+    def test_builds_url_under_the_empty_celery_urlconf(self):
+        url = plex_cover.build_cover_proxy_url(1, MACHINE_ID, "/library/metadata/1")
+        self.assertTrue(url.startswith(plex_cover.PROXY_PATH_PREFIX))
+
+    @override_settings(ROOT_URLCONF="config.celery_urls", FORCE_SCRIPT_NAME="/floppy")
+    def test_applies_base_url_subpath_when_no_request_set_it(self):
+        url = plex_cover.build_cover_proxy_url(1, MACHINE_ID, "/library/metadata/1")
+        self.assertTrue(url.startswith("/floppy" + plex_cover.PROXY_PATH_PREFIX))
+
+
+class PlexCoverStoredCopyTests(TestCase):
+    """Plex covers keep a last good copy like Audiobookshelf ones (#1307)."""
+
+    def setUp(self):
+        data_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(data_dir.cleanup)
+        settings_override = override_settings(FLOPPY_DATA_DIR=data_dir.name)
+        settings_override.enable()
+        self.addCleanup(settings_override.disable)
+        user = get_user_model().objects.create_user(username="plex-cover")
+        self.account = PlexAccount.objects.create(
+            user=user,
+            plex_token="token",
+            plex_username="listener",
+            plex_account_id="1",
+            sections=[section()],
+        )
+        self.url = plex_cover.build_cover_proxy_url(
+            self.account.id,
+            MACHINE_ID,
+            "/library/metadata/1/thumb/1",
+        )
+        connection = patch(
+            "integrations.views.plex_api.connection_for_machine",
+            return_value=("http://plex.local:32400", "server-token"),
+        )
+        connection.start()
+        self.addCleanup(connection.stop)
+
+    @patch("integrations.views.requests.get")
+    def test_stored_cover_is_served_while_plex_is_down(self, mock_get):
+        upstream = Mock(status_code=200, headers={"Content-Type": "image/jpeg"})
+        upstream.iter_content = lambda chunk_size: iter([b"plex-cover"])
+        mock_get.return_value = upstream
+        self.assertEqual(self.client.get(self.url).content, b"plex-cover")
+        mock_get.side_effect = requests.ReadTimeout("Read timed out.")
+
+        with patch.object(image_cache, "STORED_COVER_FRESH_SECONDS", 0):
+            response = self.client.get(self.url)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, b"plex-cover")
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch("integrations.views.requests.get")
+    def test_missing_cover_is_still_a_404(self, mock_get):
+        mock_get.side_effect = requests.ReadTimeout("Read timed out.")
+
+        self.assertEqual(self.client.get(self.url).status_code, 404)

@@ -40,8 +40,16 @@ def _build_detail_activity_subtitle(
         if value in (None, ""):
             return None
         progress_text = f"Progress: {value}"
-        if include_max and max_progress:
-            progress_text += f"/{max_progress}"
+        # The total has to be in the same unit as the value: listening time
+        # for an audiobook, and none at all next to a percentage.
+        unit = getattr(current_instance, "progress_unit", None)
+        if include_max and max_progress and unit != "percentage":
+            total = (
+                helpers.minutes_to_hhmm(max_progress)
+                if unit == "minutes"
+                else max_progress
+            )
+            progress_text += f"/{total}"
         return progress_text
 
     date_start = (

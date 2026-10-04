@@ -94,6 +94,18 @@ MEDIA_LIST_FILTER_PARAMS = [
         enum=["all", "rated", "not_rated"],
     ),
     OpenApiParameter(
+        name="rating_min",
+        type=float,
+        location=OpenApiParameter.QUERY,
+        description="Match items rated at or above this score (0-10).",
+    ),
+    OpenApiParameter(
+        name="rating_max",
+        type=float,
+        location=OpenApiParameter.QUERY,
+        description="Match items rated at or below this score (0-10).",
+    ),
+    OpenApiParameter(
         name="collection",
         type=str,
         location=OpenApiParameter.QUERY,
@@ -128,6 +140,75 @@ MEDIA_LIST_FILTER_PARAMS = [
         type=str,
         location=OpenApiParameter.QUERY,
         description="Match items completed on or before this date (YYYY-MM-DD).",
+    ),
+    OpenApiParameter(
+        name="release_date_from",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        description="Match items released on or after this date (YYYY-MM-DD).",
+    ),
+    OpenApiParameter(
+        name="release_date_to",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        description="Match items released on or before this date (YYYY-MM-DD).",
+    ),
+    OpenApiParameter(
+        name="date_added_from",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        description="Match items added to the library on or after this date (YYYY-MM-DD).",
+    ),
+    OpenApiParameter(
+        name="date_added_to",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        description="Match items added to the library on or before this date (YYYY-MM-DD).",
+    ),
+    OpenApiParameter(
+        name="completed_date_within",
+        type=int,
+        location=OpenApiParameter.QUERY,
+        description=(
+            "Match the last N units instead of a completed_date_from/_to range "
+            "(1-999); see completed_date_within_unit."
+        ),
+    ),
+    OpenApiParameter(
+        name="completed_date_within_unit",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        enum=["days", "weeks", "months", "years"],
+    ),
+    OpenApiParameter(
+        name="release_date_within",
+        type=int,
+        location=OpenApiParameter.QUERY,
+        description=(
+            "Match the last N units instead of a release_date_from/_to range "
+            "(1-999); see release_date_within_unit."
+        ),
+    ),
+    OpenApiParameter(
+        name="release_date_within_unit",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        enum=["days", "weeks", "months", "years"],
+    ),
+    OpenApiParameter(
+        name="date_added_within",
+        type=int,
+        location=OpenApiParameter.QUERY,
+        description=(
+            "Match the last N units instead of a date_added_from/_to range "
+            "(1-999); see date_added_within_unit."
+        ),
+    ),
+    OpenApiParameter(
+        name="date_added_within_unit",
+        type=str,
+        location=OpenApiParameter.QUERY,
+        enum=["days", "weeks", "months", "years"],
     ),
     OpenApiParameter(
         name="release",

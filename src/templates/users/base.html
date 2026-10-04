@@ -11,9 +11,24 @@
     </div>
     <div class="flex flex-col md:flex-row gap-8">
       <div class="md:w-64 shrink-0">
-        <div class="bg-[var(--color-surface)] rounded-lg overflow-hidden sticky top-20">
+        <div class="bg-[var(--color-surface)] rounded-lg overflow-hidden sticky top-20"
+             x-data="{ open: false }">
+          {# Phones: show only the current page as a dropdown so the settings sit right under the title #}
+          <button type="button"
+                  class="md:hidden w-full flex items-center justify-between px-4 py-3 text-sm cursor-pointer text-[var(--color-text)]"
+                  :aria-expanded="open"
+                  aria-controls="settings-nav"
+                  @click="open = !open">
+            <span class="flex items-center space-x-3"
+                  x-html="$refs.settingsNav.querySelector('[aria-current]')?.innerHTML || '{% translate "Menu" %}'"></span>
+            <span :class="open && 'rotate-180'">{% include "app/icons/chevron-down.svg" with classes="w-4 h-4" %}</span>
+          </button>
           {# hx-boost: swap the body instead of reloading on settings navigation #}
-          <nav class="p-2 space-y-1" hx-boost="true">
+          <nav id="settings-nav"
+               x-ref="settingsNav"
+               :class="{ 'settings-nav-collapsed': !open }"
+               class="settings-nav-collapsed p-2 space-y-1"
+               hx-boost="true">
             {% url 'account' as account_url %}
             <a href="{{ account_url }}"
                {% if request.path == account_url %}aria-current="page"{% endif %}
@@ -28,6 +43,14 @@
                class="w-full flex items-center space-x-3 px-2 py-2 rounded-md transition-colors text-left border-l-2 cursor-pointer text-sm {% if request.path == preferences_url %}bg-[var(--color-surface-strong)] text-[var(--color-text)] border-[var(--color-link)]{% else %}text-[var(--color-text-muted)] border-transparent hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-text)]{% endif %}">
               {% include "app/icons/vertical-sliders.svg" with classes="w-5 h-5" %}
               <span>{% translate "Preferences" %}</span>
+            </a>
+
+            {% url 'appearance' as appearance_url %}
+            <a href="{{ appearance_url }}"
+               {% if request.path == appearance_url %}aria-current="page"{% endif %}
+               class="w-full flex items-center space-x-3 px-2 py-2 rounded-md transition-colors text-left border-l-2 cursor-pointer text-sm {% if request.path == appearance_url %}bg-[var(--color-surface-strong)] text-[var(--color-text)] border-[var(--color-link)]{% else %}text-[var(--color-text-muted)] border-transparent hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-text)]{% endif %}">
+              {% include "app/icons/sun.svg" with classes="w-5 h-5" %}
+              <span>{% translate "Appearance" %}</span>
             </a>
 
             {% url 'notifications' as notifications_url %}

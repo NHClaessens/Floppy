@@ -177,7 +177,7 @@ def _build_prefetch_for_range(user, day_list):
     ):
         Episode = apps.get_model("app", "Episode")
         episode_rows = list(
-            Episode.objects.filter(
+            Episode.all_objects.filter(
                 related_season__user=user,
                 end_date__gte=range_start,
                 end_date__lt=range_end,
@@ -689,7 +689,7 @@ def build_stats_for_day(
         else:
             Episode = apps.get_model("app", "Episode")
             episodes = (
-                Episode.objects.filter(
+                Episode.all_objects.filter(
                     related_season__user=user,
                     end_date__gte=day_start,
                     end_date__lt=day_end,
@@ -1828,32 +1828,22 @@ def build_stats_for_day(
             day_stats,
             timeout=STATISTICS_DAY_CACHE_TIMEOUT,
         )
-    if play_count or missing_runtime or missing_credits:
-        logger.info(
-            (
-                "stats_day_summary user_id=%s day=%s plays=%s missing_runtime=%s "
-                "missing_genres=%s missing_credits=%s scheduled_credits=%s"
-            ),
-            user_id,
-            day.isoformat(),
-            play_count,
-            missing_runtime,
-            missing_genres,
-            missing_credits,
-            scheduled_credit_backfills,
-        )
-    elif not defer_cache_write:
-        logger.debug(
-            (
-                "stats_day_summary user_id=%s day=%s plays=%s missing_runtime=%s "
-                "missing_genres=%s missing_credits=%s scheduled_credits=%s"
-            ),
-            user_id,
-            day.isoformat(),
-            play_count,
-            missing_runtime,
-            missing_genres,
-            missing_credits,
-            scheduled_credit_backfills,
-        )
+    # A sweep (defer_cache_write) builds thousands of days and already reports
+    # stats_range_summary and stats_sync, so its per-day lines stay at DEBUG.
+    # Production logged 21,574 of them, about a fifth of the file.
+    notable = bool(play_count or missing_runtime or missing_credits)
+    logger.log(
+        logging.INFO if notable and not defer_cache_write else logging.DEBUG,
+        (
+            "stats_day_summary user_id=%s day=%s plays=%s missing_runtime=%s "
+            "missing_genres=%s missing_credits=%s scheduled_credits=%s"
+        ),
+        user_id,
+        day.isoformat(),
+        play_count,
+        missing_runtime,
+        missing_genres,
+        missing_credits,
+        scheduled_credit_backfills,
+    )
     return day_stats

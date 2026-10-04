@@ -103,7 +103,8 @@ function dateRangePicker(options = {}) {
     endDate: initialEndDate || formatDateForInput(today),
     customRangeLabel: "",
     compareMode: initialCompareMode,
-    selectedMediaType: "all",
+    // Empty means "All media"; otherwise the ticked media type slugs.
+    selectedMediaTypes: [],
     mediaTypeOptions: initialMediaTypeOptions.map((option) => ({ ...option, label: gettext(option.label) })),
     ratingScaleMax: ratingScaleMax,
     summaryStatsByType: {},
@@ -113,7 +114,7 @@ function dateRangePicker(options = {}) {
     comparisonOptions,
 
     get currentTypeSummary() {
-      const s = this.summaryStatsByType[this.selectedMediaType] || {};
+      const s = StatsMediaMerge.mergeSummary(this.summaryStatsByType, this.selectedMediaTypes);
       const start = s.longest_streak_start;
       const end = s.longest_streak_end;
       let dates = "";
@@ -131,7 +132,7 @@ function dateRangePicker(options = {}) {
     },
 
     get currentConsumption() {
-      return this.consumptionStatsByType[this.selectedMediaType] || {};
+      return StatsMediaMerge.mergeConsumption(this.consumptionStatsByType, this.selectedMediaTypes);
     },
 
     fmt(value, decimals) {
@@ -193,9 +194,11 @@ function dateRangePicker(options = {}) {
     },
 
     averageRatingRows() {
-      const types = this.selectedMediaType === "all"
-        ? this.mediaTypeOptions.filter((opt) => opt.value !== "all")
-        : this.mediaTypeOptions.filter((opt) => opt.value === this.selectedMediaType);
+      const types = this.mediaTypeOptions.filter((opt) => (
+        this.selectedMediaTypes.length
+          ? this.selectedMediaTypes.includes(opt.value)
+          : opt.value !== "all"
+      ));
       const scaleMax = this.ratingScaleMax || 10;
       return types
         .map((opt) => {
@@ -226,7 +229,7 @@ function dateRangePicker(options = {}) {
         book: gettext("books"), anime: gettext("titles"), music: gettext("albums"), podcast: gettext("podcasts"),
         comic: gettext("comics"), manga: gettext("manga"),
       };
-      return labels[this.selectedMediaType] || gettext("titles");
+      return labels[this.singleMediaType()] || gettext("titles");
     },
 
     get currentTypeFlavor() {
@@ -242,7 +245,7 @@ function dateRangePicker(options = {}) {
         comic: gettext("comics and art"),
         manga: gettext("manga and art"),
       };
-      return flavors[this.selectedMediaType] || gettext("stories, ideas, and worlds");
+      return flavors[this.singleMediaType()] || gettext("stories, ideas, and worlds");
     },
 
     init() {
@@ -265,9 +268,9 @@ function dateRangePicker(options = {}) {
       this.detectRangeFromDates(initialRangeName);
       this.compareMode = this.normalizeCompareMode(compareParam || initialCompareMode);
 
-      if (mediaTypeParam && this.mediaTypeOptions.some((o) => o.value === mediaTypeParam)) {
-        this.selectedMediaType = mediaTypeParam;
-      }
+      this.selectedMediaTypes = this.normalizeMediaTypes(
+        StatsMediaMerge.parseMediaTypeParam(mediaTypeParam, this.mediaTypeValues()),
+      );
 
       const summaryEl = document.getElementById("summary_stats_by_type");
       if (summaryEl) {
@@ -280,7 +283,7 @@ function dateRangePicker(options = {}) {
       }
 
       window.addEventListener("stats-charts-initialized", () => {
-        if (this.selectedMediaType !== "all") {
+        if (this.selectedMediaTypes.length) {
           this.updateFilteredCharts();
         }
       });
@@ -314,14 +317,49 @@ function dateRangePicker(options = {}) {
       }
     },
 
+    // Every selectable type, without the "All media" row.
+    mediaTypeValues() {
+      return this.mediaTypeOptions.filter((o) => o.value !== "all").map((o) => o.value);
+    },
+
+    // Ticking every type is the same as ticking none: back to "All media".
+    normalizeMediaTypes(types) {
+      return types.length === this.mediaTypeValues().length ? [] : types;
+    },
+
+    isMediaTypeSelected(value) {
+      return value === "all"
+        ? this.selectedMediaTypes.length === 0
+        : this.selectedMediaTypes.includes(value);
+    },
+
+    // The one selected type, or "all" when nothing or several are selected.
+    singleMediaType() {
+      return this.selectedMediaTypes.length === 1 ? this.selectedMediaTypes[0] : "all";
+    },
+
+    // Clicking "All media" clears the selection; clicking a type adds or
+    // removes it, so from "All media" the first click selects just that type.
     selectMediaType(value) {
-      this.selectedMediaType = value;
-      this.isMediaTypeOpen = false;
-      const url = new URL(window.location.href);
+      let types;
       if (value === "all") {
-        url.searchParams.delete("media-type");
+        types = [];
+      } else if (this.selectedMediaTypes.includes(value)) {
+        types = this.selectedMediaTypes.filter((type) => type !== value);
       } else {
-        url.searchParams.set("media-type", value);
+        types = [...this.selectedMediaTypes, value];
+      }
+      const order = this.mediaTypeValues();
+      types.sort((a, b) => order.indexOf(a) - order.indexOf(b));
+      this.selectedMediaTypes = this.normalizeMediaTypes(types);
+      if (value === "all") {
+        this.isMediaTypeOpen = false;
+      }
+      const url = new URL(window.location.href);
+      if (this.selectedMediaTypes.length) {
+        url.searchParams.set("media-type", StatsMediaMerge.formatMediaTypeParam(this.selectedMediaTypes));
+      } else {
+        url.searchParams.delete("media-type");
       }
       window.history.replaceState({}, "", url.toString());
       this.$nextTick(() => {
@@ -331,7 +369,7 @@ function dateRangePicker(options = {}) {
     },
 
     updateFilteredCharts() {
-      const type = this.selectedMediaType;
+      const types = this.selectedMediaTypes;
       if (typeof Chart === "undefined") return;
       const chart = Chart.getChart("scoreStackedChartCopy");
       if (chart) {
@@ -349,20 +387,36 @@ function dateRangePicker(options = {}) {
         };
         chart.data.datasets.forEach((ds) => {
           const dsType = ds.media_type || labelToType[ds.source_label || ds.label];
-          ds.hidden = type !== "all" && dsType !== type;
+          ds.hidden = types.length > 0 && !types.includes(dsType);
         });
         chart.update("none");
       }
     },
 
     isMediaTypeVisible(type) {
-      return this.selectedMediaType === "all" || this.selectedMediaType === type;
+      return this.selectedMediaTypes.length === 0 || this.selectedMediaTypes.includes(type);
+    },
+
+    // The cast/crew, studio and genre cards only have data for these types.
+    isTalentVisible() {
+      const talentTypes = ["tv", "movie", "anime", "game"];
+      return this.selectedMediaTypes.length === 0
+        || this.selectedMediaTypes.some((type) => talentTypes.includes(type));
+    },
+
+    // First play / last play / today-in-history cards exist only for All and
+    // for each single type; they cannot be merged for a partial selection.
+    isHighlightSetVisible(type) {
+      return type === "all"
+        ? this.selectedMediaTypes.length === 0
+        : this.selectedMediaTypes.length === 1 && this.selectedMediaTypes[0] === type;
     },
 
     mediaTypeTriggerLabel() {
-      if (this.selectedMediaType === "all") return gettext("All media");
-      const opt = this.mediaTypeOptions.find((o) => o.value === this.selectedMediaType);
-      return opt ? opt.label : gettext("All media");
+      const selected = this.mediaTypeOptions.filter((o) => this.selectedMediaTypes.includes(o.value));
+      if (!selected.length) return gettext("All media");
+      if (selected.length <= 2) return selected.map((o) => o.label).join(", ");
+      return selected.length + " " + gettext("Types");
     },
 
     hasFiniteRange() {
@@ -555,8 +609,8 @@ function dateRangePicker(options = {}) {
       url.searchParams.set("start-date", this.startDate);
       url.searchParams.set("end-date", this.endDate);
       url.searchParams.set("compare", this.normalizeCompareMode(this.compareMode));
-      if (this.selectedMediaType && this.selectedMediaType !== "all") {
-        url.searchParams.set("media-type", this.selectedMediaType);
+      if (this.selectedMediaTypes.length) {
+        url.searchParams.set("media-type", StatsMediaMerge.formatMediaTypeParam(this.selectedMediaTypes));
       } else {
         url.searchParams.delete("media-type");
       }

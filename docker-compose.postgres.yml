@@ -32,6 +32,8 @@ services:
       # override the detected resource tier.
     ports:
       - "8000:8000"
+    networks:
+      - floppy-net
 
   db:
     image: postgres:16-alpine
@@ -43,6 +45,8 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    networks:
+      - floppy-net
 
   redis:
     container_name: floppy-redis
@@ -58,7 +62,16 @@ services:
     command: redis-server --appendonly yes --save "" --maxmemory 256mb --maxmemory-policy volatile-lru
     volumes:
       - redis_data:/data
+    networks:
+      - floppy-net
 
 volumes:
   redis_data:
   postgres_data:
+
+# Declared explicitly so "redis" and "db" resolve however the stack is deployed.
+# Portainer, ZimaOS and similar tools can otherwise leave the containers on the
+# default bridge network, where service names do not resolve (#1263).
+networks:
+  floppy-net:
+    driver: bridge

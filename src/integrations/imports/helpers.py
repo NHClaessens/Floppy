@@ -5,6 +5,7 @@ import json
 import logging
 import time
 from collections import defaultdict
+from copy import copy
 
 from cryptography.fernet import Fernet, InvalidToken
 from django.apps import apps
@@ -18,15 +19,25 @@ from simple_history.utils import bulk_create_with_history
 import app
 from app import providers
 from app.db_retry import run_retryable_db_operation
+from app.history_cache_utils import history_deferred_item_fields
 from app.models import Episode, MediaTypes, Status
-from app.services.completion import normalize_completed_entry
+from app.services.completion import normalize_completed_entries
 from integrations import import_progress
+from integrations.models import ImportRun
 
 logger = logging.getLogger(__name__)
 
 
 class MediaImportError(Exception):
     """Custom exception for import errors."""
+
+
+class ConnectionAuthError(MediaImportError):
+    """The provider rejected our credentials (401/403).
+
+    The one import failure that marks an account ``connection_broken``; see
+    ``integrations.connection_health``.
+    """
 
 
 class MediaImportUnexpectedError(Exception):
@@ -56,6 +67,15 @@ def mal_id_from_kitsu_mappings(mappings, media_type):
     return mappings.get(f"myanimelist/{media_type}")
 
 
+def periodic_task_user_kwargs(user_id):
+    """Return ``filter`` kwargs matching one user's periodic task by exact id.
+
+    A bare ``kwargs__contains='"user_id": 1'`` also matches user 10's task, so
+    the match must end at the closing brace or the next key.
+    """
+    return {"kwargs__regex": rf"[\"']user_id[\"']: {int(user_id)}[,}}]"}
+
+
 def find_item_across_buckets(preferred_bucket=None, **identity):
     """Return an existing Item for an identity, preferring one library bucket.
 
@@ -78,6 +98,12 @@ def find_item_across_buckets(preferred_bucket=None, **identity):
     return candidates[0]
 
 
+# Importers read identity fields off the preloaded items, never these. Loading
+# them for a whole library (``watch_providers`` is ~146 KiB a title) ran a large
+# Trakt export import out of memory before it wrote anything (#1252).
+PRELOAD_DEFERRED_ITEM_FIELDS = history_deferred_item_fields("item")
+
+
 def get_existing_media(user):
     """Get all existing media for the user to check against during import."""
     excluded_types = [MediaTypes.SEASON.value, MediaTypes.EPISODE.value]
@@ -87,7 +113,11 @@ def get_existing_media(user):
     for media_type in valid_types:
         media_model = apps.get_model(app_label="app", model_name=media_type)
 
-        for media in media_model.objects.filter(user=user).select_related("item"):
+        for media in (
+            media_model.objects.filter(user=user)
+            .select_related("item")
+            .defer(*PRELOAD_DEFERRED_ITEM_FIELDS)
+        ):
             existing[media_type][media.item.source][media.item.media_id] = media
 
     counts = [
@@ -112,14 +142,20 @@ def get_existing_children(user):
         MediaTypes.SEASON.value: defaultdict(dict),
         MediaTypes.EPISODE.value: defaultdict(dict),
     }
-    for season in app.models.Season.objects.filter(user=user).select_related("item"):
+    for season in (
+        app.models.Season.objects.filter(user=user)
+        .select_related("item")
+        .defer(*PRELOAD_DEFERRED_ITEM_FIELDS)
+    ):
         item = season.item
         existing[MediaTypes.SEASON.value][item.source][
             (item.media_id, item.season_number)
         ] = season
-    for episode in app.models.Episode.objects.filter(
-        related_season__user=user,
-    ).select_related("item"):
+    for episode in (
+        app.models.Episode.objects.filter(related_season__user=user)
+        .select_related("item")
+        .defer(*PRELOAD_DEFERRED_ITEM_FIELDS)
+    ):
         item = episode.item
         existing[MediaTypes.EPISODE.value][item.source][
             (item.media_id, item.season_number, item.episode_number)
@@ -350,7 +386,7 @@ def _fetch_season_metadata_with_retry(season, max_retries=3, base_delay=0.5):
             time.sleep(base_delay * attempt)
 
 
-def _backfill_completed_season_episodes(seasons):
+def _backfill_completed_season_episodes(seasons, *, prepare_only=False):
     """Create the missing Episode rows for seasons bulk-created as Completed.
 
     Bulk imports persist Season instances via bulk_create, which bypasses
@@ -369,7 +405,7 @@ def _backfill_completed_season_episodes(seasons):
         if season.pk is not None and season.status == Status.COMPLETED.value
     ]
     if not completed_seasons:
-        return []
+        return ([], []) if prepare_only else []
 
     existing_season_ids = set(
         Episode.objects.filter(
@@ -407,14 +443,15 @@ def _backfill_completed_season_episodes(seasons):
                 "the missing episodes.",
             )
 
+    if prepare_only:
+        return episodes_to_create, warnings
     if episodes_to_create:
         created_episodes = bulk_create_with_history(
             episodes_to_create,
             Episode,
             batch_size=500,
         )
-        for episode in created_episodes:
-            normalize_completed_entry(episode)
+        normalize_completed_entries(created_episodes)
 
     return warnings
 
@@ -486,12 +523,128 @@ def _deduplicate_season_related_tv_item_rows(seasons):
     return deduplicated
 
 
-def bulk_create_media(bulk_media_list, user, *, backfill_completed=True):
+def prepare_bulk_media(bulk_media_list, user, *, exclude_tv_ids=(), exclude_season_ids=(), prepare_only=False):
+    """Resolve incoming coordinates before the durable persistence boundary."""
+    from integrations.episode_orders import resolve_incoming, season_for_target
+
+    # A source season's aggregate status is not a destination season status:
+    # alternate orders may split or combine those groups.
+    active_shows = set(
+        app.models.TV.objects.filter(
+            user=user, active_episode_order__isnull=False,
+        ).exclude(pk__in=exclude_tv_ids).values_list("item__source", "item__media_id"),
+    )
+
+    # Importers build rows using their source provider's numbering. Resolve
+    # before persistence so those numbers never become active-order numbers.
+    # Resolution is per episode and only ever matches a show with an active
+    # order, so a user with none skips it: it cost ~3 queries per episode, two
+    # thirds of the time this function spent on a large history import.
+    ordered_episodes = []
+    planned_seasons = {}
+    for episode in bulk_media_list.get(MediaTypes.EPISODE.value, []):
+        item = episode.item
+        if not active_shows or item.episode_order_id:
+            ordered_episodes.append(episode)
+            continue
+        targets = resolve_incoming(
+            user, item.media_id, item.source, item.season_number,
+            item.episode_number, integration="import",
+        )
+        if targets is None:
+            ordered_episodes.append(episode)
+            continue
+        for target in targets:
+            mapped = copy(episode)
+            mapped.pk = None
+            mapped.item = target
+            if prepare_only:
+                key = (target.episode_order_id, target.season_number)
+                if key not in planned_seasons:
+                    planned_seasons[key] = season_for_target(user, target, prepare_only=True)
+                mapped.related_season = planned_seasons[key]
+            else:
+                mapped.related_season = season_for_target(user, target)
+            ordered_episodes.append(mapped)
+    if MediaTypes.EPISODE.value in bulk_media_list:
+        bulk_media_list[MediaTypes.EPISODE.value] = ordered_episodes
+
+    if MediaTypes.SEASON.value in bulk_media_list:
+        bulk_media_list[MediaTypes.SEASON.value] = [
+            season for season in bulk_media_list[MediaTypes.SEASON.value]
+            if season.item.episode_order_id
+            or (season.item.source, season.item.media_id) not in active_shows
+        ]
+    if prepare_only:
+        new_parents = [season for season in planned_seasons.values() if season.pk is None]
+        if new_parents:
+            bulk_media_list.setdefault(MediaTypes.SEASON.value, []).extend(new_parents)
+        # Preserve the existing reference helpers' media-id/coordinate policy,
+        # but decide once against the post-delete/post-parent-create graph.
+        # A resumed chunk must not reinterpret these references after a user
+        # changes an episode order or provider identity.
+        seasons = bulk_media_list.get(MediaTypes.SEASON.value, [])
+        now = timezone.now().timestamp()
+        existing_tvs = list(app.models.TV.objects.filter(
+            user=user, item__media_id__in={row.item.media_id for row in seasons},
+        ).exclude(pk__in=exclude_tv_ids).select_related("item").only(
+            "id", "item_id", "user_id", "created_at", "item__media_id",
+        ))
+        tvs = existing_tvs + _deduplicate_unique_user_item_rows(app.models.TV, bulk_media_list.get(MediaTypes.TV.value, []))
+        ordered_tvs = sorted(enumerate(tvs), key=lambda pair: (
+            pair[1].item_id, -(pair[1].created_at.timestamp() if pair[1].created_at else now),
+            -pair[0] if pair[1].pk is None else 0,
+        ))
+        by_media_id = {row.item.media_id: row for _index, row in ordered_tvs}
+        for season in seasons:
+            if season.item.media_id in by_media_id:
+                season.related_tv = by_media_id[season.item.media_id]
+        # Canonicalize before splitting; two unsaved references can collapse
+        # onto one persisted TV, including across chunk boundaries.
+        retained = []
+        canonical = {}
+        for season in seasons:
+            key = (season.user_id, season.related_tv.item_id, season.item_id)
+            if key in canonical:
+                _merge_duplicate_media_row(canonical[key], season)
+            else:
+                canonical[key] = season
+                retained.append(season)
+        if seasons:
+            bulk_media_list[MediaTypes.SEASON.value] = retained
+        episodes = bulk_media_list.get(MediaTypes.EPISODE.value, [])
+        existing_seasons = list(app.models.Season.objects.filter(
+            user=user, item__media_id__in={row.item.media_id for row in episodes},
+        ).exclude(pk__in=exclude_season_ids).select_related("item", "related_tv").only(
+            "id", "item_id", "user_id", "created_at", "related_tv", "related_tv__item_id",
+            "item__media_id", "item__season_number",
+        ))
+        candidates = existing_seasons + retained
+        ordered_seasons = sorted(enumerate(candidates), key=lambda pair: (
+            pair[1].item_id, -(pair[1].created_at.timestamp() if pair[1].created_at else now),
+            -pair[0] if pair[1].pk is None else 0,
+        ))
+        by_coordinate = {(row.item.media_id, row.item.season_number): row for _index, row in ordered_seasons}
+        for episode in episodes:
+            key = (episode.item.media_id, episode.item.season_number)
+            if key in by_coordinate:
+                episode.related_season = by_coordinate[key]
+        return new_parents
+    return None
+
+
+
+def bulk_create_media(bulk_media_list, user, *, backfill_completed=True, prepared=False, normalize=True):
     """Bulk create all media objects.
 
-    Returns warning messages for any seasons whose Completed-status
+    Returns warning messages for any episodes skipped because no matching
+    season could be found, and for any seasons whose Completed-status
     episode backfill failed, for callers that want to surface them.
     """
+    warnings = []
+    if not prepared:
+        prepare_bulk_media(bulk_media_list, user)
+
     for media_type in _ordered_media_types(bulk_media_list):
         bulk_media = bulk_media_list[media_type]
         if not bulk_media:
@@ -501,48 +654,112 @@ def bulk_create_media(bulk_media_list, user, *, backfill_completed=True):
         bulk_media = _deduplicate_unique_user_item_rows(model, bulk_media)
 
         import_run_id = import_progress.get_current_import_run_id()
+        import_source = ""
         if import_run_id:
+            import_source = (
+                ImportRun.objects.filter(id=import_run_id)
+                .values_list("source", flat=True)
+                .first()
+                or ""
+            )
             for media_obj in bulk_media:
                 media_obj.import_run_id = import_run_id
+                if import_source and not media_obj.entry_source:
+                    media_obj.entry_source = import_source
 
         logger.info("Bulk importing %s", media_type)
 
         # Update references for seasons and episodes
-        if media_type == MediaTypes.SEASON.value:
+        if media_type == MediaTypes.SEASON.value and not prepared:
             logger.info("Updating references for season to existing TV shows")
             update_season_references(bulk_media, user)
             bulk_media = _deduplicate_season_related_tv_item_rows(bulk_media)
-        elif media_type == MediaTypes.EPISODE.value:
+        elif media_type == MediaTypes.EPISODE.value and not prepared:
             logger.info(
                 "Updating references for episodes to existing TV seasons",
             )
             update_episode_references(bulk_media, user)
+            resolved_episodes = []
+            skipped_season_keys = defaultdict(int)
+            for episode in bulk_media:
+                if episode.related_season_id is not None:
+                    resolved_episodes.append(episode)
+                    continue
+                # related_season_id can still read empty here for a
+                # resolvable episode: bulk_create()'s own
+                # _prepare_related_fields_for_save() re-derives the column
+                # from a *cached* related_season object's pk right before
+                # insert (e.g. an importer that linked an episode directly to
+                # a not-yet-created Season instance). hasattr() is the safe
+                # way to probe that cache: accessing .related_season on a
+                # non-nullable FK with nothing cached and no id raises
+                # RelatedObjectDoesNotExist (an AttributeError subclass).
+                if (
+                    hasattr(episode, "related_season")
+                    and episode.related_season.pk is not None
+                ):
+                    resolved_episodes.append(episode)
+                    continue
+                skipped_season_keys[
+                    (episode.item.media_id, episode.item.season_number)
+                ] += 1
+            if skipped_season_keys:
+                warnings.append(
+                    "Skipped {count} episode(s) with no matching season for: "
+                    "{keys}. Re-import once those seasons have been "
+                    "tracked.".format(
+                        count=sum(skipped_season_keys.values()),
+                        keys=", ".join(
+                            f"{media_id} S{season_number}"
+                            for media_id, season_number in sorted(
+                                skipped_season_keys,
+                            )
+                        ),
+                    ),
+                )
+            bulk_media = resolved_episodes
+            bulk_media_list[media_type] = bulk_media
         elif media_type == MediaTypes.PODCAST.value:
             logger.info("Updating references for podcasts to existing episodes")
             update_podcast_references(bulk_media)
 
-        def create_media(bulk_media=bulk_media, model=model):
+        # Imports are written as the user, so the reason is what tells an
+        # imported status apart from one the user set (#1133).
+        change_reason = (
+            f"{import_source.replace('_', ' ').capitalize()} import"
+            if import_source
+            else "Import"
+        )
+
+        def create_media(
+            bulk_media=bulk_media,
+            model=model,
+            change_reason=change_reason,
+        ):
             return bulk_create_with_history(
                 bulk_media,
                 model,
                 batch_size=500,
                 default_user=user,
                 default_date=timezone.now(),
+                default_change_reason=change_reason,
             )
 
         created_media = retry_on_lock(create_media)
-        for media in created_media:
-            normalize_completed_entry(media)
+        if normalize:
+            normalize_completed_entries(created_media)
 
     # Run after every media type (including any episodes the importer supplied
     # directly) has been persisted, so the "does this season already have
     # episodes" check below sees the importer's own episodes too.
     bulk_seasons = bulk_media_list.get(MediaTypes.SEASON.value)
     if bulk_seasons and backfill_completed:
-        return retry_on_lock(
-            lambda: _backfill_completed_season_episodes(bulk_seasons),
+        warnings.extend(
+            retry_on_lock(
+                lambda: _backfill_completed_season_episodes(bulk_seasons),
+            ),
         )
-    return []
+    return warnings
 
 
 def backfill_completed_seasons(season_ids):
@@ -563,10 +780,14 @@ def create_import_schedule(
     source,
     token=None,
     extra_kwargs=None,
+    replace_existing=False,
 ):
     """Create an import schedule.
 
     extra_kwargs: Optional dictionary of additional task kwargs to persist.
+    replace_existing: When the same schedule already exists, refresh its token
+        and extra kwargs instead of refusing. Used when a connection is redone,
+        so the schedule does not keep a dead token.
     """
     try:
         import_time = (
@@ -581,7 +802,18 @@ def create_import_schedule(
         return
 
     task_name = f"Import from {source} for {username} at {import_time} {frequency}"
-    if PeriodicTask.objects.filter(name=task_name).exists():
+    existing = PeriodicTask.objects.filter(name=task_name).first()
+    if existing and replace_existing:
+        task_kwargs = json.loads(existing.kwargs)
+        if token:
+            task_kwargs["token"] = token
+        if extra_kwargs:
+            task_kwargs.update(extra_kwargs)
+        existing.kwargs = json.dumps(task_kwargs)
+        existing.save()
+        messages.success(request, f"{source} import task updated.")
+        return
+    if existing:
         messages.error(
             request,
             "The same import task is already scheduled.",

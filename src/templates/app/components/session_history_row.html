@@ -46,6 +46,9 @@
         {% elif entry.runtime_display %}
           · {{ entry.runtime_display }}
         {% endif %}
+        {% if entry.entry_source %}
+          · {% blocktranslate trimmed with source=entry.entry_source|entry_source_label %}via {{ source }}{% endblocktranslate %}
+        {% endif %}
       </span>
 
       {% if entry.notes %}

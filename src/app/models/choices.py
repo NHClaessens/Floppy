@@ -9,12 +9,14 @@ class Sources(models.TextChoices):
     TVDB = "tvdb", "TheTVDB"
     MAL = "mal", "MyAnimeList"
     MANGAUPDATES = "mangaupdates", "MangaUpdates"
+    MANGABAKA = "mangabaka", "MangaBaka"
     IGDB = "igdb", "Internet Game Database"
     IMDB = "imdb", "IMDb"
     OPENLIBRARY = "openlibrary", "Open Library"
     HARDCOVER = "hardcover", "Hardcover"
     GOOGLEBOOKS = "googlebooks", "Google Books"
     COMICVINE = "comicvine", "Comic Vine"
+    GCD = "gcd", "Grand Comics Database"
     BGG = "bgg", "BoardGameGeek"
     MUSICBRAINZ = "musicbrainz", "MusicBrainz"
     POCKETCASTS = "pocketcasts", "Pocket Casts"
@@ -60,3 +62,8 @@ class Status(models.TextChoices):
     PLANNING = "Planning", gettext_noop("Planning")
     PAUSED = "Paused", gettext_noop("Paused")
     DROPPED = "Dropped", gettext_noop("Dropped")
+
+
+# Statuses a user sets on purpose. Imports, calendar jobs and playback-start
+# pings must never move a show out of them; only a real play may (#1133).
+USER_HELD_STATUSES = frozenset({Status.DROPPED.value, Status.PAUSED.value})

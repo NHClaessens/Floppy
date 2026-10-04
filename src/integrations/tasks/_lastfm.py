@@ -9,6 +9,7 @@ from django.db.models import F
 from django.utils import timezone
 
 from app.log_safety import exception_summary
+from integrations import connection_health
 
 logger = logging.getLogger(__name__)
 
@@ -509,14 +510,18 @@ def poll_all_lastfm_scrobbles():
     """Global task to poll Last.fm for all connected users."""
     from integrations.models import LastFMAccount
 
-    accounts = LastFMAccount.objects.filter(connection_broken=False).select_related(
-        "user"
-    )
-    if not accounts.exists():
+    # Broken accounts are included once they are due for a re-probe: a
+    # successful sync clears the flag, a rejected one re-records it.
+    accounts = [
+        account
+        for account in LastFMAccount.objects.select_related("user")
+        if connection_health.due_for_probe(account)
+    ]
+    if not accounts:
         logger.debug("No Last.fm accounts to poll")
         return {"processed": 0, "errors": 0, "message": "No accounts to poll"}
 
-    logger.info("Polling Last.fm for %d users", accounts.count())
+    logger.info("Polling Last.fm for %d users", len(accounts))
 
     batch_size = 10
 
@@ -550,6 +555,6 @@ def poll_all_lastfm_scrobbles():
     return {
         "processed": processed_count,
         "errors": error_count,
-        "total_accounts": accounts.count(),
+        "total_accounts": len(accounts),
         "message": f"Processed {processed_count} Last.fm account(s).",
     }

@@ -197,7 +197,7 @@ class MusicSubviewHomeTests(TestCase):
         row = self._add_music_row("albums", Status.PLANNING.value)
         row.sort_by = "upcoming"
         row.direction = "asc"
-        entries = home_screen._library_query_entries(self.user, row)
+        entries = home_screen._library_row_window(self.user, row, 0, 1000, seed=0)[0]
         self.assertTrue(any(e.item.title == "A Night at the Opera" for e in entries))
 
     def test_row_title_includes_subview_label(self):

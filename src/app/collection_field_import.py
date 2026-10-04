@@ -160,49 +160,40 @@ def infer_field_type(values):
     Anything mixed, ambiguous or unrepresentable falls back to text, which
     can hold any value losslessly.
     """
-    texts = [text for text in (_clean(value) for value in values) if text]
-    if not texts:
-        return CollectionFieldType.TEXT, []
-
-    if _looks_boolean(texts):
-        return CollectionFieldType.CHECKBOX, []
-
-    if all(_parse_number(text) is not None for text in texts):
-        return CollectionFieldType.NUMBER, []
-
-    if all(_parse_date(text) is not None for text in texts):
-        return CollectionFieldType.DATE, []
-
-    options = _select_options(texts)
-    if options:
-        return CollectionFieldType.SELECT, options
-
-    return CollectionFieldType.TEXT, []
-
-
-def _looks_boolean(texts):
-    """Return whether every value is a boolean token, alphabetic ones included."""
+    count = 0
+    boolean = number = date = True
     saw_alphabetic = False
-    for text in texts:
-        lowered = text.casefold()
-        if lowered in _AMBIGUOUS_TRUE or lowered in _AMBIGUOUS_FALSE:
+    distinct = set()
+    select = True
+    for value in values:
+        text = _clean(value)
+        if not text:
             continue
-        if _parse_bool(text) is None:
-            return False
-        saw_alphabetic = True
-    return saw_alphabetic
-
-
-def _select_options(texts):
-    """Return sorted select options when the column is a controlled vocabulary."""
-    distinct = set(texts)
-    if len(distinct) > MAX_SELECT_OPTIONS:
-        return []
-    if len(texts) < len(distinct) * MIN_SELECT_REPETITION:
-        return []
-    if any(len(text) > MAX_SELECT_OPTION_LENGTH for text in distinct):
-        return []
-    return sorted(distinct)
+        count += 1
+        if text.casefold() not in _AMBIGUOUS_TRUE | _AMBIGUOUS_FALSE:
+            saw_alphabetic = True
+            boolean = boolean and _parse_bool(text) is not None
+        number = number and _parse_number(text) is not None
+        date = date and _parse_date(text) is not None
+        if select:
+            distinct.add(text)
+            if (
+                len(distinct) > MAX_SELECT_OPTIONS
+                or len(text) > MAX_SELECT_OPTION_LENGTH
+            ):
+                select = False
+                distinct.clear()
+    if not count:
+        return CollectionFieldType.TEXT, []
+    if boolean and saw_alphabetic:
+        return CollectionFieldType.CHECKBOX, []
+    if number:
+        return CollectionFieldType.NUMBER, []
+    if date:
+        return CollectionFieldType.DATE, []
+    if select and count >= len(distinct) * MIN_SELECT_REPETITION:
+        return CollectionFieldType.SELECT, sorted(distinct)
+    return CollectionFieldType.TEXT, []
 
 
 @dataclass

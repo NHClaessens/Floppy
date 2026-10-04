@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import tempfile
+import time
 from contextlib import suppress
 from ipaddress import ip_address
 from pathlib import Path
@@ -17,7 +18,6 @@ from django.core.cache import cache
 from django.core.signing import BadSignature, Signer
 from django.http import FileResponse, HttpResponse, HttpResponseNotFound
 from django.urls import reverse
-from PIL import Image, UnidentifiedImageError
 
 from app.models.application_settings import ApplicationSettings
 
@@ -54,7 +54,7 @@ APPROVED_IMAGE_HOSTS = frozenset(
         "s4.anilist.co",
     },
 )
-APPROVED_IMAGE_HOST_SUFFIXES = (".mzstatic.com",)
+APPROVED_IMAGE_HOST_SUFFIXES = (".mzstatic.com", ".comics.org", ".mangabaka.org")
 
 
 def cache_root():
@@ -260,6 +260,11 @@ def _fetch_to_disk(url):
                     return False
                 data_file.write(chunk)
 
+        # Imported here, not at module scope: Pillow is a C extension that
+        # every process importing this module would otherwise carry resident,
+        # while only this download path ever decodes an image.
+        from PIL import Image, UnidentifiedImageError
+
         try:
             with Image.open(temporary_data) as image:
                 image.verify()
@@ -341,6 +346,88 @@ def serve_cached_image(token, request):
     if etag:
         response["ETag"] = etag
     response["Cache-Control"] = f"public, max-age={CACHE_MAX_AGE_SECONDS}"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
+
+
+# --- Stored covers ------------------------------------------------------------
+#
+# Audiobookshelf and Plex covers come from the user's own server through
+# Floppy's proxy views. Keeping the last good copy here means a slow or
+# offline server no longer turns every poster into the placeholder (#1307),
+# and a fresh copy is served without calling the server at all. The files sit
+# beside the provider cache, so the same stale cleanup and "Clear cache" cover
+# them.
+STORED_COVER_FRESH_SECONDS = 24 * 60 * 60
+
+
+def _stored_paths(key):
+    digest = hashlib.sha256(f"stored:{key}".encode()).hexdigest()
+    root = cache_root()
+    return root / f"{digest}.data", root / f"{digest}.json"
+
+
+def load_stored_cover(key):
+    """Return ``(body, content_type, is_fresh)`` for a stored cover, or None."""
+    data_path, metadata_path = _stored_paths(key)
+    metadata = _metadata(data_path, metadata_path)
+    if metadata is None or not metadata.get("content_type"):
+        return None
+    try:
+        body = data_path.read_bytes()
+    except OSError:
+        return None
+    _touch((data_path, metadata_path))
+    fetched_at = metadata.get("fetched_at") or 0
+    is_fresh = time.time() - fetched_at < STORED_COVER_FRESH_SECONDS
+    return body, metadata["content_type"], is_fresh
+
+
+def store_cover(key, body, content_type):
+    """Keep a validated cover on disk; failing to store it is never fatal."""
+    data_path, metadata_path = _stored_paths(key)
+    root = data_path.parent
+    temporary_paths = []
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=root,
+            prefix=f".{data_path.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as data_file:
+            temporary_paths.append(data_file.name)
+            data_file.write(body)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=root,
+            prefix=f".{metadata_path.stem}.",
+            suffix=".tmp",
+            delete=False,
+        ) as metadata_file:
+            temporary_paths.append(metadata_file.name)
+            json.dump(
+                {"content_type": content_type, "fetched_at": time.time()},
+                metadata_file,
+                separators=(",", ":"),
+            )
+        Path(temporary_paths[0]).replace(data_path)
+        Path(temporary_paths[1]).replace(metadata_path)
+        temporary_paths = []
+    except OSError:
+        logger.debug("Unable to store cover %s", key, exc_info=True)
+    finally:
+        for path in temporary_paths:
+            _remove_temp(path)
+
+
+def stored_cover_response(stored):
+    """Return an HTTP response serving a cover from ``load_stored_cover``."""
+    body, content_type, _is_fresh = stored
+    response = HttpResponse(body, content_type=content_type)
+    response["Cache-Control"] = "private, max-age=3600"
     response["X-Content-Type-Options"] = "nosniff"
     return response
 
