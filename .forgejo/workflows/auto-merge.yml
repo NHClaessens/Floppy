@@ -10,13 +10,20 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 #     IMAGE_REGISTRY, DOCKER_IMAGE_NAME, LLM_ENDPOINT, LLM_MODEL
 #   Secrets: GIT_TOKEN, IMAGE_REGISTRY_USER, IMAGE_REGISTRY_PASSWORD,
 #     LLM_API_KEY (optional)
+#
+# Runner must expose the host Docker socket so job containers can build/push
+# images (forgejo-runner config usually mounts /var/run/docker.sock).
 
 jobs:
   sync-upstream:
     runs-on: ${{ vars.RUNNER_LABEL }}
     container:
-      image: alpine/git
+      image: node:20-alpine
+      options: -v /var/run/docker.sock:/var/run/docker.sock
     steps:
+      - name: Install tools
+        run: apk add --no-cache git curl jq docker-cli
+
       - name: Checkout fork
         uses: actions/checkout@v4
         with:
@@ -27,6 +34,11 @@ jobs:
         run: |
           git remote add upstream "${{ vars.UPSTREAM_REPO_URL }}"
           git fetch upstream
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "forgejo-runner"
+          git config --global user.email "runner@forgejo.org"
 
       - name: Attempt merge
         id: merge
@@ -41,8 +53,6 @@ jobs:
       - name: Resolve conflicts with LLM
         if: env.MERGE_CONFLICT == '1'
         run: |
-          apk add python3 py3-pip git curl jq
-          pip install requests
           CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
           if [ -z "$CONFLICTED_FILES" ]; then
             echo "No conflicts to resolve."
@@ -50,7 +60,8 @@ jobs:
           fi
           for file in $CONFLICTED_FILES; do
             echo "Resolving conflicts in: $file"
-            OURS=$(git show :1:"$file" | head -n -1)
+            # :2 = ours (HEAD), :3 = theirs (upstream)
+            OURS=$(git show :2:"$file")
             THEIRS=$(git show :3:"$file")
             cat > /tmp/conflict.txt << EOF
           Resolve the following Git merge conflict in $file:
@@ -77,17 +88,17 @@ jobs:
             echo "$RESOLVED_CONTENT" > "$file"
             git add "$file"
           done
-          git config --global user.name "forgejo-runner"
-          git config --global user.email "runner@forgejo.org"
           git commit -m "$(printf '%s\n' \
             "Auto-merge upstream/${{ vars.UPSTREAM_BRANCH }}" \
             "with LLM conflict resolution")"
-          git push origin "${{ vars.TARGET_BRANCH }}"
+
+      - name: Push merged branch
+        if: success()
+        run: git push origin "${{ vars.TARGET_BRANCH }}"
 
       - name: Build and Push Docker Image
-        if: success() || steps.merge.outcome == 'success'
+        if: success()
         run: |
-          apk add docker-cli
           echo "${{ secrets.IMAGE_REGISTRY_PASSWORD }}" | docker login \
             -u "${{ secrets.IMAGE_REGISTRY_USER }}" \
             --password-stdin "${{ vars.IMAGE_REGISTRY }}"
