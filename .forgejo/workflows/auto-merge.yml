@@ -13,15 +13,15 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 #   Auth: checkout/push use the job's github.token (same Forgejo repo).
 #   Upstream fetch is unauthenticated (public remote).
 #
-# Runner must expose the host Docker socket so job containers can build/push
-# images (forgejo-runner config usually mounts /var/run/docker.sock).
+# Docker: set container.docker_host: 'automount' on the runner (shares the
+# runner's /var/run/docker.sock into job containers). Do not also mount it
+# from the workflow — that causes "Duplicate mount point".
 
 jobs:
   sync-upstream:
     runs-on: ${{ vars.RUNNER_LABEL }}
     container:
       image: node:20-alpine
-      options: -v /var/run/docker.sock:/var/run/docker.sock
     steps:
       - name: Install tools
         run: apk add --no-cache git curl jq docker-cli
