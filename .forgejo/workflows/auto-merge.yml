@@ -8,8 +8,10 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 # Configure in Forgejo UI:
 #   Variables: UPSTREAM_REPO_URL, UPSTREAM_BRANCH, TARGET_BRANCH,
 #     IMAGE_REGISTRY, DOCKER_IMAGE_NAME, LLM_ENDPOINT, LLM_MODEL
-#   Secrets: GIT_TOKEN, IMAGE_REGISTRY_USER, IMAGE_REGISTRY_PASSWORD,
+#   Secrets: IMAGE_REGISTRY_USER, IMAGE_REGISTRY_PASSWORD,
 #     LLM_API_KEY (optional)
+#   Auth: checkout/push use the job's github.token (same Forgejo repo).
+#   Upstream fetch is unauthenticated (public remote).
 #
 # Runner must expose the host Docker socket so job containers can build/push
 # images (forgejo-runner config usually mounts /var/run/docker.sock).
@@ -28,7 +30,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GIT_TOKEN }}
+          token: ${{ github.token }}
 
       - name: Add upstream remote
         run: |
