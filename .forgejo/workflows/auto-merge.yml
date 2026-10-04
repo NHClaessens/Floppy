@@ -24,7 +24,9 @@ jobs:
       image: node:20-alpine
     steps:
       - name: Install tools
-        run: apk add --no-cache git curl jq docker-cli
+        # buildx on the host is unused here — the job needs its own CLI plugin;
+        # the shared socket only exposes the daemon.
+        run: apk add --no-cache git curl jq docker-cli docker-cli-buildx
 
       - name: Checkout fork
         uses: actions/checkout@v4
@@ -101,9 +103,13 @@ jobs:
       - name: Build and Push Docker Image
         if: success()
         run: |
+          if ! docker info >/dev/null 2>&1; then
+            echo "::error::No Docker daemon in this job (need container.docker_host: automount)."
+            exit 1
+          fi
+          docker buildx version
           echo "${{ secrets.IMAGE_REGISTRY_PASSWORD }}" | docker login \
             -u "${{ secrets.IMAGE_REGISTRY_USER }}" \
             --password-stdin "${{ vars.IMAGE_REGISTRY }}"
           IMAGE="${{ vars.IMAGE_REGISTRY }}/${{ vars.DOCKER_IMAGE_NAME }}"
-          docker build -t "${IMAGE}:latest" .
-          docker push "${IMAGE}:latest"
+          docker buildx build --push -t "${IMAGE}:latest" .
