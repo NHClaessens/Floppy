@@ -12,6 +12,9 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 #     LLM_API_KEY (optional)
 #   Auth: checkout/push use the job's github.token (same Forgejo repo).
 #   Upstream fetch is unauthenticated (public remote).
+#   Registry: IMAGE_REGISTRY_PASSWORD must be a user PAT with
+#     read:package + write:package (account password / github.token
+#     usually get unauthorized: reqPackageAccess on push).
 #
 # Docker: set container.docker_host: 'automount' on the runner (shares the
 # runner's /var/run/docker.sock into job containers). Do not also mount it
@@ -39,15 +42,28 @@ jobs:
           git remote add upstream "${{ vars.UPSTREAM_REPO_URL }}"
           git fetch upstream
 
+      - name: Check for upstream changes
+        id: check
+        run: |
+          git checkout "${{ vars.TARGET_BRANCH }}"
+          if git merge-base --is-ancestor \
+            "upstream/${{ vars.UPSTREAM_BRANCH }}" HEAD; then
+            echo "Already up to date with upstream — nothing to do."
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Configure git identity
+        if: steps.check.outputs.up_to_date != 'true'
         run: |
           git config --global user.name "forgejo-runner"
           git config --global user.email "runner@forgejo.org"
 
       - name: Attempt merge
         id: merge
+        if: steps.check.outputs.up_to_date != 'true'
         run: |
-          git checkout "${{ vars.TARGET_BRANCH }}"
           if ! git merge \
             "upstream/${{ vars.UPSTREAM_BRANCH }}" --no-edit; then
             echo "MERGE_CONFLICT=1" >> "$GITHUB_ENV"
@@ -55,7 +71,7 @@ jobs:
         continue-on-error: true
 
       - name: Resolve conflicts with LLM
-        if: env.MERGE_CONFLICT == '1'
+        if: steps.check.outputs.up_to_date != 'true' && env.MERGE_CONFLICT == '1'
         run: |
           CONFLICTED_FILES=$(git diff --name-only --diff-filter=U)
           if [ -z "$CONFLICTED_FILES" ]; then
@@ -97,11 +113,11 @@ jobs:
             "with LLM conflict resolution")"
 
       - name: Push merged branch
-        if: success()
+        if: success() && steps.check.outputs.up_to_date != 'true'
         run: git push origin "${{ vars.TARGET_BRANCH }}"
 
       - name: Build and Push Docker Image
-        if: success()
+        if: success() && steps.check.outputs.up_to_date != 'true'
         run: |
           if ! docker info >/dev/null 2>&1; then
             echo "::error::No Docker daemon in this job (need container.docker_host: automount)."
