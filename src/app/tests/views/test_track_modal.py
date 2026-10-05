@@ -175,6 +175,75 @@ class TrackModalViewTests(TestCase):
         self.assertEqual(response.status_code, 200)
         upsert.assert_not_called()
 
+    @patch("app.providers.services.get_media_metadata")
+    def test_season_set_to_no_status_still_opens_track_modal(self, mock_get_metadata):
+        """Saving a season as No Status must not break reopening its modal (#1444).
+
+        The status history tab renders every change, and the No Status change
+        has a null status, which the template used to translate as a label.
+        """
+        mock_get_metadata.return_value = _tv_with_seasons_payload(
+            "1396",
+            Sources.TMDB.value,
+        )["season/1"]
+        tv_item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            title="Test Show",
+        )
+        tv = TV.objects.create(
+            item=tv_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        season_item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            title="Test Show",
+            season_number=1,
+        )
+        season = Season.objects.create(
+            item=season_item,
+            user=self.user,
+            related_tv=tv,
+            status=Status.IN_PROGRESS.value,
+        )
+
+        save_response = self.client.post(
+            reverse("media_save"),
+            {
+                "media_id": "1396",
+                "source": Sources.TMDB.value,
+                "media_type": MediaTypes.SEASON.value,
+                "season_number": 1,
+                "instance_id": season.id,
+                "status": "",
+            },
+        )
+        self.assertLess(save_response.status_code, 400)
+        season.refresh_from_db()
+        self.assertIsNone(season.status)
+
+        response = self.client.get(
+            reverse(
+                "track_modal",
+                kwargs={
+                    "source": Sources.TMDB.value,
+                    "media_type": MediaTypes.SEASON.value,
+                    "media_id": "1396",
+                    "season_number": 1,
+                },
+            ),
+            {"instance_id": season.id},
+            HTTP_HX_REQUEST="true",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "No Status")
+        self.assertEqual(response.context["status_changes"][0]["new"], None)
+
     def test_track_modal_view_existing_media(self):
         """Test the track modal view for existing media."""
         response = self.client.get(
