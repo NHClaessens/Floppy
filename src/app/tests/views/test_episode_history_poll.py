@@ -102,3 +102,12 @@ class EpisodeHistoryPollTests(TestCase):
         )
 
         self.assertEqual(response.status_code, 404)
+
+    def test_polled_status_pill_is_marked_so_an_open_dialog_is_kept(self):
+        """The poll's pill refresh is flagged; the page skips it while the dialog is open."""
+        response = self.client.get(
+            reverse("episode_history_poll", args=[self.season.id]),
+        )
+
+        self.assertContains(response, "data-track-action-root", html=False)
+        self.assertContains(response, "data-polled", html=False)

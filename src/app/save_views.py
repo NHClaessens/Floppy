@@ -891,7 +891,7 @@ def _render_notes_section_oob(
     )
 
 
-def _render_track_action_oob(request, instance, return_url):
+def _render_track_action_oob(request, instance, return_url, *, polled=False):
     """Render a tracked instance's own status pill as an OOB swap.
 
     Watching an episode (or a webhook/scrobbler writing one with no open
@@ -901,6 +901,9 @@ def _render_track_action_oob(request, instance, return_url):
     to refresh this pill, so callers on any side of that need to push it
     explicitly. Works for any tracked instance with an `.item` (Season,
     TV, ...), not just seasons.
+
+    `polled` marks a background refresh: the page skips that swap while the
+    tracking dialog is open, so polling never closes it or drops the form.
     """
     return render_to_string(
         "app/components/detail_track_action.html",
@@ -910,6 +913,7 @@ def _render_track_action_oob(request, instance, return_url):
             "return_url": return_url,
             "track_action_update": True,
             "swap_oob": True,
+            "polled": polled,
         },
         request=request,
     )
@@ -1389,6 +1393,7 @@ def episode_history_poll(request, season_id):
             request,
             related_season,
             media_url(related_season.item),
+            polled=True,
         ),
     )
     response["Cache-Control"] = "no-cache, no-store, must-revalidate"

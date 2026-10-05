@@ -197,6 +197,27 @@ def item_ids_with_json_array_value_ci(item_json_field: str, normalized_target: s
     ).values("id")
 
 
+class _EpisodeItemsAfterSelection(ImportScopedQuerySet):
+    """Episodes that load their catalogue Items once the rows are selected.
+
+    Prefetch("item") would do the same, but Django 5.2 expands it into one
+    "id = ? OR ..." term per distinct item and SQLite rejects the tree past
+    depth 1000 (#1450). in_bulk batches its IN lists, so any size loads.
+    """
+
+    def _fetch_all(self):
+        loading = self._result_cache is None
+        super()._fetch_all()
+        if loading:
+            # Episode.item is nullable; leave those rows without an item.
+            items = Item.objects.defer("watch_providers").in_bulk(
+                {episode.item_id for episode in self._result_cache if episode.item_id},
+            )
+            for episode in self._result_cache:
+                if episode.item_id:
+                    episode.item = items[episode.item_id]
+
+
 class MediaManager(models.Manager.from_queryset(ImportScopedQuerySet)):
     """Custom manager for media models."""
 
@@ -837,8 +858,9 @@ class MediaManager(models.Manager.from_queryset(ImportScopedQuerySet)):
             # Window sorting runs over every watch. Joining the catalogue here
             # copies its wide JSON/text columns into every intermediate row.
             # Fetch Items only after the window has selected its representatives.
-            episode_qs = Episode.objects.prefetch_related(
-                Prefetch("item", queryset=Item.objects.defer("watch_providers")),
+            active = Episode.objects.all()
+            episode_qs = _EpisodeItemsAfterSelection(
+                model=active.model, query=active.query, using=active._db, hints=active._hints,
             )
             # Read-only card/ranking graphs need per-identity counts and date
             # bounds, not one Python Episode/Item pair per historical watch.

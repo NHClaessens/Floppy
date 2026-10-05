@@ -22,10 +22,12 @@ from app.library_query.spec import STATUS_MATCH_ANY
 from app.models import (
     TV,
     CollectionEntry,
+    Episode,
     Item,
     ItemTag,
     MediaTypes,
     Movie,
+    Season,
     Sources,
     Status,
     Tag,
@@ -366,3 +368,52 @@ class PageCostTests(LibraryQueryTestCase):
         self.assertEqual(len(page.items), 10)
         self.assertTrue(seen_batch_sizes)
         self.assertLessEqual(max(seen_batch_sizes), 16)
+
+
+class LargeTvBatchTests(LibraryQueryTestCase):
+    """A batch with over 1000 episodes loads on SQLite (#1450)."""
+
+    def test_tv_batch_with_over_a_thousand_episode_items_loads(self):
+        """Django 5.2 turns a forward-FK prefetch into an OR chain SQLite caps at depth 1000."""
+        shows, seasons_per_show = 4, 300
+        tv_items = Item.objects.bulk_create(
+            Item(media_id=str(n), source=Sources.TMDB.value, media_type=MediaTypes.TV.value, title=f"Show {n}", image="x")
+            for n in range(shows)
+        )
+        tvs = TV.objects.bulk_create(
+            TV(item=item, user=self.user, status=Status.IN_PROGRESS.value) for item in tv_items
+        )
+        season_items = Item.objects.bulk_create(
+            Item(media_id=str(n), source=Sources.TMDB.value, media_type=MediaTypes.SEASON.value, season_number=number, title=f"Show {n}", image="x")
+            for n in range(shows)
+            for number in range(1, seasons_per_show + 1)
+        )
+        season_rows = Season.objects.bulk_create(
+            Season(item=item, related_tv=tvs[index // seasons_per_show], user=self.user, status=Status.IN_PROGRESS.value)
+            for index, item in enumerate(season_items)
+        )
+        episode_items = Item.objects.bulk_create(
+            Item(media_id=str(item.media_id), source=Sources.TMDB.value, media_type=MediaTypes.EPISODE.value, season_number=item.season_number, episode_number=1, title=item.title, image="x")
+            for item in season_items
+        )
+        Episode.objects.bulk_create(
+            Episode(item=item, related_season=season) for item, season in zip(episode_items, season_rows)
+        )
+        # Episode.item is nullable: such a row must not break the batch.
+        Episode.objects.bulk_create([Episode(item=None, related_season=season_rows[0])])
+
+        batch = [executor_module.Candidate(item) for item in tv_items]
+        executor_module._attach_media(self.user, batch, {executor_module.filter_registry.NEEDS_MEDIA})
+
+        self.assertTrue(all(candidate.media is not None for candidate in batch))
+        episodes = [
+            episode
+            for candidate in batch
+            for season in candidate.media.seasons.all()
+            for episode in season.episodes.all()
+        ]
+        with_items = [episode for episode in episodes if episode.item_id]
+        self.assertEqual(len(with_items), shows * seasons_per_show)
+        self.assertEqual(len(episodes), len(with_items) + 1)
+        with self.assertNumQueries(0):
+            self.assertTrue(all(episode.item.episode_number == 1 for episode in with_items))

@@ -115,6 +115,25 @@ class CompactEpisodeCardTests(TestCase):
         with self.assertNumQueries(0):
             self.assertEqual([row.item.title for row in episodes], ["Episode 1", "Episode 2"])
 
+    def test_long_shows_load_past_the_sqlite_expression_limit(self):
+        """A batch with over a thousand episodes must not build a >1000-term OR (#1452)."""
+        show, season = self._fixture(repeats=1)
+        items = Item.objects.bulk_create([
+            Item(
+                media_id="compact", source="tmdb", media_type="episode", season_number=1,
+                episode_number=number, title=f"Episode {number}",
+            )
+            for number in range(3, 1203)
+        ])
+        Episode.objects.bulk_create([
+            Episode(item=item, related_season=season, status=Status.COMPLETED.value, end_date=timezone.now())
+            for item in items
+        ])
+        compact = self._load(show.pk, compact=True)
+        episodes = list(compact.seasons.all()[0].episodes.all())
+        with self.assertNumQueries(0):
+            self.assertEqual(len({row.item.pk for row in episodes}), 1202)
+
     @tag("slow", "benchmark")
     def test_serialized_card_graph_scales_with_identities_not_watches(self):
         """A thousand same-coordinate plays produce two compact episode nodes."""
