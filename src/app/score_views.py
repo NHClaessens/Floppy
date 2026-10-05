@@ -13,7 +13,7 @@ from django.views.decorators.http import require_POST
 
 from app import history_cache
 from app.models import Album, BasicMedia, Episode, Season
-from app.services.episode_scores import set_episode_score
+from app.services.episode_scores import rate_episode
 
 logger = logging.getLogger(__name__)
 
@@ -137,17 +137,19 @@ def update_episode_score(request, season_id, episode_number):
             if score is None:
                 return HttpResponseBadRequest("Invalid score.")
 
-    episodes = Episode.objects.filter(
-        related_season=season,
-        item__episode_number=episode_number,
-    )
-
     if toggle and score is not None:
-        existing = episodes.values_list("score", flat=True).first()
+        existing = (
+            Episode.ratings.filter(
+                related_season=season,
+                item__episode_number=episode_number,
+            )
+            .values_list("score", flat=True)
+            .first()
+        )
         if existing == score:
             score = None
 
-    set_episode_score(episodes, score, request.user.id)
+    rate_episode(season, episode_number, score)
     logger.info(
         "Episode S%sE%s score updated to %s for user %s",
         season.item.season_number,

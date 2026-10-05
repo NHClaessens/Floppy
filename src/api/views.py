@@ -996,6 +996,19 @@ class MediaTypeListView(drf_views.APIView):
             serialized_data = serialize_data(media_form.instance)
             return Response(serialized_data, status=HTTP.CREATED)
 
+        if media_type == MediaTypes.EPISODE.value:
+            return Response(
+                {
+                    "detail": (
+                        "Provider episodes are recorded as plays "
+                        "(POST /media/tv/{source}/{media_id}/{season_number}"
+                        "/episodes/{episode_number}/watch/) or rated with "
+                        "PATCH .../episodes/{episode_number}/score/."
+                    ),
+                },
+                status=HTTP.BAD_REQUEST,
+            )
+
         media_id = body.get("media_id")
         if not media_id:
             return Response(

@@ -2174,7 +2174,18 @@ class ActiveEpisodeManager(ImportScopedManager):
 
     def get_queryset(self):
         """Return active watches only; all_objects retains archived history."""
-        return super().get_queryset().filter(order_archived=False)
+        return super().get_queryset().filter(
+            order_archived=False,
+            rating_only=False,
+        )
+
+
+class PlayEpisodeManager(ImportScopedManager):
+    """Every play, archived or not, but never a rating-only row."""
+
+    def get_queryset(self):
+        """Return plays only; `ratings` is the one manager that sees the rest."""
+        return super().get_queryset().filter(rating_only=False)
 
 
 class Episode(models.Model):
@@ -2192,6 +2203,7 @@ class Episode(models.Model):
             "scored_at",
             "watch_operation_id",
             "external_id",
+            "rating_only",
             # `start_date` and `status` are tracked: a play can be left in
             # progress, and the history modal must tell it apart from a finish
             # without a date (issues #377, #1278).
@@ -2219,6 +2231,11 @@ class Episode(models.Model):
     notes = models.TextField(blank=True, default="")
     entry_source = models.CharField(max_length=50, blank=True, default="")
     dropped = models.BooleanField(default=False)
+    # A rating for an episode nobody has watched. It is not a play, so the
+    # `objects` and `all_objects` managers never return it and no watch
+    # projection (progress, History, Statistics) can count it; the first real
+    # play of the episode takes its score and deletes it.
+    rating_only = models.BooleanField(default=False)
     score = models.DecimalField(
         null=True,
         blank=True,
@@ -2232,7 +2249,10 @@ class Episode(models.Model):
     )
     scored_at = ScoreMonitorField(monitor="score", null=True, blank=True)
     objects = ActiveEpisodeManager()
-    all_objects = ImportScopedManager()
+    all_objects = PlayEpisodeManager()
+    # Rating paths only: also sees rating-only rows. Manager order matters,
+    # `objects` must stay the default (reverse relations use it).
+    ratings = ImportScopedManager()
 
     class Meta:
         """Meta options for the model."""
@@ -2275,6 +2295,10 @@ class Episode(models.Model):
             self.status = (
                 Status.DROPPED.value if self.dropped else Status.COMPLETED.value
             )
+        if self.rating_only:
+            # Not a play: no completion handling, no season/TV status sync.
+            super().save(*args, **kwargs)
+            return
         if self._state.adding and self.score is None:
             # A rating belongs to the episode, not to one viewing of it — the
             # score endpoint writes every play at once — so a replay inherits
@@ -2282,7 +2306,7 @@ class Episode(models.Model):
             # It keeps the rating's own timestamp too, so a replay does not
             # make an old rating look newly given.
             self.score, self.scored_at = (
-                Episode.objects.filter(
+                Episode.ratings.filter(
                     related_season_id=self.related_season_id,
                     item_id=self.item_id,
                 )
@@ -2303,6 +2327,13 @@ class Episode(models.Model):
                 finalize_completed_entry(planning_entries)
         else:
             super().save(*args, **kwargs)
+
+        # The play now carries the rating, so the rating-only row is redundant.
+        Episode.ratings.filter(
+            related_season_id=self.related_season_id,
+            item_id=self.item_id,
+            rating_only=True,
+        ).delete()
 
         season_number = self.item.season_number
         if season_number is None:

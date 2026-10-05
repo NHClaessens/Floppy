@@ -5,12 +5,10 @@ from decimal import Decimal, InvalidOperation
 from http import HTTPStatus as HTTP  # noqa: N814
 
 from django.db.models import Count, OuterRef, Subquery
-from django.utils import timezone
 from django.utils.dateparse import parse_date
 from django.utils.timezone import localdate
 from rest_framework.response import Response
 
-from app import history_cache
 from app.helpers import parse_completion_datetime
 from app.models import (
     TV,
@@ -32,6 +30,7 @@ from app.services.episode_coordinates import (
     cleanup_episode_history_for_route,
     resolve_episode_coordinate,
 )
+from app.services.episode_scores import rate_episode
 from lists.models import CustomListItem
 from users.models import MediaStatusChoices
 
@@ -1050,31 +1049,9 @@ def validate_episode_score(raw_score):
 
 
 def apply_episode_score(season, episode_number, score):
-    """Set `score` on all plays of a tracked episode within `season`.
+    """Set `score` on a tracked episode within `season`.
 
-    Returns True if the episode was found and updated, False otherwise.
-    Uses queryset.update(), which skips post_save, so the affected
-    history-cache days are invalidated explicitly like the web view does.
+    An episode with no play gets a rating-only row (not a watch). Returns True
+    if a rating was stored or changed, False when there was nothing to clear.
     """
-    episodes = Episode.objects.filter(
-        related_season=season,
-        item__episode_number=int(episode_number),
-    )
-    if not episodes.exists():
-        return False
-
-    episodes.exclude(score=score).update(score=score, scored_at=timezone.now())
-
-    day_keys = [
-        history_cache.history_day_key(end_date)
-        for end_date in episodes.values_list("end_date", flat=True)
-    ]
-    day_keys = [day_key for day_key in day_keys if day_key]
-    if day_keys:
-        history_cache.invalidate_history_days(
-            season.user_id,
-            day_keys=day_keys,
-            logging_styles=("sessions", "repeats"),
-            reason="episode_score_change",
-        )
-    return True
+    return rate_episode(season, episode_number, score)

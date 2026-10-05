@@ -451,6 +451,39 @@ def _normalize_detail_episode_actions(episodes):
     return normalized_episodes
 
 
+def attach_unwatched_ratings(episodes, user, media_metadata):
+    """Let an unwatched episode of a tracked season be rated from its row.
+
+    Adds ``rating_season_id`` (the season the rating belongs to) and
+    ``unwatched_score`` (a rating-only row's score, if any) to each episode
+    dict that has no play. Does nothing when the season is not tracked.
+    """
+    from app.models import Episode, Season
+
+    if not getattr(user, "is_authenticated", False):
+        return episodes
+    season = Season.objects.filter(
+        user=user,
+        item__media_id=str(media_metadata.get("media_id")),
+        item__source=media_metadata.get("source"),
+        item__season_number=media_metadata.get("season_number"),
+    ).first()
+    if season is None:
+        return episodes
+    scores = dict(
+        Episode.ratings.filter(related_season=season, rating_only=True).values_list(
+            "item__episode_number",
+            "score",
+        ),
+    )
+    for episode in episodes:
+        if not isinstance(episode, dict) or episode.get("all_history"):
+            continue
+        episode["rating_season_id"] = season.id
+        episode["unwatched_score"] = scores.get(episode.get("episode_number"))
+    return episodes
+
+
 def _should_queue_game_lengths_refresh(detail_item):
     """Return whether a background game-length refresh should be queued."""
     if not detail_item:

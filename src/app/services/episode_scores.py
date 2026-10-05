@@ -11,7 +11,7 @@ import logging
 from django.utils import timezone
 
 from app import history_cache
-from app.models import Episode
+from app.models import Episode, Status
 
 logger = logging.getLogger(__name__)
 
@@ -48,3 +48,35 @@ def set_episode_score(episodes, score, user_id):
             reason="episode_score_change",
         )
     return updated
+
+
+def rate_episode(season, episode_number, score):
+    """Rate one episode of ``season``, whether or not anyone has watched it.
+
+    Every play carries the score. An episode with no play gets one rating-only
+    row, which is not a watch (see ``Episode.rating_only``); clearing the score
+    drops that row again. Returns False when there is nothing to clear.
+    """
+    rows = Episode.ratings.filter(
+        related_season=season,
+        item__episode_number=int(episode_number),
+    )
+    if rows.exists():
+        if score is None:
+            rows.filter(rating_only=True).delete()
+        set_episode_score(rows.filter(rating_only=False), score, season.user_id)
+        rows.filter(rating_only=True).exclude(score=score).update(
+            score=score,
+            scored_at=timezone.now(),
+        )
+        return True
+    if score is None:
+        return False
+    Episode.ratings.create(
+        related_season=season,
+        item=season.get_episode_item(int(episode_number)),
+        status=Status.PLANNING.value,
+        rating_only=True,
+        score=score,
+    )
+    return True

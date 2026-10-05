@@ -107,6 +107,11 @@
       {% with ep_score=plays.0.score %}
         {% include "app/components/detail_row_rating_button.html" with ep_score=ep_score rating_kind="episode" episode=episode episode_score_target_id=episode.rating_season_id action_media_type=action_media_type csrf_token=csrf_token user=user MediaTypes=MediaTypes only %}
       {% endwith %}
+    {% elif not plays and action_media_type == MediaTypes.EPISODE.value and episode.rating_season_id %}
+      {% comment %}Unwatched episode of a tracked season: the rating is stored without a play.{% endcomment %}
+      {% with ep_score=episode.unwatched_score %}
+        {% include "app/components/detail_row_rating_button.html" with ep_score=ep_score rating_kind="episode" episode=episode episode_score_target_id=episode.rating_season_id action_media_type=action_media_type csrf_token=csrf_token user=user MediaTypes=MediaTypes only %}
+      {% endwith %}
     {% elif plays and action_media_type != MediaTypes.EPISODE.value %}
       {% with ep_score=plays.0.score rating_instance=plays.0 %}
         {% include "app/components/detail_row_rating_button.html" with ep_score=ep_score rating_kind="media" episode=episode rating_instance=rating_instance action_media_type=action_media_type csrf_token=csrf_token user=user MediaTypes=MediaTypes only %}

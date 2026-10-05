@@ -168,11 +168,13 @@ def resolve_or_create_season(
     library_media_type="",
     *,
     prepare_only=False,
+    status=Status.IN_PROGRESS.value,
 ):
     """Return the user's tracked Season row, creating it if it doesn't exist.
 
     Mirrors the season auto-create behavior of the web episode actions:
-    missing seasons are created In Progress with metadata-derived title/image.
+    missing seasons are created In Progress (or ``status``) with
+    metadata-derived title/image.
     """
     related_season = metadata_resolution.find_tracked_season(
         user,
@@ -213,7 +215,7 @@ def resolve_or_create_season(
             item=item,
             user=user,
             score=None,
-            status=Status.IN_PROGRESS.value,
+            status=status,
             notes="",
         )
         if prepare_only:
