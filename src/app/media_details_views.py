@@ -1103,11 +1103,12 @@ def media_details(
             ),
         )
 
-    # For podcasts and manual music entries, ensure source is in metadata dict
+    # For podcasts, videos and manual music entries, ensure source is in metadata dict
     # (fixes KeyError in template — see services.get_media_metadata's music/manual stub)
     if media_type in (
         MediaTypes.PODCAST.value,
         MediaTypes.MUSIC.value,
+        MediaTypes.VIDEO.value,
     ) and isinstance(media_metadata, dict):
         media_metadata["source"] = source
         media_metadata["media_type"] = media_type

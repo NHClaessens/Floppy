@@ -379,7 +379,7 @@
 </div>
 
 {# History filter FAB + modal #}
-{% translate "Name this view" as history_save_view_prompt %}{% translate "Activity (watched)" as media_i18n_19 %}{% translate "TV Show" as media_i18n_20 %}{% translate "Movie" as media_i18n_21 %}{% translate "Anime" as media_i18n_22 %}{% translate "Game" as media_i18n_23 %}{% translate "Music" as media_i18n_24 %}{% translate "Book" as media_i18n_25 %}{% translate "Manga" as media_i18n_26 %}{% translate "Comic" as media_i18n_27 %}{% translate "Podcast" as media_i18n_28 %}{% translate "Board Game" as media_i18n_29 %}{% translate "Release dates" as media_i18n_30 %}<div x-data="{
+{% translate "Name this view" as history_save_view_prompt %}{% translate "Activity (watched)" as media_i18n_19 %}{% translate "TV Show" as media_i18n_20 %}{% translate "Movie" as media_i18n_21 %}{% translate "Anime" as media_i18n_22 %}{% translate "Game" as media_i18n_23 %}{% translate "Music" as media_i18n_24 %}{% translate "Book" as media_i18n_25 %}{% translate "Manga" as media_i18n_26 %}{% translate "Comic" as media_i18n_27 %}{% translate "Podcast" as media_i18n_28 %}{% translate "Board Game" as media_i18n_29 %}{% translate "Release dates" as media_i18n_30 %}{% translate "Video" as media_i18n_video %}<div x-data="{
   open: false,
   startDate: '',
   endDate: '',
@@ -411,6 +411,7 @@
     { value: 'manga', label: '{{ media_i18n_26|escapejs }}' },
     { value: 'comic', label: '{{ media_i18n_27|escapejs }}' },
     { value: 'podcast', label: '{{ media_i18n_28|escapejs }}' },
+    { value: 'video', label: '{{ media_i18n_video|escapejs }}' },
     { value: 'boardgame', label: '{{ media_i18n_29|escapejs }}' },
   ],
   get activeCount() {

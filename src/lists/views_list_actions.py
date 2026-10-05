@@ -41,6 +41,7 @@ from app.templatetags.app_tags import media_type_readable_plural
 from integrations.upload_staging import (
     enqueue_staged_task,
     stage_uploaded_file,
+    staging_failure_message,
 )
 from lists import smart_rules
 from lists import tasks as list_tasks
@@ -336,12 +337,9 @@ def import_list_csv(request):
 
     try:
         staged_file = str(stage_uploaded_file(csv_file))
-    except OSError:
+    except OSError as error:
         logger.exception("Could not stage custom list CSV upload")
-        messages.error(
-            request,
-            "The upload could not be queued. Check available disk space and try again.",
-        )
+        messages.error(request, staging_failure_message(error))
         return redirect("lists")
 
     try:

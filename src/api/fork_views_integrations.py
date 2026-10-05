@@ -18,6 +18,7 @@ from integrations.imports import helpers as import_helpers
 from integrations.upload_staging import (
     enqueue_staged_task,
     stage_uploaded_file,
+    staging_failure_message,
 )
 from users.models import ImportModeChoices
 
@@ -147,10 +148,10 @@ class ImportDispatchView(drf_views.APIView):
                 )
             try:
                 staged_file = str(stage_uploaded_file(file))
-            except OSError:
+            except OSError as error:
                 logger.exception("Could not stage %s upload", label)
                 return Response(
-                    {"detail": "The upload could not be staged."},
+                    {"detail": staging_failure_message(error)},
                     status=HTTP.INSUFFICIENT_STORAGE,
                 )
             try:

@@ -30,6 +30,7 @@ from app.history_entry_builders import (
     _attach_entry_score,
     _build_episode_entry,
     _build_movie_entry,
+    _build_video_play_entry,
     _format_boardgame_plays,
     _format_game_hours,
     _get_music_runtime_minutes,
@@ -53,6 +54,7 @@ from app.models import (
     Music,
     Podcast,
     Track,
+    VideoPlay,
 )
 
 logger = logging.getLogger(__name__)
@@ -97,6 +99,7 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
     include_podcast = (
         requested_media_types is None or "podcast" in requested_media_types
     )
+    include_video = requested_media_types is None or "video" in requested_media_types
     include_game = requested_media_types is None or "game" in requested_media_types
     include_boardgame = (
         requested_media_types is None or "boardgame" in requested_media_types
@@ -824,6 +827,20 @@ def build_history_day(user, day_key, logging_style_override=None, media_types=No
             if genres:
                 entry["genres"] = genres
             entries.append(entry)
+
+    # Videos (one row per play ending on this day)
+    if include_video:
+        plays = VideoPlay.objects.filter(
+            video__user=user,
+            end_date__gte=day_start,
+            end_date__lt=day_end,
+        ).select_related("video__item").defer(
+            *history_deferred_item_fields("video__item"),
+        )
+        for play in plays:
+            entry = _build_video_play_entry(play)
+            if entry:
+                entries.append(entry)
 
     if not entries:
         return None

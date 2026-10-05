@@ -60,6 +60,7 @@ class HomeScreenViewTests(TestCase):
             if media_type in (
                 MediaTypes.EPISODE.value,
                 MediaTypes.COMIC_ISSUE.value,
+                MediaTypes.VIDEO.value,  # always on, no per-user toggle
             ):
                 continue
             field_name = f"{media_type}_enabled"

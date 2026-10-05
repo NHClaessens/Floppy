@@ -157,6 +157,7 @@ from integrations.upload_staging import (
     enqueue_staged_task,
     stage_uploaded_file,
     staged_payload_is_zip,
+    staging_failure_message,
 )
 from integrations.webhooks.plex import extract_plex_webhook_usernames
 
@@ -175,12 +176,9 @@ def _stage_upload_or_message(request, upload, label="upload"):
     """Stage an upload and report storage failures without returning a 500."""
     try:
         return str(stage_uploaded_file(upload))
-    except OSError:
+    except OSError as error:
         logger.exception("Could not stage %s for background import", label)
-        messages.error(
-            request,
-            "The upload could not be queued. Check available disk space and try again.",
-        )
+        messages.error(request, staging_failure_message(error))
         return None
 
 

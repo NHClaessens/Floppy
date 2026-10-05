@@ -168,9 +168,13 @@ class Media(models.Model):
             super().save(*args, **kwargs)
 
     def _get_local_max_progress(self):
-        """Return locally-derived runtime minutes for music/podcast without provider calls."""
+        """Return locally-derived length for music, podcasts, and videos without provider calls."""
         if self.item.media_type == MediaTypes.PODCAST.value:
             return self.item.runtime_minutes
+
+        if self.item.media_type == MediaTypes.VIDEO.value:
+            length_seconds = getattr(self, "length_seconds", None)
+            return length_seconds or None
 
         # Audiobooks track progress in minutes, so their total is the runtime.
         if (
@@ -213,6 +217,7 @@ class Media(models.Model):
                 MediaTypes.PODCAST.value,
                 MediaTypes.MUSIC.value,
                 MediaTypes.BOARDGAME.value,
+                MediaTypes.VIDEO.value,
             ) or (
                 self.item.media_type == MediaTypes.BOOK.value
                 and self.item.format == "audiobook"
@@ -261,8 +266,11 @@ class Media(models.Model):
                 MediaTypes.BOARDGAME.value,
             ):
                 max_progress = None
-            # For podcasts, use runtime_minutes from Item instead of external metadata.
-            elif self.item.media_type == MediaTypes.PODCAST.value:
+            # Podcasts and videos already know their length. Don't ask a provider.
+            elif self.item.media_type in (
+                MediaTypes.PODCAST.value,
+                MediaTypes.VIDEO.value,
+            ):
                 max_progress = self._get_local_max_progress()
             else:
                 try:
@@ -290,6 +298,7 @@ class Media(models.Model):
         if self.item.media_type not in (
             MediaTypes.MUSIC.value,
             MediaTypes.PODCAST.value,
+            MediaTypes.VIDEO.value,
         ):
             self.item.fetch_releases(delay=True)
 

@@ -628,6 +628,7 @@ def media_type_readable_plural(media_type):
         MediaTypes.BOARDGAME: _("Board Games"),
         MediaTypes.MUSIC: _("Music"),
         MediaTypes.PODCAST: _("Podcasts"),
+        MediaTypes.VIDEO: _("Videos"),
     }[MediaTypes(media_type)]
 
 

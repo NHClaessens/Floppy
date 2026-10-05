@@ -27,7 +27,17 @@ from app.history_cache_utils import (
     _typed_history_index_registry_key,
     expand_history_media_types,
 )
-from app.models import Anime, BoardGame, Book, Comic, Episode, Game, Manga, Movie
+from app.models import (
+    Anime,
+    BoardGame,
+    Book,
+    Comic,
+    Episode,
+    Game,
+    Manga,
+    Movie,
+    VideoPlay,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +64,7 @@ def build_history_index(
     include_podcast = requested_media_types is None or "podcast" in requested_media_types
     include_game = requested_media_types is None or "game" in requested_media_types
     include_boardgame = requested_media_types is None or "boardgame" in requested_media_types
+    include_video = requested_media_types is None or "video" in requested_media_types
     days = set()
 
     episode_days = (
@@ -174,6 +185,16 @@ def build_history_index(
             .distinct()
         )
     podcast_count = _add_days(days, podcast_days)
+
+    video_count = 0
+    if include_video:
+        video_days = (
+            VideoPlay.objects.filter(video__user=user)
+            .annotate(day=TruncDate("end_date"))
+            .values_list("day", flat=True)
+            .distinct()
+        )
+        video_count = _add_days(days, video_days)
 
     game_count = 0
     boardgame_count = 0
@@ -327,7 +348,7 @@ def build_history_index(
     day_list = sorted(days, reverse=True)
     day_keys = [_day_key_for_date(day) for day in day_list]
     logger.info(
-        "history_index_build user_id=%s logging_style=%s days=%s episode_days=%s movie_days=%s reading_days=%s music_days=%s podcast_days=%s game_days=%s boardgame_days=%s elapsed_ms=%.2f",
+        "history_index_build user_id=%s logging_style=%s days=%s episode_days=%s movie_days=%s reading_days=%s music_days=%s podcast_days=%s video_days=%s game_days=%s boardgame_days=%s elapsed_ms=%.2f",
         user.id,
         logging_style,
         len(day_keys),
@@ -336,6 +357,7 @@ def build_history_index(
         reading_count,
         music_count,
         podcast_count,
+        video_count,
         game_count,
         boardgame_count,
         (time.perf_counter() - build_start) * 1000,

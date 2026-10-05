@@ -100,10 +100,11 @@ GAME_LIST_START_DATE_SORT_MAX_QUERIES = (
 HOME_ROW_FRAGMENT_MAX_QUERIES = (
     123  # +2 from the Tags column Prefetch (#457); +1 from the provider-credential read
 )
-CUSTOM_LIST_DETAIL_MAX_QUERIES = 38  # +3 from prefilled release-year metadata;
+CUSTOM_LIST_DETAIL_MAX_QUERIES = 39  # +3 from prefilled release-year metadata;
 # +1 from the custom-list collaborators prefetch; +1 from the sidebar's
 # saved-views read (#413); +3 from the filter menu's options (member ids,
-# member metadata, tag names) on a full page render (#806)
+# member metadata, tag names) on a full page render (#806); +1 from the
+# completed-status lookup, which runs once per media type (the Video type)
 SEASON_PAGE_FIRST_VIEW_EPISODE_COUNT = 18
 SEASON_PAGE_FIRST_VIEW_MAX_QUERIES = 46  # +1 from the per-item metadata language override lookup (#1009)
 SESSION_HISTORY_MODAL_MAX_QUERIES = 60

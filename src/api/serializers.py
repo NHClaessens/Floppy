@@ -106,6 +106,17 @@ def _episode_remaining(media, *, total_episode_count=_UNSET):
     return episodes_left, _remaining(total_episode_count)
 
 
+def _names_to_list(value):
+    """Return provider names as a list.
+
+    Providers send a list (Open Library), a comma-joined string (BoardGameGeek)
+    or nothing at all.
+    """
+    if isinstance(value, str):
+        return value.split(", ") if value else []
+    return list(value or [])
+
+
 def _has_dropped_season(media):
     """Return whether a TV-like media row has an excluded dropped season."""
     item = getattr(media, "item", None)
@@ -460,9 +471,9 @@ class CompleteMediaSerializer(serializers.Serializer):
         if "min_age" in details:
             details["min_age"] = int(details["min_age"].strip("+"))
         if "designers" in details:
-            details["designers"] = details["designers"].split(", ")
+            details["designers"] = _names_to_list(details["designers"])
         if "publishers" in details:
-            details["publishers"] = details["publishers"].split(", ")
+            details["publishers"] = _names_to_list(details["publishers"])
         related = media_metadata.get("related", {})
 
         consumptions_number = len(user_medias)

@@ -1245,6 +1245,65 @@ class MediaCoreTests(FloppyApiTestCase):
         self.assertEqual(response.json(), {"detail": "Media not found."})
 
     @patch("api.views.services.get_media_metadata")
+    def test_media_detail_get_book_publishers_shapes(self, mock_metadata):
+        """Providers return publishers as a list, a joined string, or nothing."""
+        cases = (
+            # Open Library edition records return a list
+            (["Smithsonian Institution Press", "Other"], ["Smithsonian Institution Press", "Other"]),
+            # BoardGameGeek joins names into one string
+            ("Smithsonian Institution Press, Other", ["Smithsonian Institution Press", "Other"]),
+            # an edition with no publisher
+            (None, []),
+            ("", []),
+        )
+        for provider_value, expected in cases:
+            with self.subTest(publishers=provider_value):
+                mock_metadata.return_value = {
+                    "media_id": "OL1418181M",
+                    "source": Sources.OPENLIBRARY.value,
+                    "media_type": MediaTypes.BOOK.value,
+                    "title": "The Lawn",
+                    "details": {"publishers": provider_value},
+                }
+
+                response = self.call_api(
+                    "get",
+                    "api_media_detail",
+                    args=(
+                        MediaTypes.BOOK.value,
+                        Sources.OPENLIBRARY.value,
+                        "OL1418181M",
+                    ),
+                    headers=self.auth_headers,
+                )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["details"]["publishers"], expected)
+
+    @patch("api.views.services.get_media_metadata")
+    def test_media_detail_get_board_game_designers_shapes(self, mock_metadata):
+        """Designers and publishers are lists in the response whatever the provider sent."""
+        mock_metadata.return_value = {
+            "media_id": "1",
+            "source": Sources.BGG.value,
+            "media_type": MediaTypes.BOARDGAME.value,
+            "title": "Game",
+            "details": {"designers": None, "publishers": ["A", "B"]},
+        }
+
+        response = self.call_api(
+            "get",
+            "api_media_detail",
+            args=(MediaTypes.BOARDGAME.value, Sources.BGG.value, "1"),
+            headers=self.auth_headers,
+        )
+
+        self.assertEqual(response.status_code, 200)
+        details = response.json()["details"]
+        self.assertEqual(details["designers"], [])
+        self.assertEqual(details["publishers"], ["A", "B"])
+
+    @patch("api.views.services.get_media_metadata")
     def test_media_detail_get_invalid_music_id_returns_not_found(self, mock_metadata):
         """An invalid MusicBrainz ID should return 404 instead of an empty 200."""
         mock_metadata.side_effect = resolve_media_metadata

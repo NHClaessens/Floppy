@@ -63,7 +63,8 @@ MEDIA_TYPE_COMPLETE_PARAM = OpenApiParameter(
         "Media type, including `season` and `episode`. POST to a media-type "
         "collection creates a new consumption; omitted status defaults to "
         "Planning. Use the history/{consumption_id} route to update one "
-        "specific existing consumption."
+        "specific existing consumption. A `video` is created by its first "
+        "play (`/videos/{source}/{media_id}/plays/`), not by this POST."
     ),
 )
 

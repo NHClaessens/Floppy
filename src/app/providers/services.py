@@ -1063,6 +1063,18 @@ def _resolve_podcast_metadata(media_id, source, user=None):
     return None  # unreachable: raise_not_found_error always raises
 
 
+def _resolve_video_metadata(media_id, source):
+    """Build video metadata from the stored item; no provider knows videos."""
+    item = Item.objects.filter(
+        media_id=media_id,
+        source=source,
+        media_type=MediaTypes.VIDEO.value,
+    ).first()
+    if item is None:
+        raise_not_found_error(source, media_id, "video")
+    return _stored_item_metadata(item)
+
+
 def get_media_metadata(
     media_type,
     media_id,
@@ -1254,6 +1266,7 @@ def get_media_metadata(
             source,
             user=user,
         ),
+        MediaTypes.VIDEO.value: lambda: _resolve_video_metadata(media_id, source),
     }
     if media_type == MediaTypes.MUSIC.value:
         # A MusicBrainz MBID is a UUID. Anything else (a title slug, say) can

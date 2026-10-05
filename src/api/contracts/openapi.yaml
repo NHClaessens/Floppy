@@ -790,6 +790,7 @@ paths:
           - podcast
           - season
           - tv
+          - video
         description: Optional type restriction; omitted returns the default media
           types.
       - in: query
@@ -1092,9 +1093,12 @@ paths:
           - podcast
           - season
           - tv
+          - video
         description: Media type, including `season` and `episode`. POST to a media-type
           collection creates a new consumption; omitted status defaults to Planning.
           Use the history/{consumption_id} route to update one specific existing consumption.
+          A `video` is created by its first play (`/videos/{source}/{media_id}/plays/`),
+          not by this POST.
         required: true
       - in: query
         name: offset
@@ -1307,9 +1311,12 @@ paths:
           - podcast
           - season
           - tv
+          - video
         description: Media type, including `season` and `episode`. POST to a media-type
           collection creates a new consumption; omitted status defaults to Planning.
           Use the history/{consumption_id} route to update one specific existing consumption.
+          A `video` is created by its first play (`/videos/{source}/{media_id}/plays/`),
+          not by this POST.
         required: true
       tags:
       - api
@@ -1392,6 +1399,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1468,6 +1476,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1551,6 +1560,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1595,6 +1605,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1673,6 +1684,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1729,6 +1741,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1813,6 +1826,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -1988,6 +2002,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -2078,6 +2093,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -2148,6 +2164,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -2233,6 +2250,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -2301,6 +2319,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true
@@ -2429,6 +2448,7 @@ paths:
           - music
           - podcast
           - tv
+          - video
         description: Media type. Does not include `season`/`episode` — those are addressed
           via separate path segments under `tv`.
         required: true

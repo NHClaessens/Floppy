@@ -53,6 +53,7 @@ from app.models import (
     PodcastShowTracker,
     Season,
     Sources,
+    VideoPlay,
 )
 from lists.models import CustomList, CustomListItem
 from lists.smart_rules import sync_smart_lists_for_item
@@ -1159,6 +1160,21 @@ def refresh_history_cache_on_podcast_change(sender, instance, **kwargs):
         history_specs=history_specs,
         statistics_day_values=[day_key] if day_key else [],
         history_dates_may_have_moved=_history_dates_may_have_moved(instance, kwargs),
+    )
+
+
+@receiver([post_save, post_delete], sender=VideoPlay)
+def refresh_history_cache_on_video_play_change(sender, instance, **kwargs):
+    """Schedule history cache refresh when a video play is saved or removed."""
+    if kwargs.get("raw"):
+        return
+    day_key = history_cache.history_day_key(instance.end_date)
+    _handle_media_cache_change(
+        instance.video.user_id,
+        MediaTypes.VIDEO.value,
+        reason="video_play_change",
+        history_specs=[([day_key] if day_key else [], ("sessions", "repeats"))],
+        statistics_day_values=[day_key] if day_key else [],
     )
 
 

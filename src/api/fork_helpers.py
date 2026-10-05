@@ -5,7 +5,7 @@ from http import HTTPStatus as HTTP  # noqa: N814
 
 from rest_framework.response import Response
 
-from app.models import ComicIssue, MediaTypes, MoviePlay, Music, Podcast, Sources
+from app.models import ComicIssue, MediaTypes, MoviePlay, Music, Podcast, Sources, Video
 
 from . import helpers
 
@@ -13,6 +13,7 @@ FORK_MEDIA_MODELS = {
     MediaTypes.MUSIC.value: Music,
     MediaTypes.PODCAST.value: Podcast,
     MediaTypes.COMIC_ISSUE.value: ComicIssue,
+    MediaTypes.VIDEO.value: Video,
 }
 
 FORK_VALID_SOURCES = {
@@ -27,6 +28,7 @@ FORK_VALID_SOURCES = {
         Sources.GCD.value,
         Sources.MANUAL.value,
     ],
+    MediaTypes.VIDEO.value: [Sources.YOUTUBE.value],
 }
 
 # FORK: sources the fork resolves for a media type upstream *already* lists.

@@ -563,10 +563,15 @@ def _filter_history_by_enabled_media_types(history_days, user):
 
 
 def _enabled_history_media_types(user):
+    """Return the media types History may show, or None for no restriction.
+
+    Video has no per-user toggle, so it is always allowed.
+    """
     enabled_types = user.get_enabled_media_types()
     if not enabled_types:
         return None
     allowed_types = set(enabled_types)
+    allowed_types.add(MediaTypes.VIDEO.value)
     if MediaTypes.TV.value in allowed_types:
         allowed_types.update({MediaTypes.EPISODE.value, MediaTypes.SEASON.value})
     return allowed_types

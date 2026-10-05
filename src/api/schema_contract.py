@@ -433,6 +433,7 @@ EXPECTED_SCHEMA_ERRORS: frozenset[SchemaFinding] = frozenset(
             "api.fork_views_statistics.StatisticsRefreshView",
             "serializer-unresolved",
         ),
+        ("api.fork_views_video.VideoPlayView", "serializer-unresolved"),
         (
             "api.fork_views_watched_state.SyncConflictResolveView",
             "serializer-unresolved",

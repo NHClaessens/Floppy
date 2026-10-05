@@ -33,6 +33,7 @@ from app.models import (
     Season,
     Sources,
     Status,
+    Video,
 )
 
 CHOICE_PAIR_LENGTH = 2
@@ -1004,6 +1005,18 @@ class PodcastForm(MediaForm):
         model = Podcast
         labels = {
             "progress": _("Progress (Minutes)"),
+        }
+
+
+class VideoForm(MediaForm):
+    """Form for videos."""
+
+    class Meta(MediaForm.Meta):
+        """Bind form to model."""
+
+        model = Video
+        labels = {
+            "progress": _("Progress (Seconds)"),
         }
 
 

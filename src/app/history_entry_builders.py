@@ -291,6 +291,36 @@ def _build_movie_entry(movie):
     return entry
 
 
+def _build_video_play_entry(play):
+    """One history row per video play.
+
+    @param play - VideoPlay with video and item selected.
+    @returns Entry dict, or None when the play has no timestamp.
+    """
+    video = play.video
+    played_at_local = _localize_datetime(play.end_date or video.created_at)
+    if not played_at_local:
+        return None
+    runtime_minutes = video.length_seconds // 60 if video.length_seconds else None
+    return {
+        "media_type": MediaTypes.VIDEO.value,
+        "item": _serialize_item(video.item),
+        "poster": video.item.image or settings.IMG_NONE,
+        "title": video.item.title,
+        "display_title": video.item.title,
+        "status": video.status,
+        "play_count": 1,
+        "episode_label": video.channel or None,
+        "episode_code": None,
+        "played_at_local": played_at_local,
+        "runtime_minutes": runtime_minutes,
+        "runtime_display": helpers.minutes_to_hhmm(runtime_minutes) if runtime_minutes else None,
+        "instance_id": play.id,
+        "entry_key": f"video:{play.id}",
+        "entry_source": "youtube",
+    }
+
+
 # ── Music builders ────────────────────────────────────────────────────────────
 
 

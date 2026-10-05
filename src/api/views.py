@@ -897,6 +897,19 @@ class MediaTypeListView(drf_views.APIView):
                 status=HTTP.BAD_REQUEST,
             )
 
+        if media_type == MediaTypes.VIDEO.value:
+            # No provider can look a video up, so a new one is created by its
+            # first play instead.
+            return Response(
+                {
+                    "detail": (
+                        "Videos are created by posting a play to "
+                        "/api/v1/videos/{source}/{media_id}/plays/."
+                    ),
+                },
+                status=HTTP.BAD_REQUEST,
+            )
+
         if not request.data:
             return Response(
                 {"detail": "Missing body."},
