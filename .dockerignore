@@ -29,3 +29,20 @@ TODO.txt
 /production-snapshot.sqlite3*
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Repository history can retain deleted database exports. The metadata stage
+# only needs the remote URL from config, never Git objects or reflogs.
+.git/**
+!.git/config
+.env.*
+# Runtime databases, backup directories and logs are never release inputs.
+src/db/
+db/
+src/logs/
+.v2c/
+.video_agent/
+reports/
+wiki/
+node_modules/
+.pytest_cache/
+.ruff_cache/

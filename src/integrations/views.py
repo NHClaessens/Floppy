@@ -4833,7 +4833,7 @@ def export_csv_letterboxd(request):
 def jellyfin_webhook(request, token):
     """Handle Jellyfin webhook notifications for media playback."""
     try:
-        user = users.models.User.objects.get(token=token)
+        user = users.models.User.objects.get(token=token, is_active=True)
     except ObjectDoesNotExist:
         logger.warning(
             "Could not process Jellyfin webhook: Invalid token: %s",
@@ -4846,7 +4846,12 @@ def jellyfin_webhook(request, token):
         logger.warning("Missing payload in Jellyfin webhook request")
         return HttpResponse("Missing payload", status=400)
 
-    payload = json.loads(data)
+    try:
+        payload = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return HttpResponse("Invalid JSON", status=400)
+    if not isinstance(payload, dict):
+        return HttpResponse("Invalid payload", status=400)
     if not _queue_task_quietly(tasks.process_webhook, "jellyfin", payload, user.id):
         return HttpResponse(status=503)
     return HttpResponse(status=200)
@@ -4858,7 +4863,7 @@ def jellyfin_webhook(request, token):
 def plex_webhook(request, token):
     """Handle Plex webhook notifications for media playback."""
     try:
-        user = users.models.User.objects.get(token=token)
+        user = users.models.User.objects.get(token=token, is_active=True)
     except ObjectDoesNotExist:
         logger.warning(
             "Could not process Plex webhook: Invalid token: %s",
@@ -4915,7 +4920,7 @@ def plex_webhook(request, token):
 def emby_webhook(request, token):
     """Handle Emby webhook notifications for media playback."""
     try:
-        user = users.models.User.objects.get(token=token)
+        user = users.models.User.objects.get(token=token, is_active=True)
     except ObjectDoesNotExist:
         logger.warning(
             "Could not process Emby webhook: Invalid token: %s",
@@ -4931,7 +4936,12 @@ def emby_webhook(request, token):
         logger.warning("Missing payload in Emby webhook request")
         return HttpResponse("Missing payload", status=400)
 
-    payload = json.loads(data)
+    try:
+        payload = json.loads(data)
+    except (ValueError, UnicodeDecodeError):
+        return HttpResponse("Invalid JSON", status=400)
+    if not isinstance(payload, dict):
+        return HttpResponse("Invalid payload", status=400)
     if not _queue_task_quietly(tasks.process_webhook, "emby", payload, user.id):
         return HttpResponse(status=503)
     return HttpResponse(status=200)
@@ -4944,7 +4954,7 @@ def emby_webhook(request, token):
 def jellyseerr_webhook(request, token):
     """Handle Seerr webhook notifications for requested/approved media."""
     try:
-        user = users.models.User.objects.get(token=token)
+        user = users.models.User.objects.get(token=token, is_active=True)
     except ObjectDoesNotExist:
         logger.warning(
             "Could not process Seerr webhook: Invalid token: %s",
@@ -5010,6 +5020,7 @@ def seerr_global_webhook(request):
     queued = True
     for user in users.models.User.objects.filter(
         jellyseerr_enabled=True,
+        is_active=True,
     ).exclude(jellyseerr_allowed_usernames=""):
         allowed = {
             username.strip().lower()
@@ -5037,7 +5048,7 @@ def seerr_global_webhook(request):
 def kodi_webhook(request, token):
     """Handle Kodi webhook notifications for media playback."""
     try:
-        user = users.models.User.objects.get(token=token)
+        user = users.models.User.objects.get(token=token, is_active=True)
     except ObjectDoesNotExist:
         logger.warning(
             "Could not process Kodi webhook: Invalid token: %s",
@@ -5145,7 +5156,7 @@ def stremio_addon_catalog(
 def stremio_addon_configure(request, token, config=None):
     """Serve the addon configuration page for a user's install URL."""
     try:
-        user = users.models.User.objects.get(token=token)
+        user = users.models.User.objects.get(token=token, is_active=True)
     except ObjectDoesNotExist:
         logger.warning("Invalid token on Stremio addon configure request")
         return HttpResponse("Invalid token", status=401)
@@ -5209,7 +5220,7 @@ def stremio_addon_meta(request, token, media_type, media_id):
     if grant is not None:
         stremio_catalog.touch_grant(grant)
 
-    meta = stremio_catalog.project_meta(user, media_type, media_id)
+    meta = stremio_catalog.project_meta(user, media_type, media_id, grant=grant)
     if meta is None:
         # Empty rather than 404: the item is simply not in this library, and
         # Stremio treats a 404 as the add-on being broken.
