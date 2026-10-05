@@ -86,6 +86,25 @@ class TagItemToggleViewTest(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(ItemTag.objects.filter(tag=self.tag, item=self.item).exists())
 
+    def test_tag_a_video_and_list_it_on_the_tag_page(self):
+        """A video takes tags like any other media type."""
+        video_item = Item.objects.create(
+            media_id="vid1",
+            source=Sources.YOUTUBE.value,
+            media_type=MediaTypes.VIDEO.value,
+            title="A Tagged Video",
+            image="http://example.com/video.jpg",
+        )
+        response = self.client.post(
+            reverse("tag_item_toggle"),
+            {"tag_id": self.tag.id, "item_id": video_item.id},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(ItemTag.objects.filter(tag=self.tag, item=video_item).exists())
+
+        response = self.client.get(reverse("tag_index"))
+        self.assertEqual(response.status_code, 200)
+
     def test_toggle_returns_oob_preview_refresh(self):
         """Toggle response refreshes the detail-tag preview via OOB swap."""
         url = reverse("tag_item_toggle")

@@ -33,6 +33,7 @@ from app.models import (
     Season,
     Sources,
     Status,
+    Video,
 )
 from app.templatetags import app_tags
 from events.models import Event
@@ -502,6 +503,29 @@ class MediaListViewTests(TestCase):
             response.context["media_type_plural"],
             app_tags.media_type_readable_plural(MediaTypes.MOVIE.value).lower(),
         )
+
+    def test_video_media_list_shows_channel_and_length(self):
+        """The Videos list renders and each card shows its channel and length."""
+        item = Item.objects.create(
+            media_id="dQw4w9WgXcQ",
+            source=Sources.YOUTUBE.value,
+            media_type=MediaTypes.VIDEO.value,
+            title="Never Gonna Give You Up",
+            image=settings.IMG_NONE,
+        )
+        Video.objects.create(
+            item=item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+            channel="Rick Astley",
+            length_seconds=213,
+        )
+
+        response = self.client.get(reverse("medialist", args=[MediaTypes.VIDEO.value]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["media_list"].paginator.count, 1)
+        self.assertContains(response, "Rick Astley · 3:33")
 
     def test_season_media_list_with_status_filter_does_not_500(self):
         """Season rows derive end_date from episodes, so the SQL latest-status

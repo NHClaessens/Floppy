@@ -30,6 +30,7 @@ from app.models import (
     Sources,
     Status,
     Tag,
+    Video,
 )
 from app.services.item_merge import dedupe_cross_provider_items
 from lists import smart_rules
@@ -60,7 +61,6 @@ class HomeScreenViewTests(TestCase):
             if media_type in (
                 MediaTypes.EPISODE.value,
                 MediaTypes.COMIC_ISSUE.value,
-                MediaTypes.VIDEO.value,  # always on, no per-user toggle
             ):
                 continue
             field_name = f"{media_type}_enabled"
@@ -974,6 +974,37 @@ class HomeScreenViewTests(TestCase):
                 "Home Library Tracked Movie",
                 "Home Library Untracked Movie",
             ],
+        )
+
+    def test_library_row_lists_in_progress_videos(self):
+        # Home rows are cached per user id, which every test reuses.
+        cache.clear()
+        self._set_enabled_media_types(MediaTypes.VIDEO.value)
+
+        item = Item.objects.create(
+            title="Home Video",
+            media_id="home-video",
+            media_type=MediaTypes.VIDEO.value,
+            source=Sources.YOUTUBE.value,
+            image="https://example.com/home-video.jpg",
+        )
+        Video.objects.create(item=item, user=self.user, status=Status.IN_PROGRESS.value)
+        HomeScreenRow.objects.create(
+            user=self.user,
+            media_type=MediaTypes.VIDEO.value,
+            position=0,
+            enabled=True,
+            row_type=HomeScreenRowTypeChoices.LIBRARY_QUERY,
+            sort_by=MediaSortChoices.TITLE,
+            direction=DirectionChoices.ASC,
+            filters={"status": Status.IN_PROGRESS.value},
+        )
+
+        groups = home_screen.build_home_page_groups(self.user, items_limit=10)
+
+        self.assertEqual(
+            [entry.item.title for entry in groups[0]["rows"][0]["items"]],
+            ["Home Video"],
         )
 
     def test_empty_library_query_rows_build_quickly_on_cold_cache(self):

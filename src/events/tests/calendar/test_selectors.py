@@ -4,7 +4,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
-from app.models import TV, Anime, Item, MediaTypes, Music, Sources, Status
+from app.models import TV, Anime, Item, MediaTypes, Music, Sources, Status, Video
 from app.providers import services
 from events.calendar.selectors import (
     get_changed_tmdb_movie_ids,
@@ -358,6 +358,25 @@ class CalendarMusicSelectionTests(CalendarFixturesMixin, TestCase):
         self.assertNotIn(item, get_items_to_process(self.user))
         self.assertNotIn(item, get_items_to_process())
         self.assertIn(self.anime_item, get_items_to_process(self.user))
+
+
+class CalendarVideoSelectionTests(CalendarFixturesMixin, TestCase):
+    """Videos are checked for an upload date, with no provider call."""
+
+    @patch("events.calendar.selectors.tmdb.movie_changes", return_value=set())
+    @patch("events.calendar.selectors.tmdb.tv_changes", return_value=set())
+    def test_tracked_video_is_selected(self, _tv, _movie):
+        """A watched video gets a Calendar event on its upload date."""
+        item = Item.objects.create(
+            media_id="vid1",
+            source=Sources.YOUTUBE.value,
+            media_type=MediaTypes.VIDEO.value,
+            title="A Video",
+            image="http://example.com/video.jpg",
+        )
+        Video.objects.create(item=item, user=self.user, status=Status.COMPLETED.value)
+
+        self.assertIn(item, get_items_to_process(self.user))
 
 
 class CalendarStalenessGateTests(CalendarFixturesMixin, TestCase):

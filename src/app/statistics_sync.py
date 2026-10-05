@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the shape of a published payload changes; older snapshots are
 # served until the next sync replaces them.
-SNAPSHOT_SCHEMA_VERSION = 16
+SNAPSHOT_SCHEMA_VERSION = 17
 
 # Cheap ranges rebuilt on every sync, in this order.
 HOT_RANGES = (

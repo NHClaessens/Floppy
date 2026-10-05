@@ -14,7 +14,7 @@ from django.core.cache import cache
 from django.core.exceptions import FieldError
 from django.core.paginator import Paginator
 from django.db.models import Count, F, Min, Q
-from django.http import Http404, HttpResponse, HttpResponseBadRequest
+from django.http import HttpResponse, HttpResponseBadRequest
 from django.shortcuts import render
 from django.urls import reverse
 from django.utils import timezone
@@ -1028,9 +1028,6 @@ def _resolve_media_list_preferences(request, route_media_type, comic_subview):
 def media_list(request, media_type):
     """Return the media list page."""
     route_media_type = media_type
-    if route_media_type == MediaTypes.VIDEO.value:
-        # Videos have no list page or list preferences yet.
-        raise Http404
     comic_subview = None
     if route_media_type == MediaTypes.COMIC.value:
         comic_subview = request.GET.get("subview", "comics")
@@ -2498,6 +2495,24 @@ def media_list(request, media_type):
         BasicMedia.objects._fix_missing_music_images(
             [entry.media for entry in media_page.object_list if entry.media is not None]
         )
+
+    if media_type == MediaTypes.VIDEO.value:
+        # Reuse the music card subtitle slot for "Channel · length".
+        for entry in media_page.object_list:
+            video = entry.media
+            if video is None:
+                continue
+            parts = [video.channel] if video.channel else []
+            if video.length_seconds:
+                minutes, seconds = divmod(video.length_seconds, 60)
+                hours, minutes = divmod(minutes, 60)
+                parts.append(
+                    f"{hours}:{minutes:02d}:{seconds:02d}"
+                    if hours
+                    else f"{minutes}:{seconds:02d}",
+                )
+            video.home_music_card = True
+            video.card_subtitle_text = " · ".join(parts)
 
     if media_type == MediaTypes.GAME.value:
         if not collection_platforms_by_item_id:

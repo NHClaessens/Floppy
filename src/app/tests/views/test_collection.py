@@ -15,6 +15,7 @@ from app.models import (
     Season,
     Sources,
     Status,
+    Video,
 )
 from integrations.models import CollectionSourceState
 
@@ -416,6 +417,32 @@ class CollectionAddViewTest(TestCase):
             title="Test Movie",
             image="http://example.com/image.jpg",
         )
+
+    def test_collecting_a_video_lists_it_without_tracking_it(self):
+        """A downloaded video can be collected; collecting never tracks it."""
+        video_item = Item.objects.create(
+            media_id="vid1",
+            source=Sources.YOUTUBE.value,
+            media_type=MediaTypes.VIDEO.value,
+            title="A Downloaded Video",
+            image="http://example.com/video.jpg",
+        )
+        self.client.login(**self.credentials)
+
+        self.client.post(
+            reverse("collection_add"),
+            {"item_id": video_item.id, "media_type": "Digital", "resolution": "1080p"},
+        )
+
+        self.assertTrue(
+            CollectionEntry.objects.filter(user=self.user, item=video_item).exists(),
+        )
+        self.assertFalse(Video.objects.filter(user=self.user).exists())
+        response = self.client.get(
+            reverse("collection_list_filtered", args=[MediaTypes.VIDEO.value]),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "A Downloaded Video")
 
     def test_collection_add_valid_data(self):
         """Test POST with valid data creates CollectionEntry."""

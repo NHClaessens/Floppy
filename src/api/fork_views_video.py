@@ -4,7 +4,7 @@ import datetime
 from http import HTTPStatus as HTTP  # noqa: N814
 
 from django.utils import timezone
-from django.utils.dateparse import parse_date
+from django.utils.dateparse import parse_date, parse_datetime
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -76,6 +76,19 @@ class VideoPlayView(APIView):
             library_media_type=MediaTypes.VIDEO.value,
             defaults={"title": title},
         )
+
+        # The upload date puts the video on the Calendar. It is set once, so a
+        # later report never moves the event.
+        published_at = parse_datetime(
+            str(request.data.get("publishedAt") or request.data.get("published_at") or ""),
+        )
+        if published_at and not item.release_datetime:
+            if timezone.is_naive(published_at):
+                published_at = timezone.make_aware(published_at)
+            item.release_datetime = published_at
+            # Due again on the next Calendar reload, so the event appears.
+            item.calendar_checked_at = None
+            item.save(update_fields=["release_datetime", "calendar_checked_at"])
 
         video, _video_created = Video.objects.get_or_create(
             item=item,

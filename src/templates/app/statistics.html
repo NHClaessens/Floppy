@@ -604,6 +604,7 @@
       {% if user.boardgame_enabled %}{value: 'boardgame', label: 'Board Games'},{% endif %}
       {% if user.music_enabled %}{value: 'music', label: '{{ media_i18n_24|escapejs }}'},{% endif %}
       {% if user.podcast_enabled %}{value: 'podcast', label: 'Podcasts'},{% endif %}
+      {% if user.video_enabled %}{value: 'video', label: 'Videos'},{% endif %}
       {% if user.book_enabled %}{value: 'book', label: 'Books'},{% endif %}
       {% if user.comic_enabled %}{value: 'comic', label: 'Comics'},{% endif %}
     ]
@@ -1430,6 +1431,11 @@
         </div>
       {% endif %}
 
+      {% if user.video_enabled and video_consumption.has_data %}
+        <div x-show="isMediaTypeVisible('video')">
+          {% include "app/components/statistics/video_activity_overview.html" %}
+        </div>
+      {% endif %}
       {% if user.podcast_enabled and podcast_consumption.has_data %}
         <div x-show="isMediaTypeVisible('podcast')">
           {% include "app/components/statistics/podcast_activity_overview.html" %}
@@ -2178,6 +2184,11 @@
   {% if user.podcast_enabled and podcast_consumption.has_data %}
     {% if show_year_charts %}
       {{ podcast_consumption.charts.by_year|json_script:"podcast_plays_by_year" }}
+    {% endif %}
+  {% endif %}
+  {% if user.video_enabled and video_consumption.has_data %}
+    {% if show_year_charts %}
+      {{ video_consumption.charts.by_year|json_script:"video_plays_by_year" }}
     {% endif %}
   {% endif %}
 

@@ -1210,7 +1210,7 @@ class DayCacheContractTests(SimpleTestCase):
             with self.subTest(day=day):
                 self.assertEqual(
                     statistics_cache._day_cache_key(42, day),
-                    "stats:day:v7:42:2026-09-05",
+                    "stats:day:v8:42:2026-09-05",
                 )
         self.assertEqual(statistics_cache._day_cache_key(42, "invalid"), "")
 

@@ -200,6 +200,13 @@ def _get_activity_bounds(user):
     ).aggregate(min_date=Min("end_date"), max_date=Max("end_date"))
     _add_bounds(podcast_bounds.get("min_date"), podcast_bounds.get("max_date"))
 
+    VideoPlay = apps.get_model("app", "VideoPlay")
+    video_bounds = VideoPlay.objects.filter(video__user=user).aggregate(
+        min_date=Min("end_date"),
+        max_date=Max("end_date"),
+    )
+    _add_bounds(video_bounds.get("min_date"), video_bounds.get("max_date"))
+
     for media_type in (
         MediaTypes.ANIME.value,
         MediaTypes.GAME.value,
@@ -362,6 +369,16 @@ def _get_sparse_activity_days(user):
             .distinct()
         )
         days.update(day for day in podcast_days if day)
+
+    if MediaTypes.VIDEO.value in active_media_types:
+        VideoPlay = apps.get_model("app", "VideoPlay")
+        video_days = (
+            VideoPlay.objects.filter(video__user=user)
+            .annotate(day=TruncDate("end_date", tzinfo=tz))
+            .values_list("day", flat=True)
+            .distinct()
+        )
+        days.update(day for day in video_days if day)
 
     for media_type in (
         MediaTypes.ANIME.value,

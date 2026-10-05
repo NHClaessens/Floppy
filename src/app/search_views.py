@@ -448,15 +448,20 @@ def media_search(request):
 
     search_page = 1 if media_type == MediaTypes.MUSIC.value else page
     try:
-        with services.interactive_request_scope():
-            data = services.search(
-                media_type,
-                query,
-                search_page,
-                source,
-                user=request.user,
-                language=metadata_resolution.metadata_language_default(request.user),
-            )
+        if media_type == MediaTypes.VIDEO.value:
+            # No provider to search: videos arrive from clients, so only the
+            # local library results above apply.
+            data = {"page": 1, "total_results": 0, "total_pages": 0, "results": []}
+        else:
+            with services.interactive_request_scope():
+                data = services.search(
+                    media_type,
+                    query,
+                    search_page,
+                    source,
+                    user=request.user,
+                    language=metadata_resolution.metadata_language_default(request.user),
+                )
     except services.ProviderAPIError as exc:
         logger.warning(
             "Search failed for media_type=%s query=%s: %s",

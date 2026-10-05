@@ -21,6 +21,7 @@ from app.models import (
     Sources,
     Status,
     Tag,
+    Video,
 )
 from app.providers import services
 from app.search_views import get_saved_suggestions
@@ -73,6 +74,27 @@ class MediaSearchViewTests(TestCase):
             language="en",
             user=self.user,
         )
+
+    @patch("app.providers.services.search")
+    def test_video_search_lists_local_videos_without_a_provider_call(self, mock_search):
+        """Videos have no provider, so only the user's own library is searched."""
+        item = Item.objects.create(
+            media_id="vid1",
+            source=Sources.YOUTUBE.value,
+            media_type=MediaTypes.VIDEO.value,
+            title="The Art of Sourdough",
+            image="http://example.com/video.jpg",
+        )
+        Video.objects.create(item=item, user=self.user, status=Status.COMPLETED.value)
+
+        response = self.client.get(
+            reverse("search"),
+            {"media_type": MediaTypes.VIDEO.value, "q": "sourdough"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "The Art of Sourdough")
+        mock_search.assert_not_called()
 
     @patch("app.providers.services.search")
     def test_search_result_track_modal_is_cloaked(self, mock_search):

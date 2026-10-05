@@ -759,6 +759,12 @@ function initStatisticsCharts() {
     "podcast_plays_by_year"
   );
 
+  // Video charts
+  initializeSingleSeriesBarChart(
+    "videoPlaysByYearChart",
+    "video_plays_by_year"
+  );
+
   // The selected media types from the URL, in dropdown order. Empty = "All media".
   function getCurrentMediaTypes() {
     try {
@@ -776,7 +782,7 @@ function initStatisticsCharts() {
   // media_type_distribution payloads (e.g. "tv" -> "TV Show").
   const MEDIA_SLUG_TO_LABEL = {
     tv: "TV Show", movie: "Movie", anime: "Anime", music: "Music",
-    podcast: "Podcast", book: "Book", comic: "Comic",
+    podcast: "Podcast", video: "Video", book: "Book", comic: "Comic",
     boardgame: "Board Game", game: "Game", manga: "Manga",
   };
 

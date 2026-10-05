@@ -17,7 +17,7 @@ def get_items_to_process(user=None):
     # progress to schedule), so walking them spent one rate-limited MusicBrainz
     # call each - a 606-second chunk in production - and every dead recording
     # id was re-requested on every reload because a failed fetch is never
-    # stamped as checked. Videos have no metadata provider at all.
+    # stamped as checked.
     media_types = [
         choice.value
         for choice in MediaTypes
@@ -26,7 +26,6 @@ def get_items_to_process(user=None):
             MediaTypes.SEASON,
             MediaTypes.EPISODE,
             MediaTypes.MUSIC,
-            MediaTypes.VIDEO,
         ]
     ]
 

@@ -537,6 +537,7 @@ def _get_empty_statistics_data():
         "anime_consumption": {},
         "music_consumption": {},
         "podcast_consumption": {},
+        "video_consumption": {},
         "game_consumption": {
             "hours": {
                 "total": 0,

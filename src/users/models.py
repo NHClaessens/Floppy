@@ -52,6 +52,7 @@ MULTI_STATUS_PREFERENCE_FIELDS = {
     "comic_status",
     "music_status",
     "podcast_status",
+    "video_status",
     "list_detail_status",
 }
 # Score-scaling constants: a user's display scale is either 1-5 or the
@@ -789,6 +790,29 @@ class User(AbstractUser):
         choices=MediaSortChoices.choices,
     )
     podcast_status = models.CharField(
+        max_length=128,
+        default=MediaStatusChoices.ALL,
+        choices=MediaStatusChoices,
+    )
+
+    # Video preferences
+    video_enabled = models.BooleanField(default=True)
+    video_layout = models.CharField(
+        max_length=20,
+        default=LayoutChoices.GRID,
+        choices=LayoutChoices.choices,
+    )
+    video_direction = models.CharField(
+        max_length=4,
+        default=DirectionChoices.DESC,
+        choices=DirectionChoices.choices,
+    )
+    video_sort = models.CharField(
+        max_length=32,
+        default=MediaSortChoices.TITLE,
+        choices=MediaSortChoices.choices,
+    )
+    video_status = models.CharField(
         max_length=128,
         default=MediaStatusChoices.ALL,
         choices=MediaStatusChoices,
@@ -1667,6 +1691,18 @@ class User(AbstractUser):
             models.CheckConstraint(
                 name="podcast_direction_valid",
                 condition=models.Q(podcast_direction__in=DirectionChoices.values),
+            ),
+            models.CheckConstraint(
+                name="video_layout_valid",
+                condition=models.Q(video_layout__in=LayoutChoices.values),
+            ),
+            models.CheckConstraint(
+                name="video_sort_valid",
+                condition=models.Q(video_sort__in=MediaSortChoices.values),
+            ),
+            models.CheckConstraint(
+                name="video_direction_valid",
+                condition=models.Q(video_direction__in=DirectionChoices.values),
             ),
             models.CheckConstraint(
                 name="quick_watch_date_valid",
