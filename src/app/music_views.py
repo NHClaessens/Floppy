@@ -731,6 +731,7 @@ def _render_music_artist_details(request, artist):
             models.Q(artist=artist) | models.Q(artist_credits__artist=artist),
         )
         .select_related("artist")
+        .prefetch_related("artist_credits__artist")
         .distinct()
         .order_by("-release_date", "title"),
     )
@@ -1585,6 +1586,8 @@ def prefetch_artist_covers(request, artist_id):
             models.Q(artist=artist) | models.Q(artist_credits__artist=artist),
         )
         .distinct()
+        .select_related("artist")
+        .prefetch_related("artist_credits__artist")
         .order_by("-release_date", "title"),
     )
 

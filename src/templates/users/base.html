@@ -29,6 +29,8 @@
                :class="{ 'settings-nav-collapsed': !open }"
                class="settings-nav-collapsed p-2 space-y-1"
                hx-boost="true">
+            <p class="px-2 pt-1 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{% translate "General" %}</p>
+
             {% url 'account' as account_url %}
             <a href="{{ account_url }}"
                {% if request.path == account_url %}aria-current="page"{% endif %}
@@ -45,6 +47,16 @@
               <span>{% translate "Preferences" %}</span>
             </a>
 
+            {% url 'notifications' as notifications_url %}
+            <a href="{{ notifications_url }}"
+               {% if request.path == notifications_url %}aria-current="page"{% endif %}
+               class="w-full flex items-center space-x-3 px-2 py-2 rounded-md transition-colors text-left border-l-2 cursor-pointer text-sm {% if request.path == notifications_url %}bg-[var(--color-surface-strong)] text-[var(--color-text)] border-[var(--color-link)]{% else %}text-[var(--color-text-muted)] border-transparent hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-text)]{% endif %}">
+              {% include "app/icons/bell.svg" with classes="w-5 h-5" %}
+              <span>{% translate "Notifications" %}</span>
+            </a>
+
+            <p class="px-2 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{% translate "Display" %}</p>
+
             {% url 'appearance' as appearance_url %}
             <a href="{{ appearance_url }}"
                {% if request.path == appearance_url %}aria-current="page"{% endif %}
@@ -53,12 +65,12 @@
               <span>{% translate "Appearance" %}</span>
             </a>
 
-            {% url 'notifications' as notifications_url %}
-            <a href="{{ notifications_url }}"
-               {% if request.path == notifications_url %}aria-current="page"{% endif %}
-               class="w-full flex items-center space-x-3 px-2 py-2 rounded-md transition-colors text-left border-l-2 cursor-pointer text-sm {% if request.path == notifications_url %}bg-[var(--color-surface-strong)] text-[var(--color-text)] border-[var(--color-link)]{% else %}text-[var(--color-text-muted)] border-transparent hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-text)]{% endif %}">
-              {% include "app/icons/bell.svg" with classes="w-5 h-5" %}
-              <span>{% translate "Notifications" %}</span>
+            {% url 'cards' as cards_url %}
+            <a href="{{ cards_url }}"
+               {% if request.resolver_match.url_name == 'cards' or request.resolver_match.url_name == 'cards_type' %}aria-current="page"{% endif %}
+               class="w-full flex items-center space-x-3 px-2 py-2 rounded-md transition-colors text-left border-l-2 cursor-pointer text-sm {% if request.resolver_match.url_name == 'cards' or request.resolver_match.url_name == 'cards_type' %}bg-[var(--color-surface-strong)] text-[var(--color-text)] border-[var(--color-link)]{% else %}text-[var(--color-text-muted)] border-transparent hover:bg-[var(--color-surface-muted)] hover:text-[var(--color-text)]{% endif %}">
+              {% include "app/icons/grid.svg" with classes="w-5 h-5" %}
+              <span>{% translate "Media Cards" %}</span>
             </a>
 
             {% url 'sidebar' as sidebar_url %}
@@ -76,6 +88,8 @@
               {% include "app/icons/house.svg" with classes="w-5 h-5" %}
               <span>{% translate "Home Screen" %}</span>
             </a>
+
+            <p class="px-2 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{% translate "Connections" %}</p>
 
             {% url 'integrations' as integrations_url %}
             <a href="{{ integrations_url }}"
@@ -101,6 +115,8 @@
               <span>RSS</span>
             </a>
 
+            <p class="px-2 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{% translate "Data" %}</p>
+
             {% url 'import_data' as import_url %}
             <a href="{{ import_url }}"
                {% if request.path == import_url %}aria-current="page"{% endif %}
@@ -116,6 +132,8 @@
               {% include "app/icons/export.svg" with classes="w-5 h-5" %}
               <span>{% translate "Export Data" %}</span>
             </a>
+
+            <p class="px-2 pt-3 pb-1 text-xs font-medium uppercase tracking-wide text-[var(--color-text-muted)]">{% translate "System" %}</p>
 
             {% url 'advanced' as advanced_url %}
             <a href="{{ advanced_url }}"

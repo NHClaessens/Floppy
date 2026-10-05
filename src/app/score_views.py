@@ -104,6 +104,7 @@ def update_media_score(request, media_type, instance_id):
         "app/components/media_card_rating_oob.html",
         {
             "media_instance_id": media.id,
+            "rating_media_type": media.item.media_type,
             "rating_value": media.formatted_score,
             "rate_url": reverse(
                 "update_media_score",

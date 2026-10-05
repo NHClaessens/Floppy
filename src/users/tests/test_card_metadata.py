@@ -1,0 +1,148 @@
+"""Parser and default profile for per-type card metadata."""
+
+from types import SimpleNamespace
+
+from django.test import SimpleTestCase
+
+from app.models.choices import MediaTypes
+from users.card_metadata import (
+    ABSORBED_PREFERENCE_FIELDS,
+    OMIT,
+    absorbed_preference_value,
+    apply_absorbed_preference,
+    default_profile,
+    parse_card_metadata,
+    profiles_from_legacy,
+)
+
+
+class CardMetadataTests(SimpleTestCase):
+    """The registry round-trips a save and reproduces the movie card."""
+
+    def test_default_movie_profile_matches_today(self):
+        """A movie card shows the year and progress until the user edits it."""
+        profile = default_profile(MediaTypes.MOVIE.value)
+        self.assertEqual(profile["fields"], ["release_year", "progress"])
+        self.assertEqual(profile["display"], "hover")
+        self.assertFalse(profile["options"]["rating"]["hide_zero"])
+
+    def test_parser_drops_unknown_fields(self):
+        """A stale field id cannot land in the stored profile."""
+        parsed = parse_card_metadata(
+            {
+                "version": 1,
+                "types": {
+                    "movie": {
+                        "display": "always",
+                        "fields": ["genres", "not_a_field", "release_year"],
+                        "options": {"rating": {"hide_zero": True}},
+                    }
+                },
+            }
+        )
+        movie = parsed["types"]["movie"]
+        self.assertEqual(movie["fields"], ["genres", "release_year"])
+        self.assertEqual(movie["display"], "always")
+        self.assertTrue(movie["options"]["rating"]["hide_zero"])
+
+    def test_legacy_seed_removes_progress_when_the_bar_is_off(self):
+        """progress_bar false drops the progress field on every type."""
+        seeded = profiles_from_legacy("always", False, True)
+        movie = seeded["types"]["movie"]
+        self.assertNotIn("progress", movie["fields"])
+        self.assertEqual(movie["display"], "always")
+        self.assertTrue(movie["options"]["rating"]["hide_zero"])
+
+    def test_progress_bar_ignores_types_that_have_no_progress_field(self):
+        """Person cards do not vote, so a fresh profile still reports the bar on."""
+        user = SimpleNamespace(card_metadata={})
+        apply_absorbed_preference(user, "progress_bar", True)
+        self.assertTrue(absorbed_preference_value(user, "progress_bar"))
+
+    def test_mixed_display_omits_the_legacy_name(self):
+        """GET drops a name when two types disagree."""
+        user = SimpleNamespace(card_metadata={})
+        display_field = next(iter(ABSORBED_PREFERENCE_FIELDS))
+        apply_absorbed_preference(user, display_field, "hover")
+        user.card_metadata["types"]["movie"]["display"] = "always"
+        self.assertIs(absorbed_preference_value(user, display_field), OMIT)
+
+
+class HandRolledCardTests(SimpleTestCase):
+    """Hand-rolled cards follow the profile of their own media type."""
+
+    @staticmethod
+    def _user(types):
+        return SimpleNamespace(
+            card_metadata=parse_card_metadata({"version": 1, "types": types})
+        )
+
+    def test_rating_visibility_uses_the_given_media_type(self):
+        """A music card hides a zero score even when the context has no item."""
+        from app.templatetags.app_tags import score_is_visible
+
+        user = self._user(
+            {
+                "music": {
+                    "fields": ["artist"],
+                    "options": {"rating": {"hide_zero": True}},
+                }
+            }
+        )
+        context = {"user": user}
+        self.assertFalse(score_is_visible(context, 0, "music"))
+        self.assertTrue(score_is_visible(context, 0, "movie"))
+
+    def test_artist_field_reads_structured_album_credits(self):
+        """A multi-artist album with no legacy artist still shows its artists."""
+        from users.card_metadata import _artist
+
+        credits = [
+            SimpleNamespace(artist=SimpleNamespace(name="A"), join_phrase=" & "),
+            SimpleNamespace(artist=SimpleNamespace(name="B"), join_phrase=""),
+        ]
+        album = SimpleNamespace(
+            artist=None,
+            artist_credits=SimpleNamespace(all=lambda: credits),
+        )
+        self.assertEqual(_artist(album, None, None), "A & B")
+
+    def test_subtitle_class_defers_to_per_line_visibility(self):
+        """A hover line on an 'always' type must not get the card-level class."""
+        from app.templatetags.app_tags import card_subtitle_class
+
+        user = self._user(
+            {
+                "music": {
+                    "display": "always",
+                    "fields": ["artist", "release_year"],
+                    "lines": [
+                        {"fields": ["artist"], "display": "dormant"},
+                        {"fields": ["release_year"], "display": "hover"},
+                    ],
+                }
+            }
+        )
+        self.assertEqual(card_subtitle_class({"user": user}, "music"), "")
+        plain = self._user({"music": {"display": "always"}})
+        self.assertIn(
+            "media-card-subtitle-always", card_subtitle_class({"user": plain}, "music")
+        )
+
+    def test_title_classes_only_follow_a_customised_title(self):
+        """Default titles keep a card's own clamps; edited titles add classes."""
+        from app.templatetags.app_tags import card_title_classes
+
+        default = self._user({"music": {"fields": ["artist"]}})
+        self.assertEqual(card_title_classes({"user": default}, "music"), "")
+        edited = self._user(
+            {
+                "music": {
+                    "fields": ["artist"],
+                    "options": {"title": {"overflow": "wrap", "lines": 2}},
+                }
+            }
+        )
+        classes = card_title_classes({"user": edited}, "music")
+        self.assertIn("media-card-title-wrap", classes)
+        self.assertIn("media-card-title-rest-2", classes)

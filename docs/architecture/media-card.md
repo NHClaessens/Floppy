@@ -72,15 +72,15 @@ chip that the table says should show.
 
 ## Not this card
 
-These tiles are built separately, on purpose, because they show a different kind of
-thing or use a different layout: list tiles (`lists/components/list_grid.html`),
+These cards are built separately, on purpose, because they show a different kind of
+thing or use a different layout: list cards (`lists/components/list_grid.html`),
 history day cards, the Now Playing card, person and cast cards, and statistics highlights.
-Do not copy the `media-card-*` classes into a new tile for a media item; use the tag.
+Do not copy the `media-card-*` classes into a new card for a media item; use the tag.
 
 The library's album and artist grids (`artist_grid_items.html`,
 `album_list_grid_items.html`) are also separate. The card needs an `Item`, and albums
 and artists only get one through Home's placeholder rows, which are written to the
-database. The library does not write while it reads, so these tiles stay separate. They
+database. The library does not write while it reads, so these cards stay separate. They
 use the shared rating partial, `media_card_rating.html`, so a rating reads the same.
 
 Known remaining duplication:
@@ -91,3 +91,23 @@ Known remaining duplication:
   loads episodes' seasons and annotates `max_progress`, and serves the owner's data on
   public lists.
 - Moving either onto the shared lookup needs its own change, with query-count checks.
+
+## Card profiles
+
+Subtitle lines come from `User.card_metadata`, one profile per media type plus `person`.
+`src/users/card_metadata.py` is the registry. `card_context` resolves the profile for the
+shared card. Hand-rolled cards call `{% card_lines %}`. `display` is `hover` or `always`.
+Rows (episode rows, calendar rows) have no hover state, so their hover lines are always
+visible. Hand-rolled poster cards add the saved title treatment with `{% card_title_classes %}`,
+and only once the user has changed a title option, so unchanged cards keep their own clamps.
+The poster progress bar follows the `progress` field. A zero score is hidden per type
+via `options.rating.hide_zero`.
+
+Cards that read the profile: the shared card, history, music grids, search music results,
+`media_card_list`, episode rows, person and cast cards, stats highlights, active playback,
+and calendar rows. `list_grid.html` is a list index. It always shows the item count and
+does not read a profile.
+
+`GET /api/v1/user/preferences/` still accepts the old names `media_card_subtitle_display`,
+`progress_bar`, and `hide_zero_rating`. A name is omitted when types disagree. `PATCH`
+of one name writes every type. The columns are gone.

@@ -58,6 +58,9 @@ urlpatterns = [
     path("test_notification", views.test_notification, name="test_notification"),
     path("settings/ui", views.ui_preferences, name="ui_preferences"),
     path("settings/appearance", views.appearance, name="appearance"),
+    path("settings/cards", views.cards, name="cards"),
+    path("settings/cards/preview", views.cards_preview, name="cards_preview"),
+    path("settings/cards/<str:media_type>", views.cards, name="cards_type"),
     path("settings/sidebar", views.sidebar, name="sidebar"),
     path("settings/home-screen", views.home_screen, name="home_screen"),
     path(
