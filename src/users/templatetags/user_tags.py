@@ -347,7 +347,7 @@ def custom_theme_style(user):
 
 
 @register.simple_tag
-def detail_section_attrs(user, family, zone, section):
+def detail_section_attrs(user, family, zone, section, visibility_only=False):
     """Return safe server-rendered visibility and order attributes."""
     layouts = resolved_detail_layouts(
         getattr(user, "detail_page_layouts", {}) if user.is_authenticated else {}
@@ -355,6 +355,8 @@ def detail_section_attrs(user, family, zone, section):
     section_order = layouts.get(family, {}).get(zone, [])
     if section not in section_order:
         return format_html('data-detail-section="{}" hidden', section)
+    if visibility_only:
+        return format_html('data-detail-section="{}"', section)
     return format_html(
         'data-detail-section="{}" style="order: {}"',
         section,

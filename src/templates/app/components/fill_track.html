@@ -84,8 +84,8 @@
                   method="post"
                   action="{{ general_submit_formaction }}"
                   hx-post="{{ general_submit_formaction }}"
-                  hx-target="{% if track_action_update %}closest [data-track-action-root]{% else %}closest [data-track-modal-root]{% endif %}"
-                  hx-swap="{% if track_action_update %}outerHTML{% else %}none{% endif %}"
+                  hx-target="{% if track_action_update %}this{% else %}closest [data-track-modal-root]{% endif %}"
+                  hx-swap="none"
                   x-data="mediaForm"
                   x-init="init"
                   {% if general_existing_instance %}data-existing-instance{% endif %}

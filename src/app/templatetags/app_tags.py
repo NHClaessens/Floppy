@@ -22,11 +22,89 @@ from app import card_surfaces, config, helpers, image_cache
 from app.models import Item, MediaTypes, Sources, Status
 from app.providers import tmdb
 from app.services import metadata_resolution
+from app.stats_music import COUNTRY_NAME_MAP
 from users.media_type_chips import media_type_chip_preferences
 from users.models import ALL_SEARCH_TYPE, HISTORY_VIEW_TYPE, TimeFormatChoices
 from users.templatetags.user_tags import user_date_format, user_time_format
 
 register = template.Library()
+COUNTRY_CODE_LENGTH = 2
+COUNTRY_CODE_BY_NAME = {
+    name.casefold(): code for code, name in COUNTRY_NAME_MAP.items()
+}
+
+
+@register.simple_tag
+def detail_promoted_facts(media_type, details):
+    """Pick existing provider facts for the desktop carousel summary."""
+    details = details if isinstance(details, dict) else {}
+    fields_by_type = {
+        MediaTypes.TV.value: (
+            ("status", _("Series status")),
+            ("format", _("Format")),
+            ("air_dates", _("Air dates")),
+            ("total_runtime", _("Total runtime")),
+            ("locale", _("Languages and country")),
+        ),
+        MediaTypes.MOVIE.value: (
+            ("format", _("Format")),
+            ("release_date", _("Release date")),
+            ("status", _("Release status")),
+            ("runtime", _("Runtime")),
+            ("certification", _("Certification")),
+            ("locale", _("Languages and country")),
+        ),
+        MediaTypes.SEASON.value: (
+            ("air_dates", _("Air dates")),
+            ("episodes", _("Episodes")),
+            ("total_runtime", _("Total runtime")),
+        ),
+        MediaTypes.GAME.value: (
+            ("release_date", _("Release date")),
+            ("platforms", _("Platforms")),
+            ("format", _("Format")),
+        ),
+    }
+    fields = []
+    suppressed_keys = set()
+    for key, default_label in fields_by_type.get(media_type, ()):
+        label = default_label
+        if key == "locale":
+            languages = details.get("languages")
+            country = details.get("country")
+            if not languages and not country:
+                continue
+            value = {"languages": languages, "country": country}
+            suppressed_keys.update(("languages", "country"))
+        elif key == "air_dates":
+            value = (details.get("first_air_date"), details.get("last_air_date"))
+            if not any(value):
+                continue
+            suppressed_keys.update(("first_air_date", "last_air_date"))
+        else:
+            value = details.get(key)
+            if value is None or value in ("", []):
+                continue
+            if (
+                media_type == MediaTypes.TV.value
+                and key == "format"
+                and details.get("status")
+            ):
+                suppressed_keys.add(key)
+                continue
+            suppressed_keys.add(key)
+            if media_type == MediaTypes.MOVIE.value and key == "runtime":
+                suppressed_keys.add("total_runtime")
+            if (
+                media_type == MediaTypes.TV.value
+                and key == "status"
+                and details.get("format")
+            ):
+                label = _("%(format)s series status") % {
+                    "format": _(details["format"])
+                }
+        fields.append({"key": key, "label": label, "value": value})
+    return {"fields": fields, "suppressed_keys": suppressed_keys}
 
 
 @register.filter
@@ -54,6 +132,17 @@ def translate_detail_value(value):
         return _("%(count)s players") % {"count": players_match.group(1)}
 
     return _(text)
+
+
+@register.filter
+def country_code(value):
+    """Compact known country names to their ISO alpha-2 code."""
+    if not value:
+        return ""
+    text = str(value).strip()
+    if len(text) == COUNTRY_CODE_LENGTH and text.isalpha():
+        return text.upper()
+    return COUNTRY_CODE_BY_NAME.get(text.casefold(), text)
 
 
 # Built-in source labels are stored lowercase ("plex"); these need casing that

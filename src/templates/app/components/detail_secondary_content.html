@@ -5,8 +5,11 @@
 {% load humanize %}
 {% load static %}
 {% detail_layout_family media_type as detail_family %}
+{% detail_promoted_facts media_type media.details as detail_promotion %}
 
-  <div id="detail-secondary-content" class="flex flex-col-reverse md:flex-row gap-0 md:gap-10">
+  <div id="detail-secondary-content" class="detail-secondary-content">
+    {% include "app/components/detail_promoted_content.html" %}
+    <div class="detail-secondary-layout flex flex-col-reverse md:flex-row gap-0 md:gap-10">
     {# Details Column #}
 
     <div class="w-full md:w-1/4 md:max-w-[250px] mx-auto lg:mx-0"
@@ -138,19 +141,20 @@
       {% endif %}
 
       {# Media Details #}
-      <div {% detail_section_attrs user detail_family "sidebar" "details" %}>
-      <h2 class="text-xl font-bold mb-4">{% translate "Details" %}</h2>
+      <div {% detail_section_attrs user detail_family "sidebar" "details" %}
+           class="detail-sidebar-details">
+      <h2 class="detail-sidebar-details-heading text-xl font-bold mb-4">{% translate "Details" %}</h2>
       <div class="hidden md:block">
         {% include "app/components/detail_watch_providers.html" with placement="desktop" %}
       </div>
 
-      <div class="bg-[var(--color-surface)] p-4 rounded-lg text-center md:text-start">
+      <div class="detail-sidebar-details-card bg-[var(--color-surface)] p-4 rounded-lg text-center md:text-start">
         {% if media.details.items %}
           {% for key, value in media.details.items %}
             {% if not authors_linked or key not in author_detail_keys %}
               {% if not studios_linked or key not in studio_detail_keys %}
                 {% if key != "themes" and key != "last_air_date" and key != "episodes" and key != "runtime" and key != "seasons" %}
-                <div class="mb-4">
+                <div class="detail-sidebar-fact mb-4 {% if key in detail_promotion.suppressed_keys %}detail-sidebar-fact--promoted{% endif %}">
                   {% if key == "first_air_date" %}
                     <h3 class="text-sm font-semibold text-[var(--color-text-muted)] tracking-wide">{% translate "AIR DATES" %}</h3>
                     <p class="text-sm text-[var(--color-text-secondary)]">
@@ -189,7 +193,7 @@
                   {% endif %}
                 </div>
                 {% elif key == "runtime" and not media.details.total_runtime %}
-                <div class="mb-4">
+                <div class="detail-sidebar-fact mb-4 {% if key in detail_promotion.suppressed_keys %}detail-sidebar-fact--promoted{% endif %}">
                   <h3 class="text-sm font-semibold text-[var(--color-text-muted)] tracking-wide">{% translate "RUNTIME" %}</h3>
                   <p class="text-sm text-[var(--color-text-secondary)]">
                     {{ value|default_if_none:_("Unknown") }}{% if media.details.episodes %}<span class="text-[var(--color-text-muted)] mx-1">·</span>{% blocktranslate trimmed with value_1=media.details.episodes count count=media.details.episodes|safe_count %}{{ value_1 }} episode{% plural %}{{ value_1 }} episodes{% endblocktranslate %}{% endif %}
@@ -200,7 +204,7 @@
             {% endif %}
           {% endfor %}
           {% if authors_linked %}
-            <div class="mb-4">
+            <div class="detail-sidebar-fact mb-4">
               <h3 class="text-sm font-semibold text-[var(--color-text-muted)]">{% blocktranslate trimmed count count=authors_linked|length %}AUTHOR{% plural %}AUTHORs{% endblocktranslate %}</h3>
               <div class="flex flex-col gap-1">
                 {% for author in authors_linked %}
@@ -217,7 +221,8 @@
       </div>
 
       {% if media.genres %}
-        <div {% detail_section_attrs user detail_family "sidebar" "genres" %}>
+        <div {% detail_section_attrs user detail_family "sidebar" "genres" %}
+             class="detail-sidebar-genres">
         {% url 'medialist' media_type=parent_media_type|default:media_type as genre_list_url %}
         <h2 class="text-xl font-bold mb-4 mt-6">{% translate "Genres" %}</h2>
         <div class="bg-[var(--color-surface)] p-4 rounded-lg text-center md:text-start">
@@ -232,8 +237,9 @@
       {% endif %}
 
       {% if studios_linked %}
-        <div {% detail_section_attrs user detail_family "sidebar" "studios" %}>
-        <h2 class="text-xl font-bold mb-4 mt-6">{% translate "Studios" %}</h2>
+        <div {% detail_section_attrs user detail_family "sidebar" "studios" %}
+             class="detail-sidebar-studios">
+        <h2 class="detail-sidebar-studios-heading text-xl font-bold mb-4 mt-6">{% translate "Studios" %}</h2>
         <div class="bg-[var(--color-surface)] p-4 rounded-lg text-center md:text-start">
           <div class="flex flex-col gap-1">
             {% for studio in studios_linked|slice:":12" %}
@@ -584,6 +590,7 @@
       {% include "app/components/detail_watch_providers.html" with placement="mobile" %}
     </div>
 
+    </div>
   </div>
 {% if media.episodes or episodes %}
   {% include "app/components/_episode_scroll_restore.html" %}

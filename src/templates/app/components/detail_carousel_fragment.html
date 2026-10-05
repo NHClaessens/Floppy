@@ -1,17 +1,36 @@
+
 {% load i18n %}
 {% if carousel %}
-  <div class="w-full h-full flex flex-col gap-2" x-data="{ selected: 0, mode: 'image', videoPlaying: false, items: [], lightboxOpen: false, fit: localStorage.getItem('gallery-fit') || 'contain', select(i) { this.selected = i; this.mode = this.items[i].kind; this.videoPlaying = false; this.$nextTick(() => { const el = this.$refs['thumb_' + i]; if (el) el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }); }); }, next() { this.select((this.selected + 1) % this.items.length) }, prev() { this.select((this.selected - 1 + this.items.length) % this.items.length) }, toggleFit() { this.fit = this.fit === 'cover' ? 'contain' : 'cover'; localStorage.setItem('gallery-fit', this.fit); }, }" x-init="items = [ {% if carousel.video %}{ kind: 'video', key: '{{ carousel.video.key|escapejs }}' },{% endif %}
+  <div class="detail-carousel-content w-full h-full flex flex-col gap-2" x-data="{ selected: 0, mode: 'image', videoPlaying: false, items: [], blurUrl: '', previousBlurUrl: '', blurTransitioning: true, lightboxOpen: false, fit: localStorage.getItem('gallery-fit') || 'contain', stripHasOverflow: false, stripAtStart: true, stripAtEnd: true, updateStripScroll() { const strip = this.$refs.thumbnailStrip; if (!strip) return; this.stripHasOverflow = strip.scrollWidth > strip.clientWidth + 2; this.stripAtStart = strip.scrollLeft < 2; this.stripAtEnd = strip.scrollLeft + strip.clientWidth >= strip.scrollWidth - 2 }, blurSrc(item) { return item.kind === 'video' ? 'https://img.youtube.com/vi/' + item.key + '/maxresdefault.jpg' : item.url }, select(i) { if (i === this.selected) return; this.previousBlurUrl = this.blurUrl; this.blurUrl = this.blurSrc(this.items[i]); this.blurTransitioning = false; this.selected = i; this.mode = this.items[i].kind; this.videoPlaying = false; this.$nextTick(() => { const el = this.$refs['thumb_' + i]; if (el) el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' }); requestAnimationFrame(() => requestAnimationFrame(() => { this.blurTransitioning = true })) }) }, next() { this.select((this.selected + 1) % this.items.length) }, prev() { this.select((this.selected - 1 + this.items.length) % this.items.length) }, toggleFit() { this.fit = this.fit === 'cover' ? 'contain' : 'cover'; localStorage.setItem('gallery-fit', this.fit) }, }" x-init="items = [ {% if carousel.overview %}{ kind: 'overview', url: '{{ carousel.overview.url|escapejs }}' },{% endif %}{% if carousel.video %}{ kind: 'video', key: '{{ carousel.video.key|escapejs }}' },{% endif %}
 
   {% for photo in carousel.photos %}{ kind: 'image', url: '{{ photo.url|escapejs }}' },{% endfor %}
-  ]; mode = items[0].kind" @keydown.escape.window="lightboxOpen = false" @keydown.arrow-left.window="if (lightboxOpen) prev()" @keydown.arrow-right.window="if (lightboxOpen) next()">
-  <div class="relative flex-1 min-h-[12rem] rounded-lg overflow-hidden bg-[var(--color-surface)]">
+  ]; mode = items[0].kind; blurUrl = blurSrc(items[0]); previousBlurUrl = blurUrl; $nextTick(() => updateStripScroll())" @resize.window.debounce.100ms="updateStripScroll()" @keydown.escape.window="lightboxOpen = false" @keydown.arrow-left.window="if (lightboxOpen) prev()" @keydown.arrow-right.window="if (lightboxOpen) next()">
+  <div class="detail-carousel-preview relative flex-1 min-h-[12rem]"
+       :class="mode === 'overview' ? 'detail-carousel-preview--overview' : 'detail-carousel-preview--bounded'">
+    {% if carousel.overview %}
+      <img class="detail-carousel-overview-extension detail-carousel-overview-extension--outgoing"
+           :class="{ 'detail-carousel-overview-extension--active': blurTransitioning }"
+           :src="previousBlurUrl"
+           onload="if (this.naturalWidth === 120) { this.src = this.src.replace('maxresdefault', 'hqdefault') }"
+           alt="">
+      <img class="detail-carousel-overview-extension detail-carousel-overview-extension--incoming"
+           :class="{ 'detail-carousel-overview-extension--active': blurTransitioning }"
+           :src="blurUrl"
+           onload="if (this.naturalWidth === 120) { this.src = this.src.replace('maxresdefault', 'hqdefault') }"
+           alt="">
+      <img class="detail-carousel-overview-logo"
+           src="{{ carousel.overview.logo_url }}"
+           x-show="mode === 'overview'"
+           x-cloak
+           alt="{% translate 'Media title logo' %}">
+    {% endif %}
     <template x-if="mode === 'video' && !videoPlaying">
       <button type="button"
-              class="relative block h-full w-full cursor-pointer"
+              class="detail-carousel-video-poster relative block h-full w-full cursor-pointer"
               @click="videoPlaying = true"
               aria-label="{% translate "Play trailer" %}">
-        <img class="w-full h-full"
-             :class="fit === 'cover' ? 'object-cover' : 'object-contain'"
+        <img class="detail-carousel-main-image relative z-[1] w-full h-full"
+             :class="mode === 'overview' ? 'detail-carousel-main-image--overview object-cover' : (fit === 'cover' ? 'object-cover' : 'object-contain')"
              :src="'https://img.youtube.com/vi/' + items[selected].key + '/maxresdefault.jpg'"
              onload="if (this.naturalWidth === 120) { this.src = this.src.replace('maxresdefault', 'hqdefault') }"
              alt="">
@@ -23,7 +42,7 @@
       </button>
     </template>
     <template x-if="mode === 'video' && videoPlaying">
-      <iframe class="w-full h-full"
+      <iframe class="relative z-[1] w-full h-full"
               :src="'https://www.youtube.com/embed/' + items[selected].key + '?autoplay=1'"
               title="{% translate "Trailer" %}"
               frameborder="0"
@@ -32,17 +51,17 @@
               allowfullscreen></iframe>
     </template>
     <template x-if="mode !== 'video'">
-      <img class="w-full h-full cursor-pointer"
-           :class="fit === 'cover' ? 'object-cover' : 'object-contain'"
+      <img class="detail-carousel-main-image relative z-[1] w-full h-full cursor-pointer"
+           :class="mode === 'overview' ? 'detail-carousel-main-image--overview object-cover' : (fit === 'cover' ? 'object-cover' : 'object-contain')"
            :src="items[selected].url"
            alt=""
            @click="lightboxOpen = true">
     </template>
 
-    <div class="absolute top-2 left-2 rounded-md bg-black/60 px-2 py-1 text-xs font-medium text-white"
+    <div class="absolute top-2 left-2 z-[2] rounded-md bg-black/60 px-2 py-1 text-xs font-medium text-white"
          x-text="(selected + 1) + ' / ' + items.length"></div>
 
-    <div class="absolute top-2 right-2 flex items-center gap-1">
+    <div class="absolute top-2 right-2 z-[2] flex items-center gap-1">
       {% translate "Fit image" as media_i18n_77 %}{% translate "Fill frame" as media_i18n_78 %}<button type="button"
               class="flex h-8 w-8 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors cursor-pointer"
               @click="toggleFit()"
@@ -57,24 +76,41 @@
     </div>
 
     <button type="button"
-            class="absolute left-2 top-1/2 -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors cursor-pointer"
+            class="absolute left-2 top-1/2 z-[2] -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors cursor-pointer"
+            x-show="mode !== 'overview'"
+            x-cloak
+            x-transition.opacity.duration.200ms
             @click="prev()"
             aria-label="{% translate "Previous" %}">{% include "app/icons/chevron-left.svg" with classes="w-5 h-5" %}</button>
     <button type="button"
-            class="absolute right-2 top-1/2 -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors cursor-pointer"
+            class="absolute right-2 top-1/2 z-[2] -translate-y-1/2 flex h-9 w-9 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors cursor-pointer"
             @click="next()"
             aria-label="{% translate "Next" %}">{% include "app/icons/chevron-right.svg" with classes="w-5 h-5" %}</button>
   </div>
 
-  <div class="relative flex shrink-0 gap-2 overflow-x-auto py-1 scroll-smooth"
-       @wheel.prevent="$el.scrollLeft += $event.deltaY">
-    {% if carousel.video %}
+  <div class="detail-carousel-strip-wrap relative min-w-0">
+  <div class="detail-carousel-strip flex shrink-0 gap-2 overflow-x-auto scrollbar-hidden"
+       :class="{ 'detail-carousel-strip--fade-left': stripHasOverflow && !stripAtStart, 'detail-carousel-strip--fade-right': stripHasOverflow && !stripAtEnd }"
+       x-ref="thumbnailStrip"
+       @scroll.passive="updateStripScroll()">
+    {% if carousel.overview %}
       <button type="button"
               x-ref="thumb_0"
-              class="relative shrink-0 w-20 h-14 rounded-md overflow-hidden border-2 cursor-pointer transition-all"
-              :class="selected === 0 ? 'border-indigo-500 scale-95' : 'border-transparent opacity-70 hover:opacity-100'"
-              @click="select(0)">
-        <img class="w-full h-full object-cover"
+              class="relative shrink-0 aspect-video rounded-md overflow-hidden border-2 cursor-pointer"
+              :class="selected === 0 ? 'border-indigo-500' : 'border-transparent'"
+              @click="select(0)"
+              aria-label="{% translate 'Overview' %}">
+        <img class="w-full h-full object-cover" src="{{ carousel.overview.thumb_url }}" alt="">
+        <span class="detail-carousel-overview-caption text-center text-[10px] font-semibold text-white">{% translate "Overview" %}</span>
+      </button>
+    {% endif %}
+    {% if carousel.video %}
+      <button type="button"
+              x-ref="thumb_{% if carousel.overview %}1{% else %}0{% endif %}"
+              class="relative shrink-0 aspect-video rounded-md overflow-hidden border-2 cursor-pointer"
+              :class="selected === {% if carousel.overview %}1{% else %}0{% endif %} ? 'border-indigo-500' : 'border-transparent'"
+              @click="select({% if carousel.overview %}1{% else %}0{% endif %})">
+        <img class="w-full h-full object-contain"
              src="https://img.youtube.com/vi/{{ carousel.video.key }}/mqdefault.jpg"
              alt="">
         <span class="absolute inset-0 flex items-center justify-center bg-black/30">
@@ -86,34 +122,61 @@
       {% if carousel.video %}
         {% with index=forloop.counter %}
           <button type="button"
-                  x-ref="thumb_{{ index }}"
-                  class="shrink-0 w-20 h-14 rounded-md overflow-hidden border-2 cursor-pointer transition-all"
-                  :class="selected === {{ index }} ? 'border-indigo-500 scale-95' : 'border-transparent opacity-70 hover:opacity-100'"
-                  @click="select({{ index }})">
-            <img class="w-full h-full object-cover" src="{{ photo.thumb_url }}" alt="">
+                  x-ref="thumb_{% if carousel.overview %}{{ index|add:1 }}{% else %}{{ index }}{% endif %}"
+                  class="shrink-0 rounded-md overflow-hidden border-2 cursor-pointer"
+                  style="aspect-ratio: {% if photo.width and photo.height %}{{ photo.width }}/{{ photo.height }}{% else %}16/9{% endif %}"
+                  :class="selected === {{ index }} + {% if carousel.overview %}1{% else %}0{% endif %} ? 'border-indigo-500' : 'border-transparent'"
+                  @click="select({{ index }} + {% if carousel.overview %}1{% else %}0{% endif %})">
+            <img class="w-full h-full object-contain" src="{{ photo.thumb_url }}" alt="">
           </button>
         {% endwith %}
       {% else %}
         {% with index=forloop.counter0 %}
           <button type="button"
-                  x-ref="thumb_{{ index }}"
-                  class="shrink-0 w-20 h-14 rounded-md overflow-hidden border-2 cursor-pointer transition-all"
-                  :class="selected === {{ index }} ? 'border-indigo-500 scale-95' : 'border-transparent opacity-70 hover:opacity-100'"
-                  @click="select({{ index }})">
-            <img class="w-full h-full object-cover" src="{{ photo.thumb_url }}" alt="">
+                  x-ref="thumb_{% if carousel.overview %}{{ index|add:1 }}{% else %}{{ index }}{% endif %}"
+                  class="shrink-0 rounded-md overflow-hidden border-2 cursor-pointer"
+                  style="aspect-ratio: {% if photo.width and photo.height %}{{ photo.width }}/{{ photo.height }}{% else %}16/9{% endif %}"
+                  :class="selected === {{ index }} + {% if carousel.overview %}1{% else %}0{% endif %} ? 'border-indigo-500' : 'border-transparent'"
+                  @click="select({{ index }} + {% if carousel.overview %}1{% else %}0{% endif %})">
+            <img class="w-full h-full object-contain" src="{{ photo.thumb_url }}" alt="">
           </button>
         {% endwith %}
       {% endif %}
     {% endfor %}
     {% if carousel.photos %}
       <button type="button"
-              class="sticky right-0 shrink-0 w-20 h-14 rounded-md flex items-center justify-center bg-[var(--color-surface)]/90 backdrop-blur-sm border border-white/10 px-1 text-center text-[10px] font-medium leading-tight text-[var(--color-text-muted)] cursor-pointer hover:bg-[var(--color-surface-muted)] hover:text-white transition-colors shadow-lg z-10"
+              class="shrink-0 aspect-video rounded-md flex items-center justify-center bg-[var(--color-surface)] px-1 text-center text-[10px] leading-tight text-[var(--color-text-muted)] cursor-pointer hover:bg-[var(--color-surface-muted)] transition-colors"
               @click="lightboxOpen = true">
         {% blocktranslate trimmed with value_1=carousel.photos|length count count=carousel.photos|length %}View all {{ value_1 }} photo{% plural %}View all {{ value_1 }} photos{% endblocktranslate %}
       </button>
     {% endif %}
   </div>
 
+    <button type="button"
+            class="detail-carousel-strip-nav detail-carousel-strip-nav--left"
+            x-show="stripHasOverflow && !stripAtStart"
+            x-transition:enter="transition-opacity duration-200"
+            x-transition:enter-start="opacity-0"
+            x-transition:enter-end="opacity-100"
+            x-transition:leave="transition-opacity duration-200"
+            x-transition:leave-start="opacity-100"
+            x-transition:leave-end="opacity-0"
+            @click="$refs.thumbnailStrip.scrollLeft -= $refs.thumbnailStrip.clientWidth * 0.8"
+            aria-label="{% translate 'Scroll thumbnails left' %}">{% include "app/icons/chevron-left.svg" with classes="w-5 h-5" %}</button>
+    <button type="button"
+            class="detail-carousel-strip-nav detail-carousel-strip-nav--right"
+            x-show="stripHasOverflow && !stripAtEnd"
+            x-transition:enter="transition-opacity duration-200"
+            x-transition:enter-start="opacity-0"
+            x-transition:enter-end="opacity-100"
+            x-transition:leave="transition-opacity duration-200"
+            x-transition:leave-start="opacity-100"
+            x-transition:leave-end="opacity-0"
+            @click="$refs.thumbnailStrip.scrollLeft += $refs.thumbnailStrip.clientWidth * 0.8"
+            aria-label="{% translate 'Scroll thumbnails right' %}">{% include "app/icons/chevron-right.svg" with classes="w-5 h-5" %}</button>
+  </div>
+
+  <template x-teleport="body">
   <div x-show="lightboxOpen"
        x-cloak
        x-transition:enter="transition ease-out duration-150"
@@ -139,7 +202,7 @@
     <button type="button"
             class="absolute right-2 sm:right-4 top-1/2 -translate-y-1/2 flex h-11 w-11 items-center justify-center rounded-full bg-black/60 text-white hover:bg-black/80 transition-colors cursor-pointer"
             @click="next()"
-            aria-label="{% translate "Next" %}">{% include "app/icons/chevron-right.svg" with classes="w-5 h-5" %}</button>
+            aria-label="{% translate "Next" %}">{% include "app/icons/chevron-right.svg" with classes="w-6 h-6" %}</button>
 
     <template x-if="lightboxOpen && mode === 'video' && !videoPlaying">
       <button type="button"
@@ -172,5 +235,6 @@
            alt="">
     </template>
   </div>
+  </template>
 </div>
 {% endif %}

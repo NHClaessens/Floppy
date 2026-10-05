@@ -1988,6 +1988,102 @@ class SafeCountFilterTests(TestCase):
         self.assertEqual(app_tags.safe_count("TBA"), 0)
 
 
+class DetailPromotedFactsTests(TestCase):
+    def test_media_type_field_priority_and_missing_values(self):
+        details_by_type = {
+            MediaTypes.TV.value: {
+                "format": "TV",
+                "first_air_date": "2022-02-03",
+                "last_air_date": "2026-09-16",
+                "status": "Returning Series",
+                "runtime": "48m",
+                "total_runtime": "25h 34min",
+                "episodes": 32,
+                "country": "United States of America",
+                "languages": ["English"],
+            },
+            MediaTypes.MOVIE.value: {
+                "format": "Movie",
+                "release_date": "1991-11-21",
+                "status": "Released",
+                "runtime": "1h 15min",
+                "certification": "PG",
+                "country": "United States of America",
+                "languages": ["English"],
+            },
+            MediaTypes.SEASON.value: {
+                "first_air_date": "2022-02-03",
+                "last_air_date": "2022-03-31",
+                "episodes": 8,
+                "runtime": "47m",
+                "total_runtime": "6h 16min",
+            },
+            MediaTypes.GAME.value: {
+                "release_date": "2025-03-18",
+                "platforms": ["Windows", "PlayStation 5"],
+                "format": "Main Game",
+            },
+        }
+        expected_keys = {
+            MediaTypes.TV.value: [
+                "status",
+                "air_dates",
+                "total_runtime",
+                "locale",
+            ],
+            MediaTypes.MOVIE.value: [
+                "format",
+                "release_date",
+                "status",
+                "runtime",
+                "certification",
+                "locale",
+            ],
+            MediaTypes.SEASON.value: [
+                "air_dates",
+                "episodes",
+                "total_runtime",
+            ],
+            MediaTypes.GAME.value: ["release_date", "platforms", "format"],
+        }
+
+        for media_type, details in details_by_type.items():
+            with self.subTest(media_type=media_type):
+                promotion = app_tags.detail_promoted_facts(media_type, details)
+                self.assertEqual(
+                    [field["key"] for field in promotion["fields"]],
+                    expected_keys[media_type],
+                )
+
+        missing = app_tags.detail_promoted_facts(
+            MediaTypes.TV.value,
+            {"format": "TV", "runtime": None, "country": ""},
+        )
+        self.assertEqual([field["key"] for field in missing["fields"]], ["format"])
+        self.assertEqual(missing["suppressed_keys"], {"format"})
+        tv_facts = app_tags.detail_promoted_facts(
+            MediaTypes.TV.value,
+            {
+                "format": "TV",
+                "status": "Returning Series",
+                "country": "United States of America",
+                "languages": ["English", "French"],
+            },
+        )
+        self.assertEqual(tv_facts["fields"][0]["label"], "TV series status")
+        self.assertEqual(
+            tv_facts["fields"][-1]["value"],
+            {"languages": ["English", "French"], "country": "United States of America"},
+        )
+        movie_facts = app_tags.detail_promoted_facts(
+            MediaTypes.MOVIE.value,
+            {"runtime": "1h 42m", "total_runtime": "1h 42min"},
+        )
+        self.assertEqual(movie_facts["suppressed_keys"], {"runtime", "total_runtime"})
+        self.assertEqual(app_tags.country_code("United States of America"), "US")
+        self.assertEqual(app_tags.country_code("Canada"), "CA")
+
+
 class DetailScoreChipsTemplateTests(TestCase):
     """Non-numeric provider score_count must not crash blocktranslate (#1147).
 

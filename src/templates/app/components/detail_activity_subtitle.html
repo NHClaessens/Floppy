@@ -8,7 +8,7 @@
     <button type="button"
             aria-haspopup="dialog"
             aria-label="{% translate "View session history" %}"
-            class="{% if activity_subtitle.duration_text %}flex w-full items-center justify-center gap-0.5 whitespace-nowrap text-[13px] tracking-[-0.01em] sm:hidden{% else %}flex w-full flex-wrap items-center justify-center gap-y-1 sm:hidden{% endif %} cursor-pointer"
+            class="{% if activity_subtitle.duration_text %}flex w-full items-center justify-center gap-0.5 whitespace-nowrap text-[13px] tracking-[-0.01em] md:hidden{% else %}flex w-full flex-wrap items-center justify-center gap-y-1 md:hidden{% endif %} cursor-pointer"
             hx-get="{% url 'activity_sessions_modal' %}?{% if media_type == MediaTypes.SEASON.value %}media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}&season_number={{ media.season_number }}{% elif media_type == MediaTypes.TV.value %}media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}{% elif media_type == MediaTypes.PODCAST.value and podcast_show %}media_type={{ MediaTypes.PODCAST.value }}&podcast_show={{ podcast_show.id }}{% else %}media_type={{ media_type }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}{% endif %}{% if media_type == MediaTypes.GAME.value or media_type == MediaTypes.BOARDGAME.value %}&logging_style=sessions{% endif %}"
             hx-target="#session-history-modal-host"
             hx-swap="innerHTML"
@@ -60,18 +60,18 @@
     <button type="button"
             aria-haspopup="dialog"
             aria-label="{% translate "View session history" %}"
-            class="hidden w-full flex-wrap items-center justify-center gap-y-1 sm:flex md:justify-start cursor-pointer"
+            class="hidden w-full flex-wrap items-center justify-center gap-y-1 md:flex md:justify-start cursor-pointer"
             hx-get="{% url 'activity_sessions_modal' %}?{% if media_type == MediaTypes.SEASON.value %}media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}&season_number={{ media.season_number }}{% elif media_type == MediaTypes.TV.value %}media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}{% elif media_type == MediaTypes.PODCAST.value and podcast_show %}media_type={{ MediaTypes.PODCAST.value }}&podcast_show={{ podcast_show.id }}{% else %}media_type={{ media_type }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}{% endif %}{% if media_type == MediaTypes.GAME.value or media_type == MediaTypes.BOARDGAME.value %}&logging_style=sessions{% endif %}"
             hx-target="#session-history-modal-host"
             hx-swap="innerHTML"
             @click="$dispatch('open-session-history')">
       {% if activity_subtitle.primary_text %}
-        <span>
+        <span class="detail-activity-progress-text">
           {{ activity_subtitle.primary_text|translate_activity_text:media_type }}
         </span>
       {% endif %}
       {% if activity_subtitle.date_start or activity_subtitle.date_end %}
-        <span class="mx-2 text-gray-600">•</span>
+          <span class="detail-activity-progress-separator mx-2 text-gray-600">•</span>
         <span>
           {% if activity_subtitle.date_start and activity_subtitle.date_end %}
             {% if activity_subtitle.collapse_same_day or activity_subtitle.date_start == activity_subtitle.date_end %}
@@ -87,7 +87,7 @@
         </span>
       {% endif %}
       {% if activity_subtitle.duration_text %}
-        <span class="mx-2 text-gray-600">•</span>
+        <span class="detail-activity-duration-separator {% if not activity_subtitle.date_start and not activity_subtitle.date_end %}detail-activity-duration-separator--progress-only{% endif %} mx-2 text-gray-600">•</span>
         <span>
           {% if " watched" in activity_subtitle.duration_text %}
             {{ activity_subtitle.duration_text|cut:" watched" }} {% translate "watched" %}

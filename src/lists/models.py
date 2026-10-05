@@ -861,7 +861,7 @@ class CustomList(models.Model):
         return settings.IMG_NONE
 
     def _get_igdb_carousel_media(self, media_id):
-        """Return {"video": {"key", "name"}|None, "photos": [image_id, ...]}.
+        """Return video, photo image ids, and the game's hero/logo image ids.
 
         Reuses the same games/artworks lookup as ``_get_igdb_backdrop`` but
         returns every usable image (Key Art first, then other artworks, then
@@ -881,20 +881,21 @@ class CustomList(models.Model):
 
         logger = logging.getLogger(__name__)
 
-        cache_key = f"igdb_carousel_v2_{media_id}"
+        cache_key = f"igdb_carousel_v3_{media_id}"
         cached = cache.get(cache_key)
         if cached is not None:
             return cached
 
         photos = []
         video = None
+        game_response = {}
         try:
             from app.providers import igdb
 
             access_token = igdb.get_access_token()
             url = "https://api.igdb.com/v4/games"
             data = (
-                "fields artworks,artworks.image_id,screenshots,screenshots.image_id;"
+                "fields logo.image_id,artworks,artworks.image_id,screenshots,screenshots.image_id;"
                 f"where id = {media_id};"
             )
             headers = {
@@ -996,7 +997,13 @@ class CustomList(models.Model):
                 "Failed to fetch IGDB carousel media for game %s", media_id, exc_info=True
             )
 
-        data = {"video": video, "photos": photos}
+        game_logo = (game_response.get("logo") or {}).get("image_id")
+        data = {
+            "video": video,
+            "photos": photos,
+            "hero_image_id": next(iter(photos), None),
+            "logo_image_id": game_logo,
+        }
         cache.set(
             cache_key,
             data,

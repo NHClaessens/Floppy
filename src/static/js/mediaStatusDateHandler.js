@@ -140,6 +140,12 @@ function trackModalGetStateKeyFromExpression(expression) {
   return null;
 }
 
+// A modal teleported to <body> is no longer a DOM descendant of the element
+// that owns its Alpine state; Alpine records the way back on the teleported root.
+function trackModalParent(node) {
+  return (node._x_teleportBack || node).parentElement;
+}
+
 function trackModalFindStateTarget(target) {
   const element = trackModalResolveElement(target);
   if (!element || !window.Alpine) {
@@ -155,14 +161,14 @@ function trackModalFindStateTarget(target) {
       if (stateKey) {
         let host = node;
         while (host && !host.hasAttribute?.("x-data")) {
-          host = host.parentElement;
+          host = trackModalParent(host);
         }
         if (host) {
           return { host, stateKey };
         }
       }
     }
-    node = node.parentElement;
+    node = trackModalParent(node);
   }
 
   node = element;
@@ -185,7 +191,7 @@ function trackModalFindStateTarget(target) {
         // Ignore Alpine lookup failures and keep searching.
       }
     }
-    node = node.parentElement;
+    node = trackModalParent(node);
   }
 
   return null;

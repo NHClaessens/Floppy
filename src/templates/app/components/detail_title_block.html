@@ -94,11 +94,11 @@
               <span class="h-4 w-4" :class="{ 'rotate-180': open }">{% include "app/icons/chevron-down.svg" with classes="w-full h-full" %}</span>
             </button>
             {% if not public_view|default:False and current_instance %}
-                <span class="mx-2 text-gray-600">•</span>
+                <span class="detail-season-progress-leading-separator mx-2 text-gray-600">•</span>
                 <button type="button"
                         aria-haspopup="dialog"
                         aria-label="{% translate "View session history" %}"
-                        class="flex flex-wrap items-center justify-start gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] cursor-pointer md:text-start"
+                        class="detail-season-progress-history {% if not current_instance.start_date and not current_instance.end_date %}detail-season-progress-history--no-dates{% endif %} flex flex-wrap items-center justify-start gap-y-1 text-center text-sm font-medium text-[var(--color-text-muted)] cursor-pointer md:text-start"
                         hx-get="{% url 'activity_sessions_modal' %}?media_type={{ MediaTypes.TV.value }}&media_id={{ media.media_id|urlencode }}&source={{ media.source|urlencode }}&season_number={{ season_number }}"
                         hx-target="#session-history-modal-host"
                         hx-swap="innerHTML"
@@ -107,7 +107,7 @@
                     {% blocktranslate trimmed with value_1=current_instance.completed_episode_count %}Progress: {{ value_1 }}{% endblocktranslate %}{% if media.max_progress %}/{{ media.max_progress }}{% endif %}
                   </span>
                   {% if current_instance.start_date or current_instance.end_date %}
-                    <span class="mx-2 text-gray-600">•</span>
+                    <span class="detail-season-progress-date-separator mx-2 text-gray-600">•</span>
                     <span class="text-sm font-medium text-[var(--color-text-muted)]">
                       {% if current_instance.start_date and current_instance.end_date %}
                         {{ current_instance.start_date|datetime_format:user }} - {{ current_instance.end_date|datetime_format:user }}
@@ -170,7 +170,7 @@
   {% endif %}
 
   {% with media|alternative_title:user as detail_alt_title %}
-    <div class="mb-3 sm:mb-1 text-center md:text-start">
+    <div class="mb-3 md:mb-1 text-center md:text-start">
       <div class="inline-flex items-center gap-2 md:flex md:gap-2">
         <h1 class="text-3xl font-bold">{{ media|display_title:user }}</h1>
         {% if detail_alt_title %}

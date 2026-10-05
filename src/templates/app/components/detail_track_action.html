@@ -24,6 +24,7 @@
     </span>
   </button>
 
+  <template x-teleport="body">
   <div x-show="trackOpen"
   @mousedown.self="trackOpen = false"
        x-cloak
@@ -39,4 +40,5 @@
       </div>
     </div>
   </div>
+  </template>
 </div>

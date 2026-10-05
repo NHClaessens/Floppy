@@ -755,7 +755,7 @@ class SessionHistoryModalTests(TestCase):
         self.assertEqual(len(response.context["history_days"]), 1)
         self.assertEqual(len(response.context["marker_days"]), 2)
         self.assertEqual(len(response.context["visible_marker_days"]), 1)
-        self.assertContains(response, "View all activity history", html=False)
+        self.assertContains(response, "View History", html=False)
 
 
 class DeleteHistoryRecordViewTests(TestCase):

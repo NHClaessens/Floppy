@@ -1511,6 +1511,8 @@ class EditMedia(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertContains(response, "data-track-action-root", html=False)
         self.assertContains(response, 'id="track-action-movie-10494"', html=False)
+        # The modal is teleported to <body>, so the pill must replace itself by id.
+        self.assertContains(response, 'hx-swap-oob="outerHTML"', html=False)
         self.assertContains(response, f'id="detail-score-chip-{movie.id}"', html=False)
         self.assertContains(response, "Edit rating")
         self.assertContains(response, "Completed")
@@ -1741,10 +1743,11 @@ class EditMedia(TestCase):
         self.assertContains(response, "data-track-modal-root", html=False)
         self.assertContains(
             response,
-            'hx-target="closest [data-track-action-root]"',
+            'hx-target="this"',
             html=False,
         )
-        self.assertContains(response, 'hx-swap="outerHTML"', html=False)
+        self.assertContains(response, 'hx-swap="none"', html=False)
+        self.assertContains(response, 'hx-swap-oob="outerHTML"', html=False)
         self.assertEqual(
             Movie.objects.get(item__media_id="10494").status,
             initial_status,

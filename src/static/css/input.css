@@ -824,6 +824,33 @@ html.light .theme-toggle-icon-moon {
   filter: brightness(1.08);
 }
 
+.detail-provider-score-card__source {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+}
+
+.detail-provider-score-card__graph {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.125rem;
+  color: inherit;
+  text-align: left;
+}
+
+@media (min-width: 640px) {
+  .detail-provider-score-card__graph {
+    gap: 0.5rem;
+  }
+}
+
+.detail-provider-score-card__prompt {
+  display: none;
+}
+
 .clip-half {
   clip-path: inset(0 50% 0 0);
 }
@@ -1304,9 +1331,29 @@ html.light .theme-toggle-icon-moon {
   margin-bottom: 0;
 }
 
+.detail-progress-card-slot,
+.detail-personal-score-card,
+.detail-score-card-nav {
+  display: none;
+}
+
+/* Phones: the chip row scrolls inside itself instead of widening the page. */
+.detail-score-card-row {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.detail-score-card-row::-webkit-scrollbar {
+  display: none;
+}
+
 .detail-carousel-grid__synopsis {
   grid-area: synopsis;
   margin-top: 1.5rem;
+}
+
+.detail-promoted-content {
+  display: none;
 }
 
 @media (min-width: 768px) {
@@ -1317,7 +1364,8 @@ html.light .theme-toggle-icon-moon {
      hold a trailer/photos does the :has() rule below expand into the
      carousel's own two-row layout. */
   .detail-carousel-grid {
-    column-gap: 2.5rem;
+    column-gap: 1rem;
+    row-gap: 1rem;
     grid-template-columns: 250px minmax(0, 1fr);
     grid-template-areas: "poster header" "poster chips" "poster synopsis";
   }
@@ -1331,18 +1379,705 @@ html.light .theme-toggle-icon-moon {
      poster) instead of the pre-carousel column arrangement above. */
   .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) {
     grid-template-areas:
-      "poster carousel"
+      "poster preview"
+      "strip strip"
       "header header"
       "chips chips"
       "synopsis synopsis";
   }
 
-  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-grid__carousel {
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-grid__chips {
+    position: relative;
+    z-index: 3;
+    margin-top: 0;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-grid__header {
+    position: relative;
+    z-index: 4;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-promoted-content {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    gap: 1rem 2rem;
+    margin-bottom: 1.75rem;
+    padding-bottom: 1.25rem;
+    border-bottom: 1px solid var(--color-border);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-studios-heading {
+    margin-top: 0;
+  }
+
+  .detail-promoted-facts:not([hidden]) {
+    display: contents;
+  }
+
+  .detail-promoted-fact {
+    min-width: 0;
+    flex: 0 1 auto;
+    max-width: 24rem;
+  }
+
+  .detail-promoted-fact__label,
+  .detail-promoted-fact__value {
     display: block;
+    overflow-wrap: anywhere;
+  }
+
+  .detail-promoted-fact__label {
+    margin-bottom: 0.375rem;
+    color: var(--color-text-muted);
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+
+  .detail-promoted-fact__value {
+    color: var(--color-text-secondary);
+    font-size: 0.875rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-genres,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-fact--promoted,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-details:not(:has(.detail-sidebar-fact:not(.detail-sidebar-fact--promoted))) .detail-sidebar-details-heading,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-details-card:not(:has(.detail-sidebar-fact:not(.detail-sidebar-fact--promoted))) {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-grid__carousel {
+    display: contents;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) #detail-carousel-wrap,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-content {
+    display: contents;
+  }
+
+  .detail-carousel-preview {
+    grid-area: preview;
+    height: 375px;
+    min-height: 0;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-overview-logo) {
+    isolation: isolate;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-carousel-overview-logo) {
+    grid-template-areas:
+      "poster preview"
+      "strip strip"
+      "chips chips"
+      "synopsis synopsis";
+  }
+
+  main:has(.detail-carousel-overview-extension) {
+    overflow-x: clip;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-overview-logo) .detail-carousel-grid__poster {
+    position: relative;
+    z-index: 2;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header {
+    grid-area: preview;
+    z-index: 3;
+    align-self: end;
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 1.25rem;
+    pointer-events: none;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header > .min-w-0 {
+    display: block;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header > .min-w-0 > :not([id^="detail-activity-subtitle-slot"]) {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) [id^="detail-activity-subtitle-slot"] > div {
+    margin-bottom: 0;
+    color: white;
+    text-shadow: 0 1px 4px rgb(0 0 0 / 80%);
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header * {
+    pointer-events: auto;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header .shrink-0 {
+    margin: 0;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header .shrink-0 > div > .mt-4 {
+    margin-top: 0;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-carousel-overview-logo):has(.detail-carousel-preview--bounded) {
+    grid-template-areas:
+      "poster preview"
+      "strip strip"
+      "chips chips"
+      "synopsis synopsis";
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-overview-logo):has(.detail-carousel-preview--bounded) .detail-carousel-grid__header {
+    display: none;
+  }
+
+  .detail-carousel-preview--overview {
+    overflow: visible;
+    background: transparent;
+    z-index: 1;
+  }
+
+  .detail-carousel-preview--bounded {
+    overflow: visible;
+    border-radius: 0.75rem;
+    background: var(--color-surface);
+    z-index: 1;
+  }
+
+  .detail-carousel-preview--bounded > .detail-carousel-main-image,
+  .detail-carousel-preview--bounded > .detail-carousel-video-poster,
+  .detail-carousel-preview--bounded > iframe {
+    overflow: hidden;
+    border-radius: 0.75rem;
+    background: var(--color-surface);
+  }
+
+  /* The sharp image reaches one third into the poster; blur fills below it. */
+  .detail-carousel-preview--overview .detail-carousel-main-image--overview,
+  .detail-carousel-preview .detail-carousel-overview-extension {
+    position: absolute;
+    top: -3rem;
+    max-width: none !important;
+    object-fit: cover;
+    object-position: right top;
+    pointer-events: none;
+  }
+
+  .detail-carousel-preview--overview .detail-carousel-main-image--overview {
+    z-index: 1;
+    top: 50%;
+    transform: translateY(-50%);
+    left: calc(-83.333px - 1rem);
+    /* Keep the left edge fixed while centering the image on the preview. */
+    width: calc(100% + 166.666px + 2rem) !important;
+    height: auto !important;
+    object-fit: contain;
+    mask-image:
+      linear-gradient(to right, transparent, #000 5.2rem, #000 calc(100% - 14rem), transparent calc(100% - 4.2rem)),
+      linear-gradient(to bottom, transparent, #000 12%, #000 55%, rgb(0 0 0 / 92%) 65%, rgb(0 0 0 / 65%) 75%, rgb(0 0 0 / 30%) 86%, transparent 97%);
+    mask-composite: intersect;
+  }
+
+  .detail-carousel-preview .detail-carousel-overview-extension {
+    z-index: 0;
+    left: calc(-250px - 14rem);
+    width: calc(100% + 250px + 28rem) !important;
+    height: calc(100% + 3rem + 1rem + 5.875rem + 12rem) !important;
+    filter: blur(56px) brightness(0.9);
+    /* Fade out sideways well beyond the content column so wide screens show no hard edge. */
+    mask-image:
+      linear-gradient(to right, transparent, #000 10rem, #000 calc(100% - 10rem), transparent),
+      linear-gradient(to bottom, #000 60%, transparent 100%);
+    mask-composite: intersect;
+    opacity: var(--detail-blur-opacity, 1);
+    transition: opacity 500ms ease;
+  }
+
+  .detail-carousel-preview--bounded {
+    --detail-blur-opacity: 0.85;
+  }
+
+  .detail-carousel-preview .detail-carousel-overview-extension--outgoing {
+    transition: none;
+  }
+
+  .detail-carousel-preview .detail-carousel-overview-extension--outgoing.detail-carousel-overview-extension--active {
+    opacity: 0;
+    transition: opacity 500ms ease;
+  }
+
+  .detail-carousel-preview .detail-carousel-overview-extension--incoming {
+    opacity: 0;
+    transition: none;
+  }
+
+  .detail-carousel-preview .detail-carousel-overview-extension--incoming.detail-carousel-overview-extension--active {
+    opacity: var(--detail-blur-opacity, 1);
+    transition: opacity 500ms ease;
+  }
+
+  .detail-carousel-overview-logo {
+    position: absolute;
+    z-index: 2;
+    bottom: 8.25rem;
+    left: 1.25rem;
+    width: min(40%, 32rem);
+    max-height: 7rem;
+    object-fit: contain;
+    object-position: left center;
+    filter: drop-shadow(0 2px 8px rgb(0 0 0 / 70%));
+  }
+
+
+  .detail-carousel-strip-wrap {
+    grid-area: strip;
+    position: relative;
+    z-index: 2;
+    height: calc(375px / 4);
+    isolation: isolate;
+  }
+
+  .detail-carousel-strip {
+    --strip-fade-left: #000;
+    --strip-fade-right: #000;
+
+    height: 100%;
+    overflow-y: hidden;
+    padding-block: 0;
+    scroll-behavior: smooth;
+    mask-image: linear-gradient(to right, var(--strip-fade-left), #000 8rem, #000 calc(100% - 8rem), var(--strip-fade-right));
+  }
+
+  .detail-carousel-strip--fade-left {
+    --strip-fade-left: transparent;
+  }
+
+  .detail-carousel-strip--fade-right {
+    --strip-fade-right: transparent;
+  }
+
+  .detail-carousel-strip > button {
+    height: 100%;
+    width: auto;
+  }
+
+  .detail-carousel-overview-caption {
+    position: absolute;
+    right: 2px;
+    bottom: 2px;
+    left: 2px;
+    padding: 1rem 0.25rem 0.25rem;
+    border-radius: 0 0 0.25rem 0.25rem;
+    background: linear-gradient(to bottom, transparent, rgb(0 0 0 / 78%));
+  }
+
+  .detail-carousel-strip-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 100;
+    display: flex;
+    width: 2.25rem;
+    height: 2.25rem;
+    align-items: center;
+    justify-content: center;
+    transform: translateY(-50%);
+    border-radius: 9999px;
+    background: rgb(0 0 0 / 65%);
+    color: white;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: background-color 150ms ease;
+  }
+
+  .detail-carousel-strip-nav:hover {
+    background: rgb(0 0 0 / 85%);
+  }
+
+  .detail-carousel-strip-nav--left {
+    left: 0.5rem;
+  }
+
+  .detail-carousel-strip-nav--right {
+    right: 0.5rem;
   }
 
   .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-grid__header {
     margin-top: 1.5rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-score-card-shell {
+    --detail-card-height: calc(375px / 4);
+    --detail-card-width: calc(var(--detail-card-height) * 16 / 9);
+    --detail-card-gap: 0.5rem;
+
+    position: relative;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-score-card-row {
+    height: var(--detail-card-height);
+    flex-wrap: nowrap;
+    align-items: stretch;
+    gap: var(--detail-card-gap);
+    overflow-x: auto;
+    overflow-y: hidden;
+    margin: 0;
+    scrollbar-width: none;
+    scroll-behavior: smooth;
+  }
+
+  .detail-score-card-row::-webkit-scrollbar {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-progress-card-slot:has(.detail-progress-card) {
+    display: block;
+    flex: none;
+    width: calc(2 * var(--detail-card-width) + var(--detail-card-gap));
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-progress-card,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-personal-score-card {
+    height: var(--detail-card-height);
+    border: 1px solid var(--color-surface-border);
+    border-radius: 0.75rem;
+    background: var(--color-surface);
+    box-shadow: 0 4px 12px rgb(0 0 0 / 12%);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-progress-card {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: auto 1fr;
+    align-items: center;
+    gap: 0.5rem 1rem;
+    padding: 1rem;
+    border-color: rgb(16 185 129 / 26%);
+    background: rgb(16 185 129 / 10%);
+  }
+
+  .detail-progress-card__title {
+    grid-column: 1 / -1;
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--color-text);
+  }
+
+  .detail-progress-card__bar {
+    height: 0.5rem;
+    overflow: hidden;
+    border-radius: 9999px;
+    background: var(--color-surface-muted);
+  }
+
+  .detail-progress-card__bar > span {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: #10b981;
+  }
+
+  .detail-progress-card__value {
+    font-size: 1.125rem;
+    color: var(--color-text);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-score-card-row > .relative,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-score-card-row > a.detail-provider-score-card,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-score-card-row > [id^="detail-score-chip-slot"]:has(.detail-derived-score-card),
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-personal-score-slot {
+    flex: none;
+    width: var(--detail-card-width);
+    min-width: var(--detail-card-width);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card {
+    --detail-card-accent: 34 211 238;
+
+    display: grid;
+    width: 100%;
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    grid-template-rows: 1.5rem 1.25rem 0;
+    align-content: center;
+    gap: 0.125rem 0.625rem;
+    padding: 0.75rem;
+    text-align: left;
+    border-color: rgb(var(--detail-card-accent) / 26%);
+    background: rgb(var(--detail-card-accent) / 10%);
+    transition: grid-template-rows 180ms ease;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card.group:hover,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card.group:focus-within {
+    grid-template-rows: 1.5rem 1.25rem 1rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card--trakt {
+    --detail-card-accent: 251 113 133;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card--imdb {
+    --detail-card-accent: 251 191 36;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card--mal,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card--igdb {
+    --detail-card-accent: 129 140 248;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card--opencritic {
+    --detail-card-accent: 251 146 60;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card__source {
+    grid-column: 1;
+    grid-row: 1 / 4;
+    width: 2.25rem;
+    height: 2.25rem;
+    margin: 0;
+    justify-self: center;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card__graph {
+    grid-column: 2;
+    grid-row: 1 / 4;
+    display: grid;
+    grid-template-rows: 1.5rem 1.25rem 0;
+    align-content: center;
+    gap: 0.125rem;
+    width: 100%;
+    padding: 0;
+    transition: grid-template-rows 180ms ease;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card.group:hover .detail-provider-score-card__graph,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card.group:focus-within .detail-provider-score-card__graph {
+    grid-template-rows: 1.5rem 1.25rem 1rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card__score {
+    grid-row: 1;
+    font-size: 1.125rem;
+    line-height: 1.5rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card__separator {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card__count {
+    grid-row: 2;
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card__prompt {
+    grid-row: 3;
+    display: block;
+    overflow: hidden;
+    max-height: 0;
+    color: var(--color-text);
+    font-size: 0.65rem;
+    font-weight: 600;
+    white-space: nowrap;
+    opacity: 0;
+    transform: translateY(0.4rem);
+    transition: opacity 180ms ease, transform 180ms ease, max-height 180ms ease;
+    pointer-events: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card.group:hover .detail-provider-score-card__prompt,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card.group:focus-within .detail-provider-score-card__prompt {
+    max-height: 1rem;
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-derived-score-card {
+    display: grid;
+    width: 100%;
+    height: var(--detail-card-height);
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    grid-template-rows: 1.5rem 1.25rem;
+    align-content: center;
+    gap: 0.125rem 0.625rem;
+    padding: 0.75rem;
+    border: 1px solid rgb(251 191 36 / 26%);
+    border-radius: 0.75rem;
+    background: rgb(251 191 36 / 10%);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-derived-score-card > span:nth-of-type(2) {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    width: 2.25rem;
+    height: 2.25rem;
+    margin: 0;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-derived-score-card > span:nth-of-type(3) {
+    grid-column: 2;
+    grid-row: 1;
+    font-size: 1.125rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-derived-score-card > span:nth-of-type(4) {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-derived-score-card > span:last-child {
+    grid-column: 2;
+    grid-row: 2;
+    overflow: hidden;
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card > span:nth-of-type(2) {
+    grid-column: 1;
+    grid-row: 1 / 3;
+    width: 2.25rem;
+    height: 2.25rem;
+    margin: 0;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card > span:nth-of-type(3) {
+    grid-column: 2;
+    grid-row: 1;
+    font-size: 1.125rem;
+    line-height: 1.5rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card > span:nth-of-type(4):not(:last-child) {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-provider-score-card > span:last-child {
+    grid-column: 2;
+    grid-row: 2;
+    font-size: 0.75rem;
+    line-height: 1.25rem;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-personal-score-slot > button {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-personal-score-card {
+    display: flex;
+    width: 100%;
+    flex-direction: column;
+    justify-content: center;
+    gap: 0.4rem;
+    padding: 0.75rem;
+    border-color: rgb(251 191 36 / 26%);
+    background: rgb(251 191 36 / 10%);
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-personal-score-slot:has(.detail-personal-score-card--wide) {
+    width: calc(2 * var(--detail-card-width) + var(--detail-card-gap));
+  }
+
+  .detail-personal-score-card__prompt,
+  .detail-personal-score-card__meta {
+    overflow: hidden;
+    color: var(--color-text-secondary);
+    font-size: 0.75rem;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .detail-personal-score-card__prompt {
+    color: var(--color-text);
+    font-weight: 600;
+    font-size: 0.875rem;
+  }
+
+  .detail-personal-score-card__stars {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.125rem;
+  }
+
+  .detail-personal-score-card__star {
+    color: var(--color-text-muted);
+    cursor: pointer;
+  }
+
+  .detail-personal-score-card__star:hover,
+  .detail-personal-score-card__star--hover {
+    color: #facc15;
+  }
+
+  .detail-personal-score-card__rated {
+    display: grid;
+    width: 100%;
+    grid-template-columns: 2.25rem minmax(0, 1fr);
+    grid-template-rows: 1.5rem 1.25rem;
+    align-items: center;
+    gap: 0.125rem 0.625rem;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .detail-personal-score-card__icon {
+    display: flex;
+    width: 2.25rem;
+    height: 2.25rem;
+    grid-row: 1 / 3;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9999px;
+    background: rgb(245 158 11 / 18%);
+  }
+
+  .detail-personal-score-card__value {
+    color: var(--color-text);
+    font-size: 1.125rem;
+    font-weight: 600;
+  }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-score-card-nav {
+    position: absolute;
+    top: 50%;
+    z-index: 2;
+    display: flex;
+    width: 2.25rem;
+    height: 2.25rem;
+    align-items: center;
+    justify-content: center;
+    transform: translateY(-50%);
+    border-radius: 9999px;
+    background: rgb(0 0 0 / 75%);
+    color: white;
+    cursor: pointer;
+  }
+
+  .detail-score-card-nav--left { left: 0.5rem; }
+  .detail-score-card-nav--right { right: 0.5rem; }
+
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) .detail-activity-progress-text,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) .detail-activity-progress-separator,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) .detail-activity-duration-separator--progress-only,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) [id^="season-progress-desktop-"],
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) .detail-season-progress-date-separator,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) .detail-season-progress-history--no-dates,
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)):has(.detail-progress-card) .detail-season-progress-leading-separator:has(+ .detail-season-progress-history--no-dates) {
+    display: none;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1065px) {
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-overview-logo {
+    bottom: 9.75rem;
+  }
+
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header .shrink-0 > div > .mt-4,
+  .detail-carousel-grid:has(.detail-carousel-preview--overview) .detail-carousel-grid__header .shrink-0 > div > .mt-4 > .flex {
+    gap: 0.25rem;
   }
 }
 

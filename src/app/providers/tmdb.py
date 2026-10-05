@@ -1198,7 +1198,7 @@ def tv(media_id, language=None):
 
 def _carousel_cache_key(media_type, media_id, season_number=None):
     """Return the cache key for a media-details carousel payload."""
-    key = f"tmdb_carousel_{media_type}_{media_id}"
+    key = f"tmdb_carousel_v2_{media_type}_{media_id}"
     if season_number is not None:
         key += f"_s{season_number}"
     return key
@@ -1233,6 +1233,14 @@ def _parse_carousel_photos(response):
     ]
 
 
+def _parse_carousel_logos(response):
+    """Return usable TMDB logo paths, preferring English and language-neutral assets."""
+    logos = response.get("images", {}).get("logos", []) or []
+    usable = [logo for logo in logos if logo.get("file_path")]
+    usable.sort(key=lambda logo: {"en": 0, None: 1}.get(logo.get("iso_639_1"), 2))
+    return [logo["file_path"] for logo in usable]
+
+
 def peek_carousel_media(media_type, media_id, season_number=None):
     """Return the cached carousel payload, or None if nothing is cached yet.
 
@@ -1245,7 +1253,7 @@ def peek_carousel_media(media_type, media_id, season_number=None):
 
 
 def carousel_media(media_type, media_id, season_number=None, language=None):
-    """Return {"video": {...}|None, "photos": [...]} for the details carousel.
+    """Return media, logo, and backdrop data for the details carousel.
 
     Fetched lazily via its own request/cache entry, never folded into the
     movie/tv/season append_to_response calls (those are already close to
@@ -1293,13 +1301,15 @@ def carousel_media(media_type, media_id, season_number=None, language=None):
                     "season_number": season_number,
                 },
             )
-            data = {"video": None, "photos": []}
+            data = {"video": None, "photos": [], "logos": [], "backdrop_path": None}
             cache.set(cache_key, data, CAROUSEL_CACHE_TTL_ABSENT)
             return data
 
     data = {
         "video": _parse_carousel_video(response),
         "photos": _parse_carousel_photos(response),
+        "logos": _parse_carousel_logos(response),
+        "backdrop_path": response.get("backdrop_path"),
     }
     ttl = (
         CAROUSEL_CACHE_TTL_SUCCESS

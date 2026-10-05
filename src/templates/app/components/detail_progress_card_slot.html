@@ -1,0 +1,19 @@
+{% load i18n %}
+<div id="detail-progress-card-slot-{{ media_type }}-{{ media.media_id }}-{{ media.source }}"
+     class="detail-progress-card-slot"
+     {% if progress_card_slot_oob %}hx-swap-oob="outerHTML"{% endif %}>
+  {% if not public_view and current_instance and current_instance.progress_percentage is not None %}
+    <div class="detail-progress-card"
+         x-data="{ percent: {{ current_instance.progress_percentage }} }"
+         @detail-progress-updated.window="if ($event.detail.id === {{ current_instance.id }}) percent = Math.max(0, Math.min(100, Math.round($event.detail.completed / {{ current_instance.max_progress }} * 100)))"
+         role="progressbar"
+         aria-label="{% translate 'Your progress' %}"
+         aria-valuemin="0"
+         aria-valuemax="100"
+         :aria-valuenow="percent">
+      <span class="detail-progress-card__title">{% translate "Your Progress" %}</span>
+      <span class="detail-progress-card__bar" aria-hidden="true"><span :style="{ width: percent + '%' }"></span></span>
+      <strong class="detail-progress-card__value" x-text="percent + '%'">{{ current_instance.progress_percentage }}%</strong>
+    </div>
+  {% endif %}
+</div>
