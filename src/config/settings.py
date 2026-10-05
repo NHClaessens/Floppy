@@ -1401,6 +1401,10 @@ AUDIOBOOKSHELF_POLL_INTERVAL_MINUTES = config(
 
 TESTING = False
 
+# Drop-in music listen hooks. Empty means none load. See
+# docs/architecture/music-listen-hooks.md.
+MUSIC_HOOKS_DIR = config("MUSIC_HOOKS_DIR", default="")
+
 HEALTHCHECK_CELERY_PING_TIMEOUT = config(
     "HEALTHCHECK_CELERY_PING_TIMEOUT",
     default=1,
