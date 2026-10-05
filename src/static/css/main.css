@@ -7030,6 +7030,9 @@ html.light .theme-toggle-icon-moon {
   .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-studios-heading {
     margin-top: 0;
   }
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-genres:not(.detail-sidebar-genres--in-tooltip) ~ .detail-sidebar-studios .detail-sidebar-studios-heading {
+    margin-top: 1.5rem;
+  }
   .detail-promoted-facts:not([hidden]) {
     display: contents;
   }
@@ -7052,7 +7055,7 @@ html.light .theme-toggle-icon-moon {
     color: var(--color-text-secondary);
     font-size: 0.875rem;
   }
-  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-genres, .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-fact--promoted, .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-details:not(:has(.detail-sidebar-fact:not(.detail-sidebar-fact--promoted))) .detail-sidebar-details-heading, .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-details-card:not(:has(.detail-sidebar-fact:not(.detail-sidebar-fact--promoted))) {
+  .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-genres--in-tooltip, .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-fact--promoted, .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-details:not(:has(.detail-sidebar-fact:not(.detail-sidebar-fact--promoted))) .detail-sidebar-details-heading, .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) ~ #detail-secondary-content .detail-sidebar-details-card:not(:has(.detail-sidebar-fact:not(.detail-sidebar-fact--promoted))) {
     display: none;
   }
   .detail-carousel-grid:has(#detail-carousel-wrap:not(:empty)) .detail-carousel-grid__carousel {

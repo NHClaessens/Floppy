@@ -222,7 +222,7 @@
 
       {% if media.genres %}
         <div {% detail_section_attrs user detail_family "sidebar" "genres" %}
-             class="detail-sidebar-genres">
+             class="detail-sidebar-genres{% if not public_view|default:False %} detail-sidebar-genres--in-tooltip{% endif %}">
         {% url 'medialist' media_type=parent_media_type|default:media_type as genre_list_url %}
         <h2 class="text-xl font-bold mb-4 mt-6">{% translate "Genres" %}</h2>
         <div class="bg-[var(--color-surface)] p-4 rounded-lg text-center md:text-start">

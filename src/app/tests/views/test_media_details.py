@@ -632,6 +632,48 @@ class MediaDetailsViewTests(TestCase):
         self.assertLess(content.index("tmdb-logo.png"), content.index("Test overview"))
 
     @patch("app.providers.services.get_media_metadata")
+    def test_genres_move_to_tag_tooltip_only_when_viewer_has_one(
+        self, mock_get_metadata
+    ):
+        """The carousel layout hides the sidebar Genres card, so only a page
+        that also renders the tag tooltip (not a public view) may mark it hidden.
+        """
+        mock_get_metadata.return_value = {
+            "media_id": "238",
+            "title": "Test Movie",
+            "media_type": MediaTypes.MOVIE.value,
+            "source": Sources.TMDB.value,
+            "image": "http://example.com/image.jpg",
+            "synopsis": "Test overview",
+            "genres": ["Action", "Science Fiction"],
+            "details": {},
+            "related": {},
+        }
+        detail_url = reverse(
+            "media_details",
+            kwargs={
+                "source": Sources.TMDB.value,
+                "media_type": MediaTypes.MOVIE.value,
+                "media_id": "238",
+                "title": "test-movie",
+            },
+        )
+
+        response = self.client.get(detail_url, {"fragment": "secondary"})
+        self.assertContains(response, "detail-sidebar-genres--in-tooltip")
+        genre_section = response.context["detail_tag_sections"][0]
+        self.assertEqual(genre_section["title"], "Genres")
+        self.assertEqual(
+            [entry["label"] for entry in genre_section["entries"]],
+            ["Action", "Science Fiction"],
+        )
+
+        self.client.logout()
+        response = self.client.get(detail_url, {"fragment": "secondary"})
+        self.assertContains(response, "detail-sidebar-genres")
+        self.assertNotContains(response, "detail-sidebar-genres--in-tooltip")
+
+    @patch("app.providers.services.get_media_metadata")
     def test_comic_volume_issue_rows_render_shared_action_buttons(
         self, mock_get_metadata
     ):
