@@ -1613,3 +1613,61 @@ class CrossBucketAnimeNotificationTests(TestCase):
         self.assertFalse(
             any(event.id == self.anime_event.id for event in user_events),
         )
+
+
+class SeasonsDisabledNotificationTests(TestCase):
+    """Episode release notifications must not depend on the TV Seasons setting (#1438)."""
+
+    def setUp(self):
+        self.user = get_user_model().objects.create_user(
+            username="seasons-off-user",
+            password="12345",
+            notification_urls="https://example.com/notify",
+            tv_enabled=True,
+            season_enabled=False,
+        )
+        tv_item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.TV.value,
+            title="Test TV Show",
+            image="http://example.com/tv.jpg",
+        )
+        season_item = Item.objects.create(
+            media_id="1396",
+            source=Sources.TMDB.value,
+            media_type=MediaTypes.SEASON.value,
+            title="Test TV Show - Season 1",
+            season_number=1,
+            image="http://example.com/tv.jpg",
+        )
+        TV.objects.create(
+            item=tv_item,
+            user=self.user,
+            status=Status.IN_PROGRESS.value,
+        )
+        self.event = Event.objects.create(
+            item=season_item,
+            content_number=1,
+            datetime=timezone.now() - timedelta(minutes=10),
+            notification_sent=False,
+        )
+
+    def test_episode_event_included_when_seasons_disabled(self):
+        target_events = {(self.event.item.id, 1): self.event}
+
+        user_releases = get_user_releases([self.user], target_events)
+
+        self.assertEqual(
+            [event.id for event in user_releases.get(self.user.id, [])],
+            [self.event.id],
+        )
+
+    def test_episode_event_skipped_when_tv_disabled(self):
+        self.user.tv_enabled = False
+        self.user.save(update_fields=["tv_enabled"])
+        target_events = {(self.event.item.id, 1): self.event}
+
+        user_releases = get_user_releases([self.user], target_events)
+
+        self.assertNotIn(self.user.id, user_releases)

@@ -19,6 +19,12 @@ A stop with an unknown position still writes. A stop is a real end signal,
 and dropping it would lose In Progress tracking for a server that does not
 report its position. Only a *known* short stop is a skim.
 
+A row created by a stop or scrobble takes its **start date** from Now Playing
+(`live_playback.get_session_start`), the time the title was first seen
+playing, so a one-sitting watch keeps both dates (#1482). With no cached
+session (restart, expiry, or a scrobble that arrives cold) a new In Progress
+row starts at the stop time and a Completed one has no start date.
+
 ## Why
 
 - **Bunny Ears TV** (`82e424f2`): pseudo-live-TV apps in activity-only mode

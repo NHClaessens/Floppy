@@ -272,6 +272,11 @@ class PlexWebhookProcessor(BaseWebhookProcessor):
             return MediaTypes.MOVIE.value
         return None
 
+    def _playback_rating_key(self, payload):
+        metadata = payload.get("Metadata") or {}
+        raw_rk = metadata.get("ratingKey") or metadata.get("ratingkey") or ""
+        return str(raw_rk).strip() or None
+
     def _update_live_playback_state(
         self,
         payload,

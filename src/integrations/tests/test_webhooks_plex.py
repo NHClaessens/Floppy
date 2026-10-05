@@ -460,6 +460,55 @@ class PlexWebhookTests(TestCase):
         self.assertIsNotNone(stopped_state)
         self.assertEqual(stopped_state["status"], live_playback.PLAYBACK_STATUS_STOPPED)
 
+    def test_movie_scrobble_uses_play_time_as_start_date(self):
+        """A one-sitting watch records when Play arrived as its start (#1482)."""
+        metadata = {
+            "type": "movie",
+            "title": "The Matrix",
+            "ratingKey": "rk-movie-1",
+            "duration": 8100000,
+            "viewOffset": 30000,
+            "Guid": [{"id": "tmdb://603"}],
+        }
+        base = {"Account": {"title": "testuser"}, "Metadata": metadata}
+
+        self._post_payload({**base, "event": "media.play"})
+        state = cache.get(live_playback._cache_key(self.user.id))
+        started = timezone.now().replace(second=0, microsecond=0) - timedelta(
+            minutes=135,
+        )
+        state["started_at_ts"] = int(started.timestamp())
+        live_playback.set_user_playback_state(self.user.id, state)
+
+        response = self._post_payload({**base, "event": "media.scrobble"})
+
+        self.assertEqual(response.status_code, 200)
+        movie = Movie.objects.get(item__media_id="603", user=self.user)
+        self.assertEqual(movie.status, Status.COMPLETED.value)
+        self.assertEqual(movie.start_date, started)
+        self.assertGreater(movie.end_date, movie.start_date)
+
+    def test_movie_scrobble_with_cold_cache_does_not_invent_a_start_date(self):
+        """No earlier Play (e.g. after a restart) leaves the start date unset."""
+        payload = {
+            "event": "media.scrobble",
+            "Account": {"title": "testuser"},
+            "Metadata": {
+                "type": "movie",
+                "title": "The Matrix",
+                "ratingKey": "rk-movie-1",
+                "duration": 8100000,
+                "Guid": [{"id": "tmdb://603"}],
+            },
+        }
+
+        response = self._post_payload(payload)
+
+        self.assertEqual(response.status_code, 200)
+        movie = Movie.objects.get(item__media_id="603", user=self.user)
+        self.assertEqual(movie.status, Status.COMPLETED.value)
+        self.assertIsNone(movie.start_date)
+
     def test_short_stop_only_applies_during_the_first_minute_of_playback(self):
         """A stop with viewOffset < 60s never creates an in-progress row."""
         play_payload = {

@@ -9,6 +9,7 @@ from django.utils import timezone
 
 import app
 from app import fork_services_play_dedupe as play_dedupe
+from app import live_playback
 from app.log_safety import exception_summary
 from app.models import MediaTypes, ProviderMetadataStatus, Sources, Status
 from app.providers import tvmaze
@@ -104,6 +105,10 @@ class BaseWebhookProcessor:
         stamped with the push time, so the play-time dedupe cannot catch it.
         """
         return False
+
+    def _playback_rating_key(self, _payload):
+        """Return the server's own item key, as stored in Now Playing state."""
+        return
 
     def _should_record(self, event, *, played, position_seconds):
         """Check this integration's write policy before touching tracking rows.
@@ -1438,15 +1443,28 @@ class BaseWebhookProcessor:
             microsecond=0,
         )
 
+        # Play never writes, so the row is created at stop/scrobble. Now Playing
+        # saw the play start; use that as the start date (#1482).
+        started_at = live_playback.get_session_start(
+            user.id,
+            playback_media_type=MediaTypes.MOVIE.value,
+            media_id=media_id,
+            rating_key=self._playback_rating_key(payload),
+        )
+        if started_at is None or started_at > now:
+            started_at = None
+
         if current_instance and current_instance.status != Status.COMPLETED.value:
             current_instance.progress = progress
 
             if movie_played:
                 current_instance.end_date = now
                 current_instance.status = Status.COMPLETED.value
+                if not current_instance.start_date:
+                    current_instance.start_date = started_at
 
             elif current_instance.status != Status.IN_PROGRESS.value:
-                current_instance.start_date = now
+                current_instance.start_date = started_at or now
                 current_instance.status = Status.IN_PROGRESS.value
 
             if self.SOURCE_LABEL and not current_instance.entry_source:
@@ -1495,7 +1513,7 @@ class BaseWebhookProcessor:
                     status=Status.COMPLETED.value
                     if movie_played
                     else Status.IN_PROGRESS.value,
-                    start_date=now if not movie_played else None,
+                    start_date=started_at or (now if not movie_played else None),
                     end_date=now if movie_played else None,
                     entry_source=self.SOURCE_LABEL,
                 )

@@ -207,6 +207,10 @@ class JellyfinWebhookProcessor(BaseWebhookProcessor):
         played = user_data.get("Played")
         return played if isinstance(played, bool) else False
 
+    def _playback_rating_key(self, payload):
+        item = payload.get("Item") or {}
+        return str(item.get("Id") or "").strip() or None
+
     def _is_unplayed(self, payload):
         return payload["Event"] == "MarkUnplayed"
 

@@ -150,6 +150,10 @@ class EmbyWebhookProcessor(BaseWebhookProcessor):
             return MediaTypes.MOVIE.value
         return None
 
+    def _playback_rating_key(self, payload):
+        item = payload.get("Item") or {}
+        return str(item.get("Id") or "").strip() or None
+
     def _update_live_playback_state(
         self,
         payload,
