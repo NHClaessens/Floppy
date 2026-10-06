@@ -3112,7 +3112,7 @@ def integration_token_context(user):
     return {
         "integration_tokens": list(
             IntegrationToken.objects.filter(
-                user=user, revoked_at__isnull=True
+                user=user, client_identifier="", revoked_at__isnull=True
             ).order_by("-created_at"),
         ),
         "integration_scope_choices": [
