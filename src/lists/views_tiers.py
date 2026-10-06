@@ -1,12 +1,13 @@
-"""Endpoints behind the Tiers view: move an item between tiers, edit the tiers."""
+"""Endpoints behind the Tiers view: move an item, edit the tiers, export the board."""
 
 import json
 
 from django.contrib.auth.decorators import login_required
 from django.db import transaction
-from django.http import HttpResponse, JsonResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404
-from django.views.decorators.http import require_POST
+from django.utils.text import slugify
+from django.views.decorators.http import require_GET, require_POST
 
 from lists.models import CustomList, CustomListItem
 from lists.tiers import clean_tiers, resolve_tiers
@@ -70,3 +71,19 @@ def save_tiers(request, list_id):
             tier__in=[entry["id"] for entry in tiers],
         ).update(tier="")
     return JsonResponse({"tiers": tiers})
+
+
+@require_GET
+def export_tiers(request, list_id):
+    """Download the tier board as a PNG; anyone who can view the list can."""
+    custom_list = get_object_or_404(CustomList, id=list_id)
+    if custom_list.is_smart or not custom_list.user_can_view(request.user):
+        raise Http404
+    # Imported here so serving other requests does not load Pillow.
+    from lists.tier_export import render_board
+
+    response = HttpResponse(render_board(custom_list), content_type="image/png")
+    filename = f"{slugify(custom_list.name) or 'list'}-tiers.png"
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    response["Cache-Control"] = "private, no-store"
+    return response
