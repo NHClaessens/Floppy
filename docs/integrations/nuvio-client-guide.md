@@ -1,7 +1,8 @@
 # Floppy tracking client guide
 
-What a third-party client (Nuvio TV, Nuvio Mobile, Kodi, a scrobbler) needs to
-implement two-way tracking against Floppy, without reading Floppy's source.
+What a third-party client (Kodi, a scrobbler, or a Nuvio client, should Nuvio
+ever ship one) needs to implement two-way tracking against Floppy, without
+reading Floppy's source.
 
 The runnable half of this document is
 `src/api/tests/test_nuvio_conformance.py`. Every numbered step below has a test
@@ -160,7 +161,12 @@ erase" as one action.
 
 ## NuvioTV's Floppy tracker
 
-NuvioTV (Settings, Trackers, Floppy) is a scrobble-only client of this API. The
+**Status: not released.** Nuvio does not officially support Floppy. This is an
+unmerged proposal ([NuvioMedia/NuvioTV#3811](https://github.com/NuvioMedia/NuvioTV/pull/3811))
+awaiting maintainer approval ([#2935](https://github.com/NuvioMedia/NuvioTV/issues/2935))
+and device testing. Nuvio Mobile has no Floppy client.
+
+The proposed NuvioTV tracker (Settings, Trackers, Floppy) is scrobble-only. The
 user enters their server address and the app token; NuvioTV checks it with
 `GET /api/v1/sync/connections/` and sends playback to `POST /api/v1/scrobble/`.
 
@@ -179,7 +185,7 @@ anime. An event with none of them, an episode with no season and episode number,
 or an episode numbered by TVDB order is not sent, because Floppy never matches by
 title.
 
-What it does not do yet: send a resume position (it has no seconds to send),
+What it does not do: send a resume position (it has no seconds to send),
 read history or lists back, or send ratings. The Nuvio and Floppy sides of those
 are separate changes.
 
@@ -234,7 +240,7 @@ the suite end to end.
 
 | Floppy revision | Client revision | Result | Date |
 |---|---|---|---|
-| `efbb545` | dannyvfilms/NuvioTV `13f4bb3` (unmerged fork branch) | Scrobble only. Client code ran against a live Floppy (connection check, start, early stop, finished stop) and the JVM unit tests pass. Not `verified`: the Android build was not compiled and nothing ran on a device. | 2026-10-01 |
+| `efbb545` | dannyvfilms/NuvioTV `13f4bb3` (unmerged fork branch, proposed upstream as NuvioTV#3811) | Scrobble only. Client code ran against a live Floppy (connection check, start, early stop, finished stop) and the JVM unit tests pass. Not `verified`: the Android build was not compiled and nothing ran on a device. | 2026-10-01 |
 
 ### Nuvio Mobile — https://github.com/NuvioMedia/NuvioMobile
 

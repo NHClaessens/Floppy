@@ -257,6 +257,11 @@ urlpatterns = [
         name="api_discover",
     ),
     re_path(
+        r"^recommendations/?$",
+        fork_views_discover.RecommendationsView.as_view(),
+        name="api_recommendations",
+    ),
+    re_path(
         r"^discover/refresh/?$",
         fork_views_discover.DiscoverRefreshView.as_view(),
         name="api_discover_refresh",

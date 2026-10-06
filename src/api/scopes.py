@@ -73,6 +73,7 @@ VIEW_SCOPES: dict[str, dict[str, str]] = {
     "api.fork_views_discover.CollectionStatusView": {"GET": _R},
     "api.fork_views_discover.CollectionSeasonView": {"DELETE": _W},
     "api.fork_views_discover.DiscoverRowsView": {"GET": "catalog:read"},
+    "api.fork_views_discover.RecommendationsView": {"GET": "catalog:read"},
     "api.fork_views_discover.DiscoverRefreshView": {"POST": "catalog:write"},
     "api.fork_views_discover.DiscoverHiddenView": {
         "GET": "catalog:read",

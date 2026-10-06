@@ -363,3 +363,30 @@ class ListenBrainzTokenSerializer(serializers.Serializer):
     message = serializers.CharField()
     valid = serializers.BooleanField()
     user_name = serializers.CharField()
+
+
+class RecommendationSerializer(serializers.Serializer):
+    """One recommended title for an external client."""
+
+    media_type = serializers.CharField()
+    source = serializers.CharField(help_text="Provider the media_id belongs to.")
+    media_id = serializers.CharField()
+    title = serializers.CharField()
+    release_date = serializers.CharField(allow_null=True)
+    genres = serializers.ListField(child=serializers.CharField())
+    rating = serializers.FloatField(allow_null=True)
+    image = serializers.CharField(allow_null=True)
+    ids = serializers.DictField(
+        child=serializers.CharField(),
+        help_text=(
+            "Provider ids as strings, using the keys `tmdb`, `imdb` and `tvdb`. "
+            "A key is absent when Floppy could not resolve that id."
+        ),
+    )
+
+
+class RecommendationsEnvelopeSerializer(serializers.Serializer):
+    """Paginated recommendations."""
+
+    pagination = PaginationSerializer()
+    results = RecommendationSerializer(many=True)
