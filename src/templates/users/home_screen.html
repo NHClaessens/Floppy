@@ -33,7 +33,7 @@
                 {% include "app/icons/drag-handle.svg" with classes="h-4 w-4" %}
               </button>
               <button type="button"
-                      class="flex flex-1 items-center gap-3 text-left cursor-pointer"
+                      class="flex min-w-0 flex-1 items-center gap-3 text-left cursor-pointer"
                       style="min-height: 2.75rem"
                       @click="section.expanded = !section.expanded; ensureFilterFields(section)">
                 <div class="flex h-5 w-5 shrink-0 items-center justify-center text-[var(--color-text-secondary)]"

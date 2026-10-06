@@ -1082,6 +1082,8 @@ html.light .theme-toggle-icon-moon {
 /* Modal max height with padding from viewport */
 .modal-max-height {
   max-height: calc(100vh - 4rem);
+  /* iOS Safari counts vh with the toolbar hidden; dvh follows the visible height. */
+  max-height: calc(100dvh - 4rem);
 }
 
 /* Custom date/time picker: trigger + popover/sheet */

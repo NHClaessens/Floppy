@@ -534,7 +534,7 @@
                                 @click="isOpen = !isOpen"
                                 @click.away="isOpen = false"
                                 class="flex items-center justify-between shrink-0 px-3 sm:px-4 py-2 text-sm text-[var(--color-text-secondary)] bg-[var(--color-panel)] rounded-r-md focus:outline-none focus:ring-2 focus:ring-(--color-accent) focus:ring-inset hover:bg-[var(--color-surface)] transition-colors duration-200 cursor-pointer">
-                          <span class="whitespace-nowrap" x-text="selectedType.display"></span>
+                          <span class="whitespace-nowrap max-[24rem]:sr-only" x-text="selectedType.display"></span>
                           {% include "app/icons/chevron-down.svg" with classes="w-4 h-4 ml-2" %}
 
                         </button>

@@ -221,7 +221,7 @@
       </button>
     </template>
     <template x-if="lightboxOpen && mode === 'video' && videoPlaying">
-      <iframe class="w-full h-full max-w-5xl max-h-[80vh]"
+      <iframe class="w-full h-full max-w-5xl max-h-[80dvh]"
               :src="'https://www.youtube.com/embed/' + items[selected].key + '?autoplay=1'"
               title="{% translate "Trailer" %}"
               frameborder="0"

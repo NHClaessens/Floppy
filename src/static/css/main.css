@@ -891,14 +891,14 @@
   .max-h-\[70svh\] {
     max-height: 70svh;
   }
-  .max-h-\[80vh\] {
-    max-height: 80vh;
+  .max-h-\[80dvh\] {
+    max-height: 80dvh;
   }
   .max-h-\[85dvh\] {
     max-height: 85dvh;
   }
-  .max-h-\[90vh\] {
-    max-height: 90vh;
+  .max-h-\[90dvh\] {
+    max-height: 90dvh;
   }
   .max-h-\[200px\] {
     max-height: 200px;
@@ -4703,6 +4703,24 @@
       }
     }
   }
+  .max-\[24rem\]\:sr-only {
+    @media (width < 24rem) {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border-width: 0;
+    }
+  }
+  .max-\[24rem\]\:hidden {
+    @media (width < 24rem) {
+      display: none;
+    }
+  }
   .sm\:inset-x-auto {
     @media (width >= 40rem) {
       inset-inline: auto;
@@ -6835,6 +6853,7 @@ html.light .theme-toggle-icon-moon {
 }
 .modal-max-height {
   max-height: calc(100vh - 4rem);
+  max-height: calc(100dvh - 4rem);
 }
 .date-picker-closed-row {
   display: block;
