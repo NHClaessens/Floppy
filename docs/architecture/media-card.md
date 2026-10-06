@@ -51,6 +51,7 @@ and untracked items keep the plain read-only rating. `update_media_score` return
 | `library`, `collection`, `related`, `seasons`, `list_recommendations` | Nothing | |
 | `home` | Next-event chip and subtitle | Upcoming shelves lead with the next release |
 | `list` | S01E02 subtitle on episodes | A list can hold single episodes |
+| `tier` | No status chip, no hover actions, no release-year placeholder | A tile on a list's tier board: the board owns clicks and drags |
 | `search` | No release-year placeholder | Provider results are not saved items |
 | `search_modal` | Click previews, no hover actions, darker surface | Picking an item inside a modal |
 | `discover` | No status chip, Discover hover actions | Candidates are untracked by definition |

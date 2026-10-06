@@ -181,6 +181,11 @@ class CustomList(models.Model):
         default=dict,
         help_text="Saved filter criteria for smart lists.",
     )
+    tiers = models.JSONField(
+        blank=True,
+        default=list,
+        help_text="Tier names and colours for the Tiers view; empty uses the defaults.",
+    )
 
     objects = CustomListManager()
 
@@ -1249,6 +1254,12 @@ class CustomListItem(models.Model):
         help_text="The user who added this item to the list",
     )
     date_added = models.DateTimeField(auto_now_add=True)
+    tier = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="Id of the tier this item is placed in; blank means Unranked.",
+    )
 
     objects = CustomListItemManager()
 

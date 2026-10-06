@@ -17,6 +17,7 @@ from django.db.models import (
     BigIntegerField,
     Case,
     CharField,
+    Count,
     ExpressionWrapper,
     F,
     IntegerField,
@@ -154,6 +155,49 @@ def _list_added(ctx: TypeContext, seed: int):
     )
 
 
+# Room for a list's positions below each tier rank in the ``list_tier`` value.
+LIST_TIER_SPAN = 1_000_000
+
+
+def _list_tier(ctx: TypeContext, seed: int):
+    """Order by the item's tier in ``sort_list_id``, then its place in that tier.
+
+    Tiers follow the list's tier order; Unranked comes last. Within a tier the
+    list's own order (``date_added``, then id) applies, as in the custom sort.
+    """
+    from lists.models import CustomList, CustomListItem
+    from lists.tiers import resolve_tiers
+
+    if ctx.sort_list_id is None:
+        return None
+    custom_list = CustomList.objects.filter(pk=ctx.sort_list_id).first()
+    tier_ids = [tier["id"] for tier in resolve_tiers(custom_list)] if custom_list else []
+    members = CustomListItem.objects.filter(custom_list_id=ctx.sort_list_id)
+    earlier = (
+        members.filter(
+            Q(date_added__lt=OuterRef("date_added"))
+            | Q(date_added=OuterRef("date_added"), id__lt=OuterRef("id")),
+        )
+        .order_by()
+        .values("custom_list_id")
+        .annotate(n=Count("id"))
+        .values("n")
+    )
+    mine = members.filter(item_id=OuterRef("pk")).annotate(
+        place=Coalesce(Subquery(earlier), Value(0)),
+    )
+    tier = Subquery(mine.values("tier")[:1])
+    rank = Case(
+        *[When(Exact(tier, tier_id), then=Value(index)) for index, tier_id in enumerate(tier_ids)],
+        default=Value(len(tier_ids)),
+        output_field=IntegerField(),
+    )
+    return ExpressionWrapper(
+        rank * Value(LIST_TIER_SPAN) + Subquery(mine.values("place")[:1]),
+        output_field=BigIntegerField(),
+    )
+
+
 # Workflow order: what is planned, then under way, then done or set aside.
 STATUS_RANK = (
     Status.PLANNING.value,
@@ -282,6 +326,7 @@ SORTS: tuple[SortDef, ...] = (
     SortDef(("progress", "plays"), sql=_tracker_aggregate("progress"), tracker=True),
     SortDef(("random",), sql=_random_sql),
     SortDef(("list_added",), sql=_list_added),
+    SortDef(("list_tier",), sql=_list_tier),
     SortDef(("status",), sql=_status_rank, tracker=True),
     SortDef(("platform",), sql=_platform),
     # The rest are computed in Python from the hydrated candidate.

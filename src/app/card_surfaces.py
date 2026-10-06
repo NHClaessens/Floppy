@@ -34,6 +34,13 @@ SURFACES = {
     "home": CardSurface(show_next_event_chip=True, show_next_event_subtitle=True),
     # A list can hold single episodes; S01E02 says which one.
     "list": CardSurface(show_episode_identity=True),
+    # A tile on a tier board: the board owns clicks and drags, so no hover
+    # actions, and no status chip or release year to load for a small poster.
+    "tier": CardSurface(
+        show_status_chip=False,
+        show_release_year_placeholder=False,
+        hover_action_mode="none",
+    ),
     # Provider results are not saved items, so there is no release year to load.
     "search": CardSurface(show_release_year_placeholder=False),
     # Picking an item inside a modal: a click previews it, no hover actions.

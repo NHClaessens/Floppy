@@ -345,7 +345,7 @@
       return this.statuses.length + '{{ media_i18n_75|escapejs }}';
     },
     defaultDirection(value) {
-      return ['title', 'media_type', 'release_date', 'start_date'].includes(value) ? 'asc' : 'desc';
+      return ['title', 'media_type', 'release_date', 'start_date', 'tier'].includes(value) ? 'asc' : 'desc';
     },
     setSort(value) {
       if (value === 'custom') {
@@ -509,6 +509,7 @@
 
           {# Sort by #}
           <div class="relative filter-control"
+               x-show="layout !== 'tiers'"
                x-data="{ sortOpen: false, orderOpen: false }"
                @click.outside="sortOpen = false; orderOpen = false">
             <button class="h-10 flex items-center gap-2 px-4 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 transition-colors cursor-pointer"
@@ -621,6 +622,17 @@
                       type="button">
                 {% include "app/icons/table.svg" with classes="w-5 h-5" %}
               </button>
+              <button hx-get="{% url 'list_detail' custom_list.public_reference %}"
+                      hx-target="#items-view"
+                      hx-include="#filter-form"
+                      hx-indicator="#loading-indicator"
+                      class="p-2 cursor-pointer"
+                      :class="layout === 'tiers' ? 'bg-indigo-600 text-white' : 'bg-[var(--color-surface-strong)] hover:bg-[var(--color-surface-hover)]'"
+                      title="{% translate "Tier View" %}"
+                      @click="layout = 'tiers'"
+                      type="button">
+                {% include "app/icons/list.svg" with classes="w-5 h-5" %}
+              </button>
             </div>
           </div>
         </div>
@@ -636,6 +648,8 @@
       {% if items %}
         {% if current_layout == 'table' %}
           {% include "lists/components/list_table.html" %}
+        {% elif current_layout == 'tiers' %}
+          {% include "lists/components/tier_board.html" %}
         {% else %}
           {% include "lists/components/media_grid.html" %}
         {% endif %}
@@ -724,6 +738,7 @@
 
 {% block js %}
   {% if form %}{{ form.media.js }}{% endif %}
+  <script src="{% static 'js/listTiers.js' %}{% get_static_file_mtime 'js/listTiers.js' %}"></script>
 
   <script>
     window.addEventListener('pageshow', (event) => {

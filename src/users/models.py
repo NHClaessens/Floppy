@@ -167,6 +167,14 @@ class LayoutChoices(models.TextChoices):
     TABLE = "table", _("Table")
 
 
+class ListDetailLayoutChoices(models.TextChoices):
+    """Choices for the list page layout: the media list layouts plus Tiers."""
+
+    GRID = "grid", _("Grid")
+    TABLE = "table", _("Table")
+    TIERS = "tiers", _("Tiers")
+
+
 class CalendarLayoutChoices(models.TextChoices):
     """Choices for calendar layout options."""
 
@@ -198,6 +206,7 @@ class ListDetailSortChoices(models.TextChoices):
     START_DATE = "start_date", _("Start Date")
     END_DATE = "end_date", _("End Date")
     PLATFORM = "platform", _("Platform")
+    TIER = "tier", _("Tier")
 
 
 class DateFormatChoices(models.TextChoices):
@@ -987,8 +996,8 @@ class User(AbstractUser):
     )
     list_detail_layout = models.CharField(
         max_length=20,
-        default=LayoutChoices.GRID,
-        choices=LayoutChoices,
+        default=ListDetailLayoutChoices.GRID,
+        choices=ListDetailLayoutChoices,
     )
 
     # Notification settings
@@ -1645,7 +1654,7 @@ class User(AbstractUser):
             ),
             models.CheckConstraint(
                 name="list_detail_layout_valid",
-                condition=models.Q(list_detail_layout__in=LayoutChoices.values),
+                condition=models.Q(list_detail_layout__in=ListDetailLayoutChoices.values),
             ),
             models.CheckConstraint(
                 name="music_layout_valid",

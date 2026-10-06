@@ -53,7 +53,12 @@ def _smart_list_detail_response(
     media_user,
 ):
     """Render smart-list detail page and HTMX partial responses."""
-    valid_sorts = [choice[0] for choice in ListDetailSortChoices.choices]
+    # A smart list's items are computed, so they have no tiers to sort by.
+    valid_sorts = [
+        choice[0]
+        for choice in ListDetailSortChoices.choices
+        if choice[0] != ListDetailSortChoices.TIER
+    ]
     saved_sort = (custom_list.smart_filters or {}).get(
         "sort"
     ) or ListDetailSortChoices.DATE_ADDED
@@ -236,8 +241,11 @@ def _smart_list_detail_response(
         (
             choice
             for choice in ListDetailSortChoices.choices
-            if choice[0] != ListDetailSortChoices.PLATFORM
-            or current_media_type == MediaTypes.GAME.value
+            if choice[0] != ListDetailSortChoices.TIER
+            and (
+                choice[0] != ListDetailSortChoices.PLATFORM
+                or current_media_type == MediaTypes.GAME.value
+            )
         ),
         key=lambda x: x[1],
     )

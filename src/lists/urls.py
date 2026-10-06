@@ -8,6 +8,7 @@ from lists import (
     views_list_browse,
     views_mdblist,
     views_recommendations,
+    views_tiers,
     views_trakt,
 )
 
@@ -76,6 +77,16 @@ urlpatterns = [
         "list/<int:list_id>/reorder-all",
         views_add_reorder.reorder_list_items_all,
         name="list_reorder_all",
+    ),
+    path(
+        "list/<int:list_id>/tiers/move",
+        views_tiers.move_tier_item,
+        name="list_tier_move",
+    ),
+    path(
+        "list/<int:list_id>/tiers/save",
+        views_tiers.save_tiers,
+        name="list_tier_save",
     ),
     path(
         "list/<int:list_id>/add",

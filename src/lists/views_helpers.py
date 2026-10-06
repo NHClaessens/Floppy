@@ -61,6 +61,7 @@ ASCENDING_LIST_SORTS = {
     ListDetailSortChoices.RELEASE_DATE,
     ListDetailSortChoices.START_DATE,
     ListDetailSortChoices.PLATFORM,
+    ListDetailSortChoices.TIER,
 }
 
 
@@ -649,6 +650,7 @@ LIST_SORT_KEYS = {
     ListDetailSortChoices.START_DATE: "start_date",
     ListDetailSortChoices.END_DATE: "end_date",
     ListDetailSortChoices.PLATFORM: "platform",
+    ListDetailSortChoices.TIER: "list_tier",
 }
 
 
@@ -708,6 +710,33 @@ def paginate_list_items(
     items_page.object_list = items
     _attach_media_with_aggregation(items_page, media_user)
     return items_page, total
+
+
+def build_tier_columns(custom_list, items):
+    """Group one page of list items by tier.
+
+    Returns ``(columns, unranked)``: one ``{"tier", "items"}`` per tier in the
+    list's tier order, then the items with no (or an unknown) tier. Each group
+    keeps the order of ``items``.
+    """
+    from lists.tiers import ink_for, resolve_tiers
+
+    tier_by_item = dict(
+        CustomListItem.objects.filter(
+            custom_list=custom_list,
+            item_id__in=[item.pk for item in items],
+        ).values_list("item_id", "tier"),
+    )
+    columns = [
+        {"tier": {**tier, "ink": ink_for(tier["color"])}, "items": []}
+        for tier in resolve_tiers(custom_list)
+    ]
+    column_by_id = {column["tier"]["id"]: column for column in columns}
+    unranked = []
+    for item in items:
+        column = column_by_id.get(tier_by_item.get(item.pk, ""))
+        (column["items"] if column else unranked).append(item)
+    return columns, unranked
 
 
 def _attach_media_with_aggregation(item_list, media_user):
