@@ -8,6 +8,7 @@ from django.utils import timezone
 import events
 from app import backfill_queue, cache_safety, history_cache, statistics_sync
 from app.mixins import disable_fetch_releases
+from app.providers import credentials
 from integrations import connection_health, import_progress
 from integrations.imports import (
     anilist,
@@ -123,6 +124,9 @@ def import_media(
             import_progress.tracking(task_id, import_run.id),
             backfill_queue.defer_backfill_publication(),
             statistics_sync.coalesce_import_changes(user_id) as statistics_changes,
+            # A Celery task runs no middleware, so without this the importer
+            # would not see the user's personal provider keys (#1488).
+            credentials.current_user_scope(user),
         ):
             if oauth_username is None:
                 imported_counts, warnings = importer_func(
