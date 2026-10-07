@@ -10,6 +10,14 @@
   overflow-y: auto;
 }
 
+[data-home-section-list] .sortable-ghost {
+  opacity: 0.4;
+}
+
+[data-home-section-list] .sortable-chosen {
+  outline: 1px solid var(--color-surface-hover);
+}
+
 @media (max-width: 63.999rem) {
   .home-settings-row-body {
     height: auto;
