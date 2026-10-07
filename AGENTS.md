@@ -300,6 +300,7 @@ Models/migrations and divergent UI normally require manual adaptation. Provider 
 - `docs/agents/domain_model.md`: generated vocabulary guide; regenerate and check it with the commands under Local Commands.
 - `docs/agents/media_type_integration.md`: playbook for adding new media types safely.
 - `docs/agents/music_integration.md`: music-specific data model and UI integration notes.
+- `docs/agents/psn_integration.md`: how a PSN sync turns lifetime playtime into dated game entries (remembered totals, Sessions vs Repeats, the setup choice).
 - `docs/agents/pocketcasts_workflow.md`: Pocket Casts import/schedule workflow details.
 - `docs/agents/clz_import.md`: the CLZ importer's header-mapped contract and the shared custom-field resolution layer it sits on.
 - `docs/agents/migration_sync_playbook.md`: hard-gate flow for adapting accepted upstream migration outcomes to Floppy's current graph.

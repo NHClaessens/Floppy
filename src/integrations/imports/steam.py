@@ -96,6 +96,11 @@ class SteamImporter:
             media_type: len(media_list)
             for media_type, media_list in self.bulk_media.items()
         }
+        # Updates are reported too: a sync that only raised hours otherwise
+        # reads as "No media was imported" and skips the cache refresh that
+        # makes the new hours show up in History and Statistics.
+        imported_counts["created"] = len(self.bulk_media[MediaTypes.GAME.value])
+        imported_counts["updated"] = len(self.to_update)
 
         logger.info(
             "Steam import completed for user %s: %s",
