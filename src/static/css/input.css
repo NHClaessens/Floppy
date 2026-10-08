@@ -1388,6 +1388,252 @@ html.light .theme-toggle-icon-moon {
   display: none;
 }
 
+/* Phone header (below md). Two shapes:
+   - Compact, the default: poster at 40% of the width with title, year and
+     runtime beside it; chips and actions follow, then the synopsis.
+   - Backdrop, once the carousel fragment brings a hero (.detail-mobile-hero):
+     no poster; the clear logo (or the title as text) sits on the vertical 50%
+     line, where the sharp backdrop fades into the same blurred extension the
+     desktop overview uses. Movies and TV reserve this shape up front
+     (.detail-hero-pending) so the page does not jump when the art arrives.
+   Both reposition one shared set of includes, like the desktop grid. */
+@media (max-width: 767.98px) {
+  .detail-carousel-grid,
+  .detail-flat-top {
+    --hero-line: calc(50dvh - 4rem);
+    --hero-pad-y: 1.5rem;
+    --hero-gutter-l: max(1rem, var(--safe-left));
+    --hero-gutter-r: max(1rem, var(--safe-right));
+  }
+
+  .detail-mobile-meta {
+    margin-top: 0.25rem;
+    font-size: 0.875rem;
+    color: var(--color-text-muted);
+  }
+
+  .detail-carousel-grid,
+  .detail-flat-top {
+    display: grid;
+    position: relative;
+    grid-template-columns: 40% minmax(0, 1fr);
+    column-gap: 1rem;
+    row-gap: 0;
+    align-items: start;
+  }
+
+  .detail-carousel-grid {
+    grid-template-areas:
+      "poster title"
+      "chips chips"
+      "actions actions"
+      "synopsis synopsis";
+  }
+
+  .detail-carousel-grid__header {
+    display: contents;
+  }
+
+  .detail-carousel-grid__poster,
+  .detail-flat-top__poster {
+    max-width: 250px;
+    margin: 0;
+  }
+
+  .detail-carousel-grid__title,
+  .detail-flat-top__title {
+    grid-area: title;
+    align-self: center;
+    text-align: left;
+  }
+
+  .detail-carousel-grid__title .text-center,
+  .detail-flat-top__title .text-center {
+    text-align: left;
+  }
+
+  .detail-carousel-grid__title [id^="detail-activity-subtitle-slot"] button,
+  .detail-flat-top__title [id^="detail-activity-subtitle-slot"] button {
+    justify-content: flex-start;
+  }
+
+  .detail-carousel-grid__title h1,
+  .detail-flat-top__title h1 {
+    font-size: 1.5rem;
+    line-height: 1.2;
+  }
+
+  .detail-carousel-grid__actions {
+    grid-area: actions;
+    margin-top: 1rem;
+  }
+
+  .detail-carousel-grid__chips {
+    margin-top: 1rem;
+  }
+
+  .detail-flat-top__poster {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .detail-flat-top__title {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .detail-flat-top__info {
+    display: contents;
+  }
+
+  .detail-flat-top__info > :not(.detail-flat-top__title),
+  .detail-flat-top__info > div.flex > * {
+    grid-column: 1 / -1;
+  }
+
+  .detail-flat-top .detail-score-card-shell {
+    order: -1;
+    margin: 1rem 0 0;
+  }
+
+  /* Backdrop hero. The carousel pane stays hidden; only the hero shows. */
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__carousel,
+  .detail-carousel-grid:has(.detail-mobile-hero) #detail-carousel-wrap {
+    display: contents;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-content {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero),
+  .detail-carousel-grid.detail-hero-pending {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: max(0px, calc(var(--hero-line) - var(--hero-pad-y) - 2.75rem)) auto;
+    grid-template-areas:
+      "gap"
+      "title"
+      "chips"
+      "actions"
+      "synopsis";
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__poster,
+  .detail-carousel-grid.detail-hero-pending .detail-carousel-grid__poster {
+    display: none;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__title,
+  .detail-carousel-grid.detail-hero-pending .detail-carousel-grid__title {
+    z-index: 2;
+    text-align: center;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__title .text-center,
+  .detail-carousel-grid.detail-hero-pending .detail-carousel-grid__title .text-center {
+    text-align: center;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__title [id^="detail-activity-subtitle-slot"] button,
+  .detail-carousel-grid.detail-hero-pending .detail-carousel-grid__title [id^="detail-activity-subtitle-slot"] button {
+    justify-content: center;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__title h1,
+  .detail-carousel-grid.detail-hero-pending .detail-carousel-grid__title h1 {
+    font-size: 2.25rem;
+    font-weight: 800;
+    line-height: 1.1;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__title h1 {
+    color: white;
+    text-shadow: 0 2px 8px rgb(0 0 0 / 70%);
+  }
+
+  /* With a logo the heading stays for screen readers and the logo is the title;
+     the year line starts just below the logo's box (6rem tall, centred on the line). */
+  .detail-carousel-grid:has(.detail-mobile-hero__logo) .detail-carousel-grid__title {
+    padding-top: 5.25rem;
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero__logo) .detail-carousel-grid__title h1 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-mobile-meta,
+  .detail-carousel-grid:has(.detail-mobile-hero) [id^="detail-activity-subtitle-slot"] > div {
+    color: white;
+    text-shadow: 0 1px 4px rgb(0 0 0 / 80%);
+  }
+
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__chips,
+  .detail-carousel-grid:has(.detail-mobile-hero) .detail-carousel-grid__actions {
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Same blurred extension as the desktop overview, then fades into the page. */
+  .detail-mobile-hero {
+    position: absolute;
+    z-index: 0;
+    top: calc(-1 * var(--hero-pad-y));
+    right: calc(-1 * var(--hero-gutter-r));
+    left: calc(-1 * var(--hero-gutter-l));
+    height: calc(100dvh - 4rem);
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  .detail-mobile-hero img {
+    position: absolute;
+  }
+
+  .detail-mobile-hero__blur {
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transform: scale(1.15);
+    filter: blur(56px) brightness(0.9);
+    mask-image: linear-gradient(to bottom, #000 0%, #000 45%, rgb(0 0 0 / 70%) 70%, rgb(0 0 0 / 30%) 88%, transparent 100%);
+  }
+
+  /* Faded over its lower 60% so the seam to the blur is hard to find. */
+  .detail-mobile-hero__sharp {
+    top: 0;
+    left: 0;
+    width: 100%;
+    object-fit: cover;
+    height: calc(var(--hero-line) + 9rem);
+    mask-image: linear-gradient(to bottom, #000 0%, #000 38%, rgb(0 0 0 / 85%) 50%, rgb(0 0 0 / 60%) 62%, rgb(0 0 0 / 35%) 74%, rgb(0 0 0 / 15%) 87%, transparent 100%);
+  }
+
+  .detail-mobile-hero__logo {
+    top: var(--hero-line);
+    left: 50%;
+    width: 66%;
+    max-height: 6rem;
+    transform: translate(-50%, -50%);
+    object-fit: contain;
+    filter: drop-shadow(0 2px 8px rgb(0 0 0 / 70%));
+  }
+}
+
+@media (min-width: 640px) and (max-width: 767.98px) {
+  .detail-carousel-grid,
+  .detail-flat-top {
+    --hero-pad-y: 3rem;
+    --hero-gutter-l: max(2rem, var(--safe-left));
+    --hero-gutter-r: max(2rem, var(--safe-right));
+  }
+}
+
 @media (min-width: 768px) {
   /* Default to the pre-carousel arrangement -- poster beside the
      title/chips/synopsis column, carousel pane hidden -- so a page whose
