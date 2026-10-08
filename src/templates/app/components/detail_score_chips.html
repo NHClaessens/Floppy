@@ -8,11 +8,12 @@
 {% if media.score_count is not None or trakt_score or imdb_score or mal_score or opencritic_score or user_medias and current_instance and not public_view|default:False and user.ratings_enabled %}
   <div class="detail-score-card-shell order-2 mt-0 mb-5 w-full sm:order-1 sm:mt-4"
        x-data="{ hasOverflow: false, atStart: true, atEnd: true, updateScroll() { const row = this.$refs.scoreRow; this.hasOverflow = row.scrollWidth > row.clientWidth + 2; this.atStart = row.scrollLeft < 2; this.atEnd = row.scrollLeft + row.clientWidth >= row.scrollWidth - 2 } }"
-       x-init="$nextTick(() => updateScroll())"
+       x-init="$nextTick(() => { updateScroll(); new ResizeObserver(() => updateScroll()).observe($refs.scoreRow) })"
        @resize.window.debounce.100ms="updateScroll()"
        @htmx:afterSwap.window="$nextTick(() => updateScroll())">
   <div class="detail-score-card-row flex w-full items-center justify-start gap-2 sm:flex-wrap"
        x-ref="scoreRow"
+       :class="{ 'detail-score-card-row--fade-left': hasOverflow && !atStart, 'detail-score-card-row--fade-right': hasOverflow && !atEnd }"
        @scroll.passive="updateScroll(); $dispatch('detail-score-row-scroll')">
     {% if media_type == MediaTypes.TV.value or media_type == MediaTypes.SEASON.value %}
       {% include "app/components/detail_progress_card_slot.html" with media=media media_type=media_type current_instance=current_instance public_view=public_view only %}

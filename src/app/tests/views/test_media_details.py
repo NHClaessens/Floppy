@@ -4380,7 +4380,7 @@ class MediaDetailsViewTests(TestCase):
         self.assertContains(response, "1h 30min watched")
         self.assertIn('<div class="mb-3 md:mb-1 text-center md:text-start">', content)
         self.assertIn(
-            'class="flex w-full items-center justify-center gap-0.5 whitespace-nowrap text-[13px] tracking-[-0.01em] md:hidden cursor-pointer"',
+            'class="flex w-full items-center justify-center gap-0.5 whitespace-nowrap text-[13px] tracking-[-0.01em] @max-[26rem]:flex-col md:hidden cursor-pointer"',
             content,
         )
         self.assertIn("1h 30min (1/8)", content)

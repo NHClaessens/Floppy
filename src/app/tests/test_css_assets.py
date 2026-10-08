@@ -103,3 +103,46 @@ class IconSizingContractTests(SimpleTestCase):
             "Inline <svg> needs a width/height attribute or a w-/h-/size- "
             f"class or it fills its container on iOS: {unsized}",
         )
+
+
+class PhoneLayoutCssContractTests(SimpleTestCase):
+    """Phone and unfolded-phone rules that only exist in CSS.
+
+    There is no browser in CI, so these pin the rules a simulator pass asked for.
+    Each pattern must be in input.css and in the committed main.css, so editing
+    the source without rebuilding the output fails here too.
+    """
+
+    RULES = {
+        "hero logo centres on the content box, not the full-bleed hero": (
+            r"left: calc\(50% \+ \(var\(--hero-gutter-l\) - var\(--hero-gutter-r\)\) / 2\)"
+        ),
+        "a touch screen up to 700px tall sizes cards like a phone": (
+            r"\(orientation: landscape\) and \(pointer: coarse\) and "
+            r"\(max-height: 700px\)"
+        ),
+        "card size stops growing at a cap": r"--card-cap: 8\.4rem",
+        "grid tracks are fixed at the cap, not stretched with 1fr": (
+            r"repeat\(auto-fill, min\(calc\([^;]*var\(--card-cap\)\)\) !important"
+        ),
+        "rating chips sit below the action row on phones": (
+            r'"actions actions"\s+"chips chips"\s+"synopsis synopsis"'
+        ),
+        "chip row fades only on the side that has more to scroll to": (
+            r"\.detail-score-card-row--fade-left \{\s+--row-fade-left: transparent"
+        ),
+        "phone chip cards only reveal on hover where hover exists": (
+            r"@media \(hover: hover\) \{\s+:is\(\.detail-carousel-grid, \.detail-flat-top\) "
+            r"\.detail-provider-score-card\.group:hover"
+        ),
+        "unfolded portrait keeps the poster beside the info": (
+            r"@media \(min-width: 600px\) and \(max-width: 767\.98px\)"
+        ),
+    }
+
+    def test_rules_are_in_source_and_build(self):
+        css_dir = Path(settings.BASE_DIR) / "static" / "css"
+        for name in ("input.css", "main.css"):
+            css = (css_dir / name).read_text(encoding="utf-8")
+            for rule, pattern in self.RULES.items():
+                self.assertRegex(css, pattern, f"{name}: {rule}")
