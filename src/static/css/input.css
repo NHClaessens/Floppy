@@ -77,6 +77,9 @@
 }
 
 :root {
+  /* Screen edges the camera or system UI covers; 0 on screens without them. */
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
   --color-surface: #2a2f35;
   --color-surface-strong: #39404b;
   --color-surface-hover: #454d5a;
@@ -3169,6 +3172,29 @@ html.light .theme-toggle-icon-moon {
     margin-inline: auto;
     width: 100%;
     overflow-x: hidden;
+  }
+}
+
+/* A phone turned sideways keeps the card size it had upright: sized from the
+   short side of the screen, so the extra width shows more cards, not bigger ones.
+   100lvh ignores Safari's collapsing toolbar, so cards do not resize on scroll. */
+@media (orientation: landscape) and (max-width: 768px), (orientation: landscape) and (pointer: coarse) and (max-height: 520px) {
+  body {
+    --card-cols: 3;
+    --card-short-side: min(100vw, 100lvh);
+  }
+
+  body[data-mobile-grid="comfortable"] {
+    --card-cols: 2;
+  }
+
+  [data-mobile-grid] .media-grid,
+  [data-mobile-grid] .detail-media-grid {
+    grid-template-columns: repeat(auto-fill, minmax(calc((var(--card-short-side) - 2rem - (var(--card-cols) - 1) * 0.75rem) / var(--card-cols)), 1fr)) !important;
+  }
+
+  [data-mobile-grid] .home-row-card {
+    width: calc((var(--card-short-side) - 2rem - (var(--card-cols) - 1) * 1rem) / var(--card-cols)) !important;
   }
 }
 
