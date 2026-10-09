@@ -318,6 +318,55 @@ class KoreaderImporterTests(TestCase):
         self.assertEqual(media.status, Status.IN_PROGRESS.value)
         self.assertEqual(media.progress, 384)
 
+    @patch("integrations.imports.koreader.KoreaderClient.list_documents")
+    @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
+    def test_auto_match_relinks_when_document_hash_changes(
+        self,
+        mock_probe,
+        mock_list,
+    ):
+        old_hash = "1" * 32
+        mock_probe.return_value = True
+        mock_list.return_value = [
+            {
+                "document": DOCUMENT_HASH,
+                "percentage": 0.5,
+                "title": "Dune",
+                "authors": "Frank Herbert",
+                "timestamp": 1_700_000_000,
+            },
+        ]
+        KoreaderDocumentLink.objects.create(
+            user=self.user,
+            item=self.item,
+            document_hash=old_hash,
+        )
+        Book.objects.create(
+            user=self.user,
+            item=self.item,
+            status=Status.IN_PROGRESS.value,
+            progress=10,
+        )
+
+        counts, warnings = KoreaderImporter(self.user).import_data()
+
+        self.assertEqual(counts.get(MediaTypes.BOOK.value), 1)
+        self.assertEqual(counts["updated"], 1)
+        self.assertEqual(warnings, "")
+        self.assertFalse(
+            KoreaderDocumentLink.objects.filter(
+                user=self.user,
+                document_hash=old_hash,
+            ).exists(),
+        )
+        self.assertTrue(
+            KoreaderDocumentLink.objects.filter(
+                user=self.user,
+                document_hash=DOCUMENT_HASH,
+                item=self.item,
+            ).exists(),
+        )
+
     @patch("integrations.imports.koreader.KoreaderClient.probe_list_support")
     @patch("integrations.imports.koreader.KoreaderClient.get_progress")
     def test_near_complete_progress_stays_in_progress_below_threshold(

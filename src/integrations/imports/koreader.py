@@ -25,6 +25,7 @@ from app.providers import services
 from app.services.synced_status import keep_held_status
 from integrations import connection_health, import_progress
 from integrations.imports.helpers import MediaImportError, decrypt_or_raise
+from integrations.koreader_links import save_document_link
 from integrations.models import KoreaderAccount, KoreaderDocumentLink
 from integrations.safe_fetch import send_to_self_hosted
 
@@ -399,11 +400,7 @@ class KoreaderImporter:
                     f"({title or 'unknown title'})",
                 )
                 return None
-            KoreaderDocumentLink.objects.update_or_create(
-                user=self.user,
-                document_hash=document_hash,
-                defaults={"item": item},
-            )
+            save_document_link(self.user, item, document_hash)
 
         number_of_pages = self._resolve_number_of_pages(item)
 
