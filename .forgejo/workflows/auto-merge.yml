@@ -3,7 +3,13 @@ name: Auto-Merge Upstream with LLM Conflict Resolution
 "on":
   schedule:
     - cron: '0 * * * *'  # Runs hourly
-  workflow_dispatch:     # Manual trigger
+  workflow_dispatch:
+    inputs:
+      force_docker_build:
+        description: Build and push the image even when already up to date with upstream
+        required: false
+        default: false
+        type: boolean
 
 # Configure in Forgejo UI:
 #   Variables: UPSTREAM_REPO_URL, UPSTREAM_BRANCH, TARGET_BRANCH,
@@ -117,7 +123,11 @@ jobs:
         run: git push origin "${{ vars.TARGET_BRANCH }}"
 
       - name: Build and Push Docker Image
-        if: success() && steps.check.outputs.up_to_date != 'true'
+        if: >-
+          success() && (
+            steps.check.outputs.up_to_date != 'true' ||
+            inputs.force_docker_build == true
+          )
         run: |
           if ! docker info >/dev/null 2>&1; then
             echo "::error::No Docker daemon in this job (need container.docker_host: automount)."
